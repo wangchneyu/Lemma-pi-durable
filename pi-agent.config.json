@@ -1,0 +1,28 @@
+{
+	"orchestrator": {
+		"type": "anthropic-compatible",
+		"modelId": "claude-sonnet-5-5",
+		"apiKeyEnv": ["PI_ORCHESTRATOR_API_KEY"],
+		"apiKeyFromClaudeSettings": true,
+		"maxTurns": 40
+	},
+	"workdir": ".",
+	"storage": "./data/session.sqlite",
+	"agents": {
+		"claude": {
+			"enabled": true,
+			"extraArgs": ["--permission-mode", "acceptEdits"],
+			"timeoutMinutes": 30
+		},
+		"codex": {
+			"enabled": true,
+			"extraArgs": ["-c", "sandbox_mode=\"workspace-write\""],
+			"timeoutMinutes": 30
+		},
+		"gemini": {
+			"enabled": true,
+			"extraArgs": ["--approval-mode", "auto_edit", "--skip-trust", "-m", "gemini-3.5-flash-lite"],
+			"timeoutMinutes": 30
+		}
+	}
+}

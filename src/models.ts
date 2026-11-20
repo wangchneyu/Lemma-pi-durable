@@ -1,0 +1,68 @@
+// 总调度自己用的"大脑"模型。CLI agent 走各自的登录；总调度需要一个 API 模型来做拆解和汇总。
+import { createModels, createProvider, type Model, type MutableModels } from "@earendil-works/pi-ai";
+import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { claudeSettingsEnv, type OrchestratorConfig } from "./config.ts";
+
+export interface OrchestratorModel {
+	models: MutableModels;
+	ref: { provider: string; modelId: string };
+	describe: string;
+}
+
+function resolveKey(config: OrchestratorConfig): string | undefined {
+	for (const name of config.apiKeyEnv ?? []) {
+		const value = process.env[name];
+		if (value) return value;
+	}
+	if (config.apiKeyFromClaudeSettings) return claudeSettingsEnv().token;
+	return undefined;
+}
+
+export function createOrchestratorModel(config: OrchestratorConfig): OrchestratorModel {
+	if (config.type === "builtin") {
+		if (!config.provider) throw new Error("orchestrator.type=builtin 时必须填写 orchestrator.provider（例如 anthropic、openai、google）");
+		const models = builtinModels();
+		return { models, ref: { provider: config.provider, modelId: config.modelId }, describe: `${config.provider}/${config.modelId}` };
+	}
+
+	const id = "orchestrator";
+	const api = config.type === "anthropic-compatible" ? "anthropic-messages" : "openai-completions";
+	const baseUrl =
+		config.baseUrl ??
+		(config.type === "anthropic-compatible" ? (claudeSettingsEnv().baseUrl ?? "https://api.anthropic.com") : undefined);
+	if (!baseUrl) throw new Error("orchestrator.type=openai-compatible 时必须填写 orchestrator.baseUrl");
+
+	const model: Model<typeof api> = {
+		id: config.modelId,
+		name: config.modelId,
+		api,
+		provider: id,
+		baseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: config.contextWindow ?? 200_000,
+		maxTokens: config.maxTokens ?? 16_000,
+	};
+	const provider = createProvider({
+		id,
+		name: "Orchestrator",
+		baseUrl,
+		auth: {
+			apiKey: {
+				name: "Orchestrator API key",
+				resolve: async () => {
+					const key = resolveKey(config);
+					return key ? { auth: { apiKey: key }, source: "pi-agent config" } : undefined;
+				},
+			},
+		},
+		models: [model],
+		api: config.type === "anthropic-compatible" ? anthropicMessagesApi() : openAICompletionsApi(),
+	});
+	const models = createModels();
+	models.setProvider(provider);
+	return { models, ref: { provider: id, modelId: config.modelId }, describe: `${config.type} ${new URL(baseUrl).host} / ${config.modelId}` };
+}
