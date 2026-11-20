@@ -1,5 +1,5 @@
 // 打开 Pi Durable Harness：SQLite 持久化 + 本机 agent 工具 + 总调度模型。
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Context } from "@earendil-works/chord/context";
 import type { MutableModels } from "@earendil-works/pi-ai";
@@ -14,6 +14,42 @@ export interface App {
 	agents: AgentAvailability[];
 }
 
+/**
+ * Pi Durable 要求一个存储同一时间只有一个进程写入（没有跨进程锁）。
+ * 终端模式和网页服务共用同一个存储，这里用 pid 锁文件防止两边同时打开。
+ */
+function acquireLock(storagePath: string): () => void {
+	const lock = `${storagePath}.lock`;
+	if (existsSync(lock)) {
+		const pid = Number(readFileSync(lock, "utf8"));
+		let alive = false;
+		if (pid > 0 && pid !== process.pid) {
+			try {
+				process.kill(pid, 0);
+				alive = true;
+			} catch {
+				alive = false;
+			}
+		}
+		if (alive) {
+			throw new Error(`会话存储 ${storagePath} 正被进程 ${pid} 使用（终端模式或网页服务只能同时开一个）。`);
+		}
+	}
+	writeFileSync(lock, String(process.pid));
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		try {
+			if (readFileSync(lock, "utf8") === String(process.pid)) rmSync(lock);
+		} catch {
+			/* 已删除 */
+		}
+	};
+	process.once("exit", release);
+	return release;
+}
+
 export async function openApp(
 	config: AppConfig,
 	orchestrator: { models: MutableModels; ref: { provider: string; modelId: string } },
@@ -25,6 +61,7 @@ export async function openApp(
 	registry.install(extension);
 
 	if (!options.memory) mkdirSync(dirname(config.storage), { recursive: true });
+	const releaseLock = options.memory || options.readOnly ? () => {} : acquireLock(config.storage);
 	const storage = options.memory ? new MemoryStorage() : await openNodeSqliteStorage(config.storage);
 
 	const harness = await Harness.open(
@@ -46,6 +83,7 @@ export async function openApp(
 		},
 		context,
 	);
+	void harness.closed.then(releaseLock, releaseLock);
 
 	const root = await harness.root(context, {
 		agent: { model: orchestrator.ref, maxTurns: config.orchestrator.maxTurns ?? 40, cwd: config.workdir },

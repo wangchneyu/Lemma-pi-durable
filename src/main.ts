@@ -11,7 +11,10 @@ import { colors as c, follow } from "./printer.ts";
 const context = BACKGROUND_CONTEXT;
 const config = loadConfig(process.env.PI_AGENT_CONFIG ?? "pi-agent.config.json");
 const orchestrator = createOrchestratorModel(config.orchestrator);
-const { harness, root, agents } = await openApp(config, orchestrator, context);
+const { harness, root, agents } = await openApp(config, orchestrator, context).catch((error: Error) => {
+	console.error(`启动失败：${error.message}`);
+	process.exit(1);
+});
 const stopFollowing = await follow(root, context);
 harness.resume(); // 上次进程中断时没跑完的任务，从断点继续
 

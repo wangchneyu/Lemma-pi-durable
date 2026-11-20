@@ -37,6 +37,31 @@ npm start
 npm start -- "让 Codex 实现 X，再让 Claude 审查"
 ```
 
+### 网页界面
+
+```bash
+npm run web
+```
+
+打开 http://127.0.0.1:8787 。界面上能看到：
+- 对话时间线：每次派活显示为一张派工单，带实时滚动的日志和计时
+- 并行执行的多个成员
+- 总调度的流式回答
+- 侧栏的成员状态、CLI 会话（点击复制 ID）和用量
+
+界面支持中止本轮、开始新的上下文、明暗主题切换，手机宽度下也能用。
+
+不想花钱、只想看看界面或调试时，用演示模式（假模型 + 模拟 CLI，地址 http://127.0.0.1:8788）：
+
+```bash
+npm run web:demo
+```
+
+- 服务只监听 `127.0.0.1`，并校验 Host 和 Origin，其他网站无法向它提交任务。不要把它暴露到局域网：它能驱动 agent 改文件、执行命令。
+- 终端模式和网页服务共用 `data/session.sqlite`，**同一时间只能开一个**（有进程锁保护，第二个会拒绝启动）。演示模式用独立的 `data/demo.sqlite`。
+
+### 终端模式
+
 交互模式里的命令：`/agents` 查看成员、`/usage` 查看用量、`/abort` 中止本轮、`/new` 开始新的上下文、`/exit` 退出；Ctrl+C 中止正在进行的一轮。
 
 会话存储在 `data/session.sqlite`。重启后历史和没跑完的任务都还在。
@@ -68,10 +93,11 @@ npm start -- "让 Codex 实现 X，再让 Claude 审查"
 npm test
 ```
 
-用模拟 CLI（`test/fake-agent.mjs`）和 pi-ai 的 faux 模型做测试，不调用真实 API：
+用模拟 CLI（`scripts/fake-agent.mjs`）和 pi-ai 的 faux 模型做测试，不调用真实 API：
 
-- `test/smoke.ts`：并行派活、汇总、会话续接、错误目录处理
+- `test/smoke.ts`：并行派活、汇总、会话续接、续接时回到原目录、错误目录处理
 - `test/crash.ts`：成员执行到一半时强杀整个进程树，重启后续接同一会话并完成
+- `test/web.ts`：启动演示模式的网页服务，检查接口、Host/Origin 校验、路径穿越、SSE 实时推送的完整流程
 
 ## 代码结构
 
@@ -83,4 +109,10 @@ npm test
 | `src/models.ts` | 总调度模型 |
 | `src/app.ts` | 打开 Harness（SQLite + 工具 + 模型） |
 | `src/printer.ts` | 终端实时显示进度 |
-| `src/main.ts` | 入口（交互 / 单次） |
+| `src/main.ts` | 终端入口（交互 / 单次） |
+| `src/server.ts` | 网页后端：REST 接口 + SSE 实时推送 + 静态页面 |
+| `src/view.ts` | 把对话条目和实时状态转成前端用的 JSON |
+| `src/demo.ts` | 演示模式：脚本化假模型 + 模拟 CLI |
+| `web/` | 前端单页（无构建步骤、无依赖） |
+| `scripts/check-agents.ts` | 实测三个 CLI 能否调通 |
+| `scripts/fake-agent.mjs` | 模拟 CLI，测试和演示模式共用 |

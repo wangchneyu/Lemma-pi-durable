@@ -9,7 +9,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { AssistantEntry, type Conversation } from "@earendil-works/pi-durable";
 import { loadConfig, type AppConfig } from "../src/config.ts";
 
-export const FAKE_AGENT = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
+export const FAKE_AGENT = fileURLToPath(new URL("../scripts/fake-agent.mjs", import.meta.url));
 
 export function testConfig(dir = mkdtempSync(join(tmpdir(), "pi-agent-test-"))): AppConfig {
 	const config = loadConfig(join(dir, "missing.json"));
