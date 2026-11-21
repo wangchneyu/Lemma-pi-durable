@@ -16,6 +16,7 @@ import { Board, boardTasks, type BoardState } from "./board.ts";
 import { readConvention, scanConventions } from "./conventions.ts";
 import { diffText } from "./git.ts";
 import { Jobs, type JobRecord, type JobsState } from "./jobs.ts";
+import { LEAD_TOOL } from "./lead.ts";
 import { AgentSessions, RunBudget } from "./tools.ts";
 import { Learning } from "./learning.ts";
 import { parseToolResult, toViewItem, toViewLive, type Dispatch, type ViewItem, type ViewLive } from "./view.ts";
@@ -79,18 +80,43 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	const dispatches = new Map<string, Dispatch>(); // key -> 派工
 	const latestByCall = new Map<string, string>(); // callId -> 最近一次使用它的派工 key
 	let entryCount = 0;
-	function ingest(entry: EntryRecord) {
-		entryCount++;
+	// ---------- 子调度：总调度交出去的子目标，以及子调度在自己子对话里派的工 ----------
+	type Lead = { key: string; callId: string; name: string; goal: string; taskId?: string; at?: number; endAt?: number; status: Dispatch["status"]; conversationId?: string; dispatches?: number };
+	const leads = new Map<string, Lead>();
+	const latestLeadByCall = new Map<string, string>();
+	const childWatches: { stop(): Promise<unknown> }[] = [];
+	const attached = new Set<string>();
+
+	/** lead：这条记录来自哪个子调度的子对话（总调度自己的记录不传） */
+	function ingest(entry: EntryRecord, lead?: string) {
+		if (!lead) entryCount++;
 		const item = toViewItem(entry);
 		if (!item) return;
+		const scope = lead ? `${lead}>` : "";
 		if (item.type === "assistant") {
 			for (const call of item.toolCalls) {
+				if (!lead && call.name === LEAD_TOOL) {
+					const key = `${item.id}:${call.id}`;
+					if (leads.has(key)) continue;
+					latestLeadByCall.set(call.id, key);
+					leads.set(key, {
+						key,
+						callId: call.id,
+						name: typeof call.args.name === "string" ? call.args.name : "子调度",
+						goal: typeof call.args.goal === "string" ? call.args.goal : "",
+						taskId: typeof call.args.task_id === "string" ? call.args.task_id : undefined,
+						at: item.at,
+						status: "open",
+					});
+					continue;
+				}
 				if (!call.name.startsWith("ask_")) continue; // 只有派给成员的才算派工（分工表工具不算）
-				const key = `${item.id}:${call.id}`;
+				const key = `${scope}${item.id}:${call.id}`;
 				if (dispatches.has(key)) continue;
-				latestByCall.set(call.id, key);
+				latestByCall.set(`${scope}${call.id}`, key);
 				dispatches.set(key, {
 					key,
+					...(lead ? { lead } : {}),
 					callId: call.id,
 					agent: call.name.replace(/^ask_/, ""),
 					task: typeof call.args.task === "string" ? call.args.task : JSON.stringify(call.args),
@@ -104,13 +130,23 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				});
 			}
 		} else if (item.type === "tool") {
+			if (!lead && item.name === LEAD_TOOL) {
+				const l = leads.get(latestLeadByCall.get(item.callId) ?? "");
+				if (!l) return;
+				const details = item.details as any;
+				l.status = item.isError ? (/<harness>[\s\S]*aborted/i.test(item.text) ? "aborted" : "error") : "done";
+				l.endAt = item.at;
+				if (typeof details?.dispatches === "number") l.dispatches = details.dispatches;
+				if (typeof details?.conversationId === "string") attachLead(l, details.conversationId);
+				return;
+			}
 			if (!item.name.startsWith("ask_")) return;
-			const known = latestByCall.get(item.callId);
+			const known = latestByCall.get(`${scope}${item.callId}`);
 			let d = known ? dispatches.get(known) : undefined;
 			if (!d) {
 				// 派工消息不在历史里（不应发生，兜底）
-				const key = `r${item.id}:${item.callId}`;
-				d = { key, callId: item.callId, agent: item.name.replace(/^ask_/, ""), task: "", resume: null, status: "open" };
+				const key = `${scope}r${item.id}:${item.callId}`;
+				d = { key, ...(lead ? { lead } : {}), callId: item.callId, agent: item.name.replace(/^ask_/, ""), task: "", resume: null, status: "open" };
 				dispatches.set(key, d);
 			}
 			const details = item.details as any;
@@ -135,6 +171,39 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				d.durationMs = undefined;
 			}
 		}
+	}
+
+	/** 找到子调度的子对话后：读它已有的记录，再跟着它的新记录（派工汇总、拓扑都会算上） */
+	let onLeadActivity = () => {};
+	function attachLead(l: Lead, conversationId: string) {
+		l.conversationId = conversationId;
+		if (attached.has(conversationId)) return;
+		attached.add(conversationId);
+		void (async () => {
+			const child = await harness.conversation(conversationId as any, context);
+			if (!child) return;
+			let cursor: any;
+			do {
+				const page = await child.entries({ order: "ascending" } as any, 500, cursor, context);
+				for (const entry of page.items) ingest(entry, l.key);
+				cursor = page.next;
+			} while (cursor);
+			const watch = await child.watch(context);
+			const seenChild = new Set(watch.value.entries.map((e) => String(e.id)));
+			watch.start(async (call) => {
+				if (call.kind !== "value") return;
+				let fresh = false;
+				for (const entry of call.value.entries) {
+					if (seenChild.has(String(entry.id))) continue;
+					seenChild.add(String(entry.id));
+					ingest(entry, l.key);
+					fresh = true;
+				}
+				if (fresh) onLeadActivity();
+			});
+			childWatches.push(watch);
+			onLeadActivity();
+		})().catch(() => {});
 	}
 
 	// ---------- 后台派工：Pi Durable 文档里的记录，叠加到派工汇总上 ----------
@@ -234,6 +303,12 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		}
 		if (fresh.length > 0) broadcast("items", fresh);
 		const live = toViewLive(call.value.docs["pi.live"], call.value.docs["pi.inbox"]);
+		for (const slot of live.tools) {
+			const conv = (slot.details as any)?.conversationId;
+			if (slot.name !== LEAD_TOOL || typeof conv !== "string") continue;
+			const l = leads.get(latestLeadByCall.get(slot.callId) ?? "");
+			if (l && !l.conversationId) attachLead(l, conv);
+		}
 		const json = JSON.stringify(live);
 		if (json !== lastLiveJson) {
 			lastLive = live;
@@ -248,6 +323,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	const onProject = () => broadcast("project", null);
 	project.on("change", onProject);
 	// 后台派工开工 / 结束：刷新记录并通知页面；成员的实时输出直接转发
+	onLeadActivity = () => broadcast("lead", null);
 	const onJobs = () => {
 		void refreshJobs().then(() => broadcast("jobs", Object.values(jobs)));
 	};
@@ -329,6 +405,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				running,
 				status: d.status,
 				mode: d.job ? "async" : "sync",
+				lead: d.lead,
 				job: d.job ?? null,
 				task: d.task.replace(/\s+/g, " ").trim().slice(0, 140),
 				taskId: d.taskId ?? null,
@@ -339,9 +416,42 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				cost: d.cost ?? null,
 			};
 		});
+		// 子调度：每个一条泳道，时间条覆盖它从接手到汇报的整段
+		const leadBars = [...leads.values()]
+			.filter((l) => l.at !== undefined && (l.at >= (list[0]?.at ?? 0) || bars.some((b) => b.lead === l.key)))
+			.map((l) => {
+				const running = l.status === "open";
+				const end = l.endAt ?? (running ? now : l.at!);
+				const laneId = `lead:${l.key}`;
+				lanes.set(laneId, { id: laneId, agent: "lead", session: l.conversationId ?? null, rounds: 1, first: l.at!, last: end, running, lastTask: l.goal.slice(0, 80), tasks: l.taskId ? [l.taskId] : [], model: l.name });
+				return {
+					key: l.key,
+					lane: laneId,
+					agent: "lead",
+					lead: undefined as string | undefined,
+					start: l.at!,
+					end,
+					running,
+					status: l.status,
+					mode: "lead",
+					job: null,
+					task: `${l.name}：${l.goal.replace(/\s+/g, " ").trim().slice(0, 120)}`,
+					taskId: l.taskId ?? null,
+					changeId: null,
+					basedOn: null,
+					resume: null,
+					model: null,
+					cost: null,
+				};
+			});
 		// 依赖：基于某次改动开工的派工 ← 产出那次改动的派工
 		const byChange = new Map(bars.filter((b) => b.changeId).map((b) => [b.changeId!, b.key]));
-		const links = bars.filter((b) => b.basedOn && byChange.has(b.basedOn)).map((b) => ({ from: byChange.get(b.basedOn!)!, to: b.key, change: b.basedOn }));
+		const links: { from: string; to: string; change?: string | null; type: "based_on" | "spawn" }[] = [
+			...bars.filter((b) => b.basedOn && byChange.has(b.basedOn)).map((b) => ({ from: byChange.get(b.basedOn!)!, to: b.key, change: b.basedOn, type: "based_on" as const })),
+			// 子调度 → 它派的工
+			...bars.filter((b) => b.lead && leads.has(b.lead)).map((b) => ({ from: b.lead!, to: b.key, type: "spawn" as const })),
+		];
+		bars.push(...(leadBars as any[]));
 		// 同一时刻最多有几个派工在跑
 		const edges = bars.flatMap((b) => [
 			{ t: b.start, d: 1 },
@@ -354,7 +464,10 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		return {
 			now,
 			orchestrator: { model: orchestrator.info?.modelId ?? config.orchestrator.modelId, busy: live.busy, turns: live.turns },
-			members: agents.map((a) => ({ kind: a.kind, label: ADAPTERS[a.kind].label, available: a.available })),
+			members: [
+				...agents.map((a) => ({ kind: a.kind, label: ADAPTERS[a.kind].label, available: a.available })),
+				...(leads.size ? [{ kind: "lead", label: "子调度", available: true }] : []),
+			],
 			lanes: [...lanes.values()].map((l) => ({ ...l, known: l.session ? !!sessions[l.session] : false })),
 			bars,
 			links,
@@ -668,6 +781,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			changes.off("change", onChange);
 			project.off("change", onProject);
 			app.jobs.off("change", onJobs);
+			for (const w of childWatches) await w.stop().catch(() => {});
 			app.jobs.off("output", onJobOutput);
 			for (const res of clients) res.end();
 			clients.clear();

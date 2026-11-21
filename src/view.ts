@@ -117,6 +117,8 @@ export interface Dispatch {
 	taskId?: string;
 	/** 后台派工的编号（background: true） */
 	job?: string;
+	/** 由哪个子调度派出（子调度那次调用的键）；总调度直接派的没有 */
+	lead?: string;
 }
 
 /** 解析工具结果：去掉末尾的 [agent: … | 耗时: … | 花费: …]，识别 Pi Durable 写入的 <harness> 说明 */

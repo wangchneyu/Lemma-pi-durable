@@ -40,6 +40,8 @@ export type JobRecord = {
 	waiter?: { task: string; key: string };
 	/** 谁取消的 */
 	cancelledBy?: "user" | "orchestrator";
+	/** 开这个后台派工的对话：总调度，或某个子调度 */
+	conversation?: string;
 };
 
 export type JobsState = { jobs: Record<string, JobRecord>; nextId: number; byCall: Record<string, string> };

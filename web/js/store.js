@@ -225,6 +225,12 @@ export function connect() {
 	});
 	// 目标或分工表变了
 	es.addEventListener("project", () => refreshState(100));
+	// 子调度在自己的子对话里派了工 / 有了进展
+	es.addEventListener("lead", () => {
+		refreshDispatches(200);
+		refreshState(600);
+		emit("dispatches");
+	});
 	// 改动记录变了：派工收尾、终端里 /apply /drop /clean
 	es.addEventListener("change", () => {
 		refreshChanges(150);

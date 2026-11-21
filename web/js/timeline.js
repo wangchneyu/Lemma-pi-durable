@@ -20,6 +20,9 @@ function boardOpText(call) {
 		const ids = Array.isArray(a.ids) && a.ids.length ? a.ids.join("、") : "所有进行中的后台派工";
 		return `<span class="op-icon">⏳</span><b>等后台结果</b><span>${esc(ids)} · ${a.mode === "all" ? "全部做完才继续" : "做完一个就先处理"}</span>`;
 	}
+	if (call.name === "delegate_to_lead") {
+		return `<span class="op-icon">🧭</span><b>交给子调度「${esc(a.name ?? "子调度")}」${a.task_id ? ` · ${esc(a.task_id)}` : ""}</b><span>${esc(String(a.goal ?? "").slice(0, 140))}${a.scope ? `（范围：${esc(String(a.scope).slice(0, 60))}）` : ""}</span>`;
+	}
 	if (call.name === "cancel_job") return `<span class="op-icon">✕</span><b>取消后台派工 ${esc(a.id ?? "")}</b><span>改动留在分支里，任务退回待办</span>`;
 	return `<span class="op-icon">⚙</span><b>${esc(call.name)}</b>`;
 }

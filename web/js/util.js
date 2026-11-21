@@ -2,7 +2,7 @@
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-export const AGENT_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", deepseek: "DeepSeek" };
+export const AGENT_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", deepseek: "DeepSeek", lead: "子调度" };
 export const KINDS = ["claude", "codex", "gemini", "deepseek"];
 export const SLOT_LABEL = { pending: "排队", running: "执行中", sleeping: "等待中", waiting: "等待中", done: "完成" };
 export const STATUS_LABEL = { open: "无结果", running: "执行中", done: "完成", error: "失败", aborted: "已中止", interrupted: "被中断" };
@@ -32,6 +32,7 @@ export function kindOf(toolName) {
 	return String(toolName ?? "").replace(/^ask_/, "");
 }
 export function agentColor(kind) {
+	if (kind === "lead") return "var(--lead)";
 	return KINDS.includes(kind) ? `var(--${kind})` : "var(--muted)";
 }
 

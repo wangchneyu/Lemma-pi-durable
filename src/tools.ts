@@ -23,6 +23,7 @@ import {
 } from "./dispatch.ts";
 import { clip, JOB_REPORT_ENTRY, JOB_REQUEST_PREFIX, JobDone, jobReport, Jobs, type JobHub, type JobRecord, type JobsState } from "./jobs.ts";
 import { managedDispatch } from "./repair.ts";
+import { createLeadTool, LEAD_TOOL } from "./lead.ts";
 
 export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
@@ -262,6 +263,7 @@ function createAgentTool(kind: AgentKind, command: string[], deps: DispatchDeps,
 					agent: kind,
 					callId: api.callId,
 					piTask: String(piTask),
+					conversation: String(api.conversationId),
 					task: args.task,
 					taskId: args.task_id,
 					model,
@@ -393,11 +395,12 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 					owner: opt(str({ description: "指定成员：claude / codex / gemini；不填按角色" })),
 					deps: opt(arr(str(), { description: "依赖的任务" })),
 					detail: opt(str({ description: "补充说明" })),
+					parent: opt(str({ description: "属于哪项上级任务（子调度拆子任务时传它负责的任务编号）" })),
 				}),
 			),
 		}),
 		replay: "safe",
-		execute: async (args: { tasks: { title: string; acceptance?: string; role?: string; owner?: string; deps?: string[]; detail?: string }[] }, api, context) => {
+		execute: async (args: { tasks: { title: string; acceptance?: string; role?: string; owner?: string; deps?: string[]; detail?: string; parent?: string }[] }, api, context) => {
 			const { result } = await commitBoard(project, toolIO(api, context), (b) => {
 				// 同一次调用重放时不重复建任务
 				const done = (b as any).calls?.[api.callId] as string[] | undefined;
@@ -415,6 +418,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 						owner: t.owner,
 						status: "todo" as TaskStatus,
 						deps,
+						parent: t.parent,
 						acceptance: t.acceptance,
 						notes: [],
 						dispatches: [],
@@ -514,6 +518,8 @@ export function createLocalAgentsExtension(
 		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
 		...createJobTools(hub),
 		...createBoardTools(config, project, changes),
+		// 子调度：只给总调度；子调度自己的对话里会去掉它（只有一层）
+		...(config.lead.enabled ? [createLeadTool(deps)] : []),
 	];
 	const available = new Set(agents.filter((a) => a.available).map((a) => a.kind));
 	const roster = agents
@@ -557,6 +563,11 @@ export function createLocalAgentsExtension(
 						"4. 选模型：按任务难度传 model。简单、机械的活用［经济］，日常开发用［标准］，复杂设计、跨模块改动、疑难问题才用［强力］。不确定就不传，用默认（角色配置里写了模型的优先用它）。",
 						"5. 成员完成后任务会变成「待验收」：对照验收标准核对（必要时派审查角色），用 update_task 标完成或打回并写明原因。",
 						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
+						...(config.lead.enabled
+							? [
+									`6b. 子调度（${LEAD_TOOL}）：目标很大、能分成几块相对独立的子目标时（比如前端 / 后端 / 数据），把每块整个交给一个子调度：给出子目标、范围和验收标准，它会自己拆任务、派成员、验收后汇报给你。几个子调度可以在同一轮里并行。小任务直接派成员，不要用子调度。子调度汇报后，你仍要对照验收标准核对。`,
+								]
+							: []),
 						"7. 最后用中文向用户汇报：按任务编号说明谁做了什么、用了什么模型、结果、改动编号、还有什么没完成或有风险。",
 						...(config.autonomy.enabled ? [
 							`自动验收与修复已启用：由执行层运行配置中的检查，失败时最多修复 ${config.autonomy.maxRepairAttempts} 次。收到“停止重试”时不要再派相同任务，汇报失败证据和下一步。`,

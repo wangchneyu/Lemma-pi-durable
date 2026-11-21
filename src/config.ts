@@ -122,6 +122,8 @@ export interface AppConfig {
 		resultMaxChars: number;
 		checks: { name: string; command: string; args: string[]; timeoutSeconds?: number }[];
 	};
+	/** 子调度：总调度把较大的子目标整块交给子负责人（Pi Durable 子对话，同模型、同派工工具，只有一层） */
+	lead: { enabled: boolean };
 	orchestrator: OrchestratorConfig;
 	workdir: string;
 	storage: string;
@@ -136,6 +138,7 @@ export interface AppConfig {
 }
 
 const DEFAULTS: AppConfig = {
+	lead: { enabled: true },
 	autonomy: { enabled: false, maxRepairAttempts: 2, resultMaxChars: 4000, checks: [] },
 	orchestrator: {
 		type: "anthropic-compatible",
@@ -278,6 +281,7 @@ export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 		isolation: { ...DEFAULTS.isolation, ...(raw.isolation ?? {}) },
 		budget: { ...DEFAULTS.budget, ...(raw.budget ?? {}) },
 		autonomy: { ...DEFAULTS.autonomy, ...(raw.autonomy ?? {}) },
+		lead: { ...DEFAULTS.lead, ...(raw.lead ?? {}) },
 		roles: raw.roles ?? DEFAULTS.roles,
 		web: { ...DEFAULTS.web, ...(raw.web ?? {}) },
 	};

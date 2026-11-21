@@ -22,6 +22,7 @@
 	--codex: #3ecfa5;
 	--gemini: #8b97ff;
 	--deepseek: #4fb3e8;
+	--lead: #e0a64a;
 	--orch: var(--signal);
 
 	--radius: 10px;
@@ -46,6 +47,7 @@
 	--codex: #138a6a;
 	--gemini: #4b57d6;
 	--deepseek: #1f7fb5;
+	--lead: #a86f12;
 	--shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 10px 24px -18px rgba(60, 40, 10, 0.35);
 	color-scheme: light;
 }
@@ -68,6 +70,7 @@
 		--codex: #138a6a;
 		--gemini: #4b57d6;
 	--deepseek: #1f7fb5;
+	--lead: #a86f12;
 		--shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 10px 24px -18px rgba(60, 40, 10, 0.35);
 		color-scheme: light;
 	}
@@ -3378,4 +3381,24 @@ pre {
 .topo-axis .gap-t {
 	font-size: 9.5px;
 	fill: var(--muted);
+}
+
+/* 子调度 */
+.topo-links path.spawn {
+	stroke: var(--lead);
+	stroke-dasharray: 2 3;
+	opacity: 0.8;
+}
+.topo-bar.lead .body {
+	fill: color-mix(in srgb, var(--lead) 22%, var(--panel));
+	stroke: var(--lead);
+	stroke-width: 1.6;
+}
+.topo-bar.lead text {
+	fill: var(--ink);
+}
+.lg.spawn {
+	height: 0;
+	border-top: 1.5px dotted var(--lead);
+	border-radius: 0;
 }

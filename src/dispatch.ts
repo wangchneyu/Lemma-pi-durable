@@ -15,6 +15,9 @@ import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
 import { addWorktree, commitAll, git, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
 import { Learning, relevantLessons } from "./learning.ts";
 import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
+
+/** 子调度的提交前缀（和 lead.ts 一致；放在这里避免循环引用） */
+const LEAD_PREFIX = "pi-agent:lead:";
 import { memberInstructions, runApiMember, type ExecOutcome } from "./api-member.ts";
 
 /** 所有 CLI 会话的登记表：会话 ID → 哪个 agent、在哪个目录建立的、用了几轮。随对话一起持久化。 */
@@ -134,7 +137,8 @@ export async function checkBudget(io: DispatchIO, config: AppConfig): Promise<st
 		// 后台结果发回来触发的运行：仍算用户那一轮，不重新计数
 		if (first !== undefined && doc.runKey !== null) {
 			const submission = await tx.submission(first as any);
-			if (submission?.requestId?.startsWith(JOB_REQUEST_PREFIX)) runKey = doc.runKey;
+			// 子调度里的派工也算用户那一轮（子调度的对话由总调度的派工发起）
+			if (submission?.requestId?.startsWith(JOB_REQUEST_PREFIX) || submission?.requestId?.startsWith(LEAD_PREFIX)) runKey = doc.runKey;
 		}
 		if (doc.runKey !== runKey) {
 			doc.runKey = runKey;

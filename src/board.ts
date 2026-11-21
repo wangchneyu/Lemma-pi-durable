@@ -20,6 +20,8 @@ export type BoardTask = {
 	owner?: string;
 	status: TaskStatus;
 	deps: string[];
+	/** 属于哪项上级任务（子调度拆出的子任务） */
+	parent?: string;
 	/** 验收标准：做到什么程度算完成 */
 	acceptance?: string;
 	notes: string[];
@@ -166,7 +168,7 @@ export function boardSummary(board: BoardState | undefined): string {
 	return (tasks.length > selected.length ? `共 ${tasks.length} 项，完成 ${tasks.filter((t) => t.status === "done").length} 项；显示最近活动与完成项。\n` : "") + selected
 		.map(
 			(t) =>
-				`- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title.slice(0, 160)}${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.slice(-3).map((c) => `#${c}`).join(",")}` : ""}`,
+				`- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title.slice(0, 160)}${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.parent ? ` ·属于 ${t.parent}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.slice(-3).map((c) => `#${c}`).join(",")}` : ""}`,
 		)
 		.join("\n");
 }
