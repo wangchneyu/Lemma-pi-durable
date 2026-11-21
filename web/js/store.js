@@ -1,5 +1,5 @@
 // 数据层：SSE 实时同步对话条目和 pi.live，按需拉取状态、派工汇总和更早的历史。
-import { getJson, kindOf } from "./util.js";
+import { getJson, kindOf, setConversationScope } from "./util.js";
 
 export const store = {
 	items: [], // 按 id 升序
@@ -193,6 +193,7 @@ export function buildRuns() {
 // ---------- SSE ----------
 export function connect() {
 	const es = new EventSource("/api/events");
+	let conversationKey;
 	es.addEventListener("open", () => {
 		store.connected = true;
 		emit("conn");
@@ -202,8 +203,16 @@ export function connect() {
 		emit("conn");
 	});
 	es.addEventListener("snapshot", (e) => {
-		const { items, hasMore, live } = JSON.parse(e.data);
+		const { items, hasMore, live, conversation } = JSON.parse(e.data);
+		const nextKey = conversation ? `${conversation.storage}:${conversation.id}` : "default";
+		if (conversationKey && nextKey !== conversationKey) { es.close(); location.reload(); return; }
+		conversationKey = nextKey;
+		setConversationScope(conversation?.id);
 		store.items = [];
+		store.jobs = [];
+		store.dispatches = [];
+		store.changes = [];
+		store.state = null;
 		calls.clear();
 		mergeItems(items);
 		store.hasMore = hasMore;

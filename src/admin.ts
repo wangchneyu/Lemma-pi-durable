@@ -17,12 +17,21 @@ import { readConvention, scanConventions } from "./conventions.ts";
 import { diffText } from "./git.ts";
 import { Jobs, type JobRecord, type JobsState } from "./jobs.ts";
 import { AgentSessions, RunBudget } from "./tools.ts";
+import { Learning } from "./learning.ts";
 import { parseToolResult, toViewItem, toViewLive, type Dispatch, type ViewItem, type ViewLive } from "./view.ts";
 
 const WEB_DIR = fileURLToPath(new URL("../web/", import.meta.url));
 const HOST = "127.0.0.1";
 
 export interface AdminOptions {
+	conversations?: {
+		list(): Promise<unknown[]>;
+		create(title: string): Promise<{ id: string }>;
+		select(id: string): Promise<void>;
+		rename(id: string, title: string): Promise<void>;
+		busy(): boolean;
+	};
+	session?: { id: string; title: string; controllerId?: string };
 	app: App;
 	config: AppConfig;
 	configPath: string;
@@ -354,6 +363,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	}
 
 	async function state() {
+		await refreshJobs();
 		const usage = (await harness.usage(context)) as any;
 		const sessions = ((await harness.snapshot(AgentSessions, context)) as any)?.sessions ?? {};
 		const useCount = new Map<string, number>();
@@ -366,6 +376,8 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			configPath: options.configPath,
 			workdir: config.workdir,
 			storage: config.storage,
+			conversation: { ...(options.session ?? { id: "default", title: "默认会话" }), controllerId: String(root.id) },
+			autonomy: { ...config.autonomy, learning: await harness.snapshot(Learning, context) },
 			entries: entryCount,
 			jobs: jobList(),
 			orchestrator: {
@@ -474,6 +486,26 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
 		res.end(JSON.stringify(body));
 	};
+	async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+		let size = 0;
+		const chunks: Buffer[] = [];
+		for await (const chunk of req) {
+			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			size += bytes.length;
+			if (size > 4096) throw new Error("请求内容过长");
+			chunks.push(bytes);
+		}
+		const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+		if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("需要 JSON 对象");
+		return value as Record<string, unknown>;
+	}
+	const afterResponse = (res: ServerResponse, id: string) => {
+		// 先把新编号送回浏览器，再重建当前会话的服务，避免关闭正在响应的连接。
+		res.once("finish", () => setImmediate(() => {
+			void options.conversations!.select(id).catch((error) => options.notify?.(`切换对话失败：${error instanceof Error ? error.message : String(error)}`)).finally(() => { changingConversation = false; });
+		}));
+	};
+	let changingConversation = false;
 	async function serveStatic(pathname: string, res: ServerResponse) {
 		const rel = pathname === "/" ? "index.html" : decodeURIComponent(pathname).slice(1);
 		const file = normalize(join(WEB_DIR, rel));
@@ -492,10 +524,44 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		if (denied) return sendJson(res, 403, { error: denied });
 		const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 		try {
+			const requestedConversation = url.searchParams.get("conversation");
+			if (requestedConversation && requestedConversation !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，不能读取另一个对话的数据" });
+			if (url.pathname === "/api/conversations" && req.method === "GET") {
+				return sendJson(res, 200, { current: options.session?.id ?? "default", conversations: options.conversations ? await options.conversations.list() : [] });
+			}
+			const conversationAction = url.pathname.match(/^\/api\/conversations\/([a-z0-9_-]+)\/(select|title)$/);
+			if ((url.pathname === "/api/conversations" || conversationAction) && req.method === "POST") {
+				if (!options.conversations) return sendJson(res, 503, { error: "当前运行入口未启用对话管理" });
+				let body: Record<string, unknown>;
+				try { body = await readJson(req); } catch (error) { return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) }); }
+				if (body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "当前对话已变化，请刷新后重试" });
+				if (changingConversation || options.conversations.busy()) return sendJson(res, 409, { error: "正在切换对话，请稍后重试" });
+				changingConversation = true;
+				try {
+					if (conversationAction?.[2] === "title") {
+						changingConversation = false;
+						if (typeof body.title !== "string") return sendJson(res, 400, { error: "需要对话标题" });
+						await options.conversations.rename(conversationAction[1]!, body.title);
+						if (options.session && options.session.id === conversationAction[1]) options.session.title = body.title.trim();
+						return sendJson(res, 200, { ok: true });
+					}
+					let id: string;
+					if (conversationAction) {
+						id = conversationAction[1]!;
+						const list = await options.conversations.list() as { id: string }[];
+						if (!list.some((item) => item.id === id)) { changingConversation = false; return sendJson(res, 404, { error: "没有这个对话" }); }
+					} else {
+						if (body.title !== undefined && typeof body.title !== "string") { changingConversation = false; return sendJson(res, 400, { error: "标题需要是文字" }); }
+						({ id } = await options.conversations.create((body.title as string | undefined) ?? ""));
+					}
+					afterResponse(res, id);
+					return sendJson(res, 202, { ok: true, id, preserved: true });
+				} catch (error) { changingConversation = false; return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) }); }
+			}
 			if (url.pathname === "/api/events" && req.method === "GET") {
 				res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", connection: "keep-alive" });
 				const { items, hasMore } = await history(400);
-				res.write(`event: snapshot\ndata: ${JSON.stringify({ items, hasMore, live: lastLive })}\n\n`);
+				res.write(`event: snapshot\ndata: ${JSON.stringify({ items, hasMore, live: lastLive, conversation: { id: options.session?.id ?? "default", controllerId: String(root.id), storage: config.storage } })}\n\n`);
 				clients.add(res);
 				req.on("close", () => clients.delete(res));
 				return;
@@ -532,6 +598,8 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			// 取消后台派工（控制操作，和「中止本轮」同级）
 			const jobCancel = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
 			if (jobCancel && req.method === "POST") {
+				const body = await readJson(req);
+				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行取消" });
 				const id = decodeURIComponent(jobCancel[1]!);
 				const r = await app.jobs.cancel(id, "user", context);
 				if (r === "cancelled") options.notify?.(`后台网页：已取消后台派工 ${id}`);
@@ -552,11 +620,15 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				}
 			}
 			if (url.pathname === "/api/abort" && req.method === "POST") {
+				const body = await readJson(req);
+				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行中止" });
 				await root.abort(context);
 				options.notify?.("后台网页：已中止本轮");
 				return sendJson(res, 200, { ok: true });
 			}
 			if (url.pathname === "/api/reset" && req.method === "POST") {
+				const body = await readJson(req);
+				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行重置" });
 				await root.reset(undefined, context);
 				options.notify?.("后台网页：已开始新的上下文");
 				return sendJson(res, 200, { ok: true });

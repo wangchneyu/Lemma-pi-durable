@@ -201,6 +201,39 @@ pre {
 	bottom: 7px;
 }
 
+/* 对话管理：名称与持久化编号始终分开显示。 */
+.conversation-manager { display: grid; gap: 8px; padding: 0 3px; }
+.conversation-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.conversation-heading h2 { font-size: 13px; color: var(--ink-2); margin: 0; }
+.conversation-heading .ghost-btn { padding: 4px 8px; font-size: 12px; }
+.conversation-search, .conversation-dialog input { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bg); color: var(--ink); padding: 8px 10px; font: inherit; }
+.conversation-search { font-size: 12px; }
+.conversation-list { display: grid; gap: 5px; max-height: 220px; overflow-y: auto; }
+.conversation-item { display: grid; gap: 3px; text-align: left; min-width: 0; padding: 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; }
+.conversation-item:hover { background: var(--panel-2); }
+.conversation-item[aria-current="true"] { border-color: color-mix(in srgb, var(--signal) 45%, var(--line)); background: color-mix(in srgb, var(--signal) 8%, var(--panel)); }
+.conversation-item strong { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-item small { color: var(--muted); font: 10px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.conversation-item .conversation-running { color: var(--run); }
+.conversation-note { margin: 0; font-size: 10px; color: var(--muted); }
+.new-conversation-btn { border: 1px solid var(--signal); background: var(--signal); color: var(--bg); border-radius: 7px; padding: 7px 11px; font-weight: 600; white-space: nowrap; }
+.new-conversation-btn:disabled, .conversation-item:disabled { opacity: .5; cursor: wait; }
+.conversation-dialog { width: min(470px, calc(100vw - 32px)); background: var(--panel); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 12px; padding: 25px; box-shadow: var(--shadow); }
+.conversation-dialog::backdrop { background: #0009; backdrop-filter: blur(3px); }
+.conversation-dialog h3 { margin: 0 0 10px; font-size: 18px; }
+.conversation-dialog p { color: var(--muted); font-size: 13px; }
+.conversation-dialog label { display: block; font-size: 13px; margin: 20px 0 7px; }
+.conversation-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.conversation-dialog .conversation-error { color: var(--danger); }
+.conversation-switching { position: fixed; inset: 0; z-index: 110; background: color-mix(in srgb, var(--bg) 88%, transparent); display: grid; place-items: center; color: var(--signal); font-size: 15px; }
+@media (max-width: 760px) {
+	.conversation-manager { order: 2; width: 100%; grid-template-columns: minmax(0, 1fr) minmax(100px, 1fr); align-items: center; }
+	.conversation-list { grid-column: 1 / -1; display: flex; max-height: 112px; overflow-x: auto; overflow-y: auto; }
+	.conversation-item { flex: 0 0 180px; }
+	.conversation-note { grid-column: 1 / -1; }
+	.side-foot { order: 1; }
+}
+
 /* 导航 */
 .nav {
 	display: grid;

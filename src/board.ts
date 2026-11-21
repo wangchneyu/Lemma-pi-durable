@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { defineDoc } from "@earendil-works/pi-durable";
 
 export type TaskStatus = "todo" | "doing" | "review" | "done" | "blocked" | "dropped";
@@ -66,11 +66,11 @@ export class ProjectFiles extends EventEmitter {
 	readonly dir: string;
 	readonly goalPath: string;
 	readonly assignPath: string;
-	constructor(workdir: string) {
+	constructor(workdir: string, stateDir?: string) {
 		super();
 		this.dir = join(workdir, ".pi-agent");
 		this.goalPath = join(this.dir, "GOAL.md");
-		this.assignPath = join(this.dir, "ASSIGN.md");
+		this.assignPath = join(stateDir ?? this.dir, "ASSIGN.md");
 	}
 
 	/** GOAL.md 的内容（太长截断）；没有返回 undefined */
@@ -98,13 +98,13 @@ export class ProjectFiles extends EventEmitter {
 	writeAssign(board: BoardState): { savedManualEdit?: string } {
 		const tasks = boardTasks(board);
 		if (!tasks.length && !existsSync(this.assignPath)) return {};
-		mkdirSync(this.dir, { recursive: true });
+		mkdirSync(dirname(this.assignPath), { recursive: true });
 		let savedManualEdit: string | undefined;
 		if (existsSync(this.assignPath)) {
 			const current = readFileSync(this.assignPath, "utf8");
 			const m = current.match(/^<!-- pi-agent:hash=([0-9a-f]+) -->\n([\s\S]*)$/);
 			if (!m || hash(m[2]!) !== m[1]) {
-				savedManualEdit = join(this.dir, `ASSIGN.edited-${new Date().toISOString().replace(/[:.]/g, "-")}.md`);
+				savedManualEdit = join(dirname(this.assignPath), `ASSIGN.edited-${new Date().toISOString().replace(/[:.]/g, "-")}.md`);
 				copyFileSync(this.assignPath, savedManualEdit);
 			}
 		}
@@ -162,10 +162,11 @@ function cell(text: string): string {
 export function boardSummary(board: BoardState | undefined): string {
 	const tasks = boardTasks(board).filter((t) => t.status !== "dropped");
 	if (!tasks.length) return "（还没有分工表。接到项目级、多步骤的任务时，先用 plan_tasks 拆解。）";
-	return tasks
+	const selected = tasks.length > 25 ? [...tasks.filter((t) => t.status !== "done").slice(-20), ...tasks.filter((t) => t.status === "done").slice(-5)] : tasks;
+	return (tasks.length > selected.length ? `共 ${tasks.length} 项，完成 ${tasks.filter((t) => t.status === "done").length} 项；显示最近活动与完成项。\n` : "") + selected
 		.map(
 			(t) =>
-				`- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title}${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.map((c) => `#${c}`).join(",")}` : ""}`,
+				`- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title.slice(0, 160)}${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.slice(-3).map((c) => `#${c}`).join(",")}` : ""}`,
 		)
 		.join("\n");
 }
@@ -190,8 +191,8 @@ export function taskBrief(goal: string | undefined, board: BoardState | undefine
 	}
 	if (tasks.length > 1) {
 		parts.push(
-			`【团队分工全貌】（只读，状态由总调度维护；不要修改 .pi-agent/ASSIGN.md）\n${tasks
-				.map((t) => `- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title}${t.owner ? ` — ${t.owner}` : ""}${t.id === taskId ? "  ← 你" : ""}`)
+			`【团队分工全貌】（只读；共 ${tasks.length} 项，较长时仅显示相关与活动任务；不要修改分工表）\n${(tasks.length > 20 ? [...tasks.filter((t) => t.id === taskId || task?.deps.includes(t.id)), ...tasks.filter((t) => t.id !== taskId && !task?.deps.includes(t.id) && (t.status === "doing" || t.status === "review"))].slice(0, 20) : tasks)
+				.map((t) => `- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title.slice(0, 120)}${t.owner ? ` — ${t.owner}` : ""}${t.id === taskId ? "  ← 你" : ""}`)
 				.join("\n")}`,
 		);
 	}

@@ -93,14 +93,22 @@ export async function copy(text) {
 		toast(text);
 	}
 }
+let conversationScope;
+let conversationVersion = 0;
+export function setConversationScope(id) {
+	if (id !== conversationScope) { conversationScope = id; conversationVersion++; }
+}
 export async function getJson(path) {
-	const res = await fetch(path);
+	const version = conversationVersion;
+	const scoped = conversationScope && path.startsWith("/api/") ? `${path}${path.includes("?") ? "&" : "?"}conversation=${encodeURIComponent(conversationScope)}` : path;
+	const res = await fetch(scoped);
 	const data = await res.json().catch(() => ({}));
+	if (version !== conversationVersion) throw new Error("对话已切换，忽略旧数据");
 	if (!res.ok) throw new Error(data.error || res.statusText);
 	return data;
 }
 export async function post(path, body = {}) {
-	const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+	const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...(conversationScope ? { expectedSession: conversationScope } : {}), ...body }) });
 	const data = await res.json().catch(() => ({}));
 	if (!res.ok) throw new Error(data.error || res.statusText);
 	return data;

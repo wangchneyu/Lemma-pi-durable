@@ -3,11 +3,16 @@
   "version": "1.0.0",
   "description": "Local multi-agent orchestration (Claude Code / Codex / Gemini CLI) on Pi Durable",
   "scripts": {
-    "start": "node --no-warnings src/main.ts",
+    "start": "node --no-warnings src/main.ts --tui --real",
     "demo": "node --no-warnings src/main.ts --demo",
+    "tui": "node --no-warnings src/main.ts --tui --real",
+    "demo:tui": "node --no-warnings src/main.ts --demo --tui",
     "check": "node --no-warnings scripts/check-agents.ts",
     "typecheck": "tsc -p .",
-    "test": "node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/steer.ts && node --no-warnings test/board.ts && node --no-warnings test/jobs.ts && node --no-warnings test/api-member.ts && node --no-warnings test/conventions.ts && node --no-warnings test/web.ts"
+    "test:harness": "node --no-warnings test/sessions.ts && node --no-warnings test/repair.ts && node --no-warnings test/sessions-cli.ts",
+    "test:conversations": "node --no-warnings test/conversations-web.ts",
+    "test:terminal": "node --no-warnings test/terminal.ts && node --no-warnings test/terminal-cli.ts",
+    "test": "node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/steer.ts && node --no-warnings test/board.ts && node --no-warnings test/jobs.ts && node --no-warnings test/api-member.ts && node --no-warnings test/conventions.ts && node --no-warnings test/web.ts && npm run test:terminal && npm run test:harness && npm run test:conversations"
   },
   "keywords": [],
   "author": "",
@@ -21,7 +26,8 @@
     "@earendil-works/chord": "^1.6.0",
     "@earendil-works/pi-ai": "^1.6.0",
     "@earendil-works/pi-durable": "^1.6.0",
-    "@earendil-works/pi-schema": "^1.6.0"
+    "@earendil-works/pi-schema": "^1.6.0",
+    "@earendil-works/pi-tui": "1.6.0"
   },
   "private": true,
   "engines": {

@@ -12,12 +12,15 @@ import type { ChangeRecord, ChangeStore } from "./changes.ts";
 import { cleanEnv, runCli } from "./cli-runner.ts";
 import type { AgentKind, AppConfig, ModelOption } from "./config.ts";
 import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
-import { addWorktree, commitAll, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
+import { addWorktree, commitAll, git, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
+import { Learning, relevantLessons } from "./learning.ts";
 import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
 import { memberInstructions, runApiMember, type ExecOutcome } from "./api-member.ts";
 
 /** 所有 CLI 会话的登记表：会话 ID → 哪个 agent、在哪个目录建立的、用了几轮。随对话一起持久化。 */
 export type SessionRecord = {
+	/** 成员上下文所属的总控对话；旧记录缺省时仍按当前存储隔离。 */
+	controllerId?: string;
 	agent: AgentKind;
 	cwd: string;
 	updatedAt: number;
@@ -159,8 +162,13 @@ export async function validateDispatch(kind: AgentKind, deps: DispatchDeps, args
 		if (args.based_on) return "based_on 只能用于新会话；续接会话会回到它自己的目录。";
 		const busy = deps.hub.busySessions.get(args.session_id);
 		if (busy) return `会话 ${args.session_id} 正在被 ${busy} 使用，不能同时续接。等它结束（wait_jobs），或者开新会话。`;
-		const record = await io.commit(async (tx) => (await tx.doc(AgentSessions)).sessions[args.session_id!]?.agent);
-		if (record && record !== kind) return `session_id ${args.session_id} 属于 ${record}，不能交给 ${kind} 续接。`;
+		const record = await io.commit(async (tx) => {
+			const found = (await tx.doc(AgentSessions)).sessions[args.session_id!];
+			return found ? { agent: found.agent, controllerId: found.controllerId ?? null } : undefined;
+		});
+		if (!record) return "当前会话没有登记这个成员上下文，不能跨会话续接。请在所属会话继续，或新开一次派工。";
+		if (record.controllerId && record.controllerId !== String(io.conversationId)) return "这个成员上下文属于另一个总控对话，不能跨总控续接。";
+		if (record.agent !== kind) return `session_id ${args.session_id} 属于 ${record.agent}，不能交给 ${kind} 续接。`;
 	}
 	if (args.based_on) {
 		const from = deps.changes.get(args.based_on);
@@ -333,6 +341,11 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 
 	let resumeId: string | undefined = args.session_id;
 	let prompt = `${brief}${args.task}`;
+	if (config.autonomy.enabled) {
+		const lessons = await io.commit(async (tx) => JSON.parse(JSON.stringify((await tx.doc(Learning)).lessons)) as import("./learning.ts").VerifiedLesson[]);
+		const relevant = relevantLessons(lessons, args.task);
+		if (relevant) prompt = `【相关已验证记录，仅供参考】\n${relevant}\n\n${prompt}`;
+	}
 	// API 成员的子对话本身是持久的：重放时按同一个提交接着等，不需要「中断后续接」的提示
 	if (startedBefore && adapter.canResume && !agent.api) {
 		const crashed = seenSession ?? presetSession;
@@ -435,7 +448,36 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	}
 	const sessionId = parsed.sessionId ?? seenSession ?? presetSession;
 	const finished = await finishChange(deps, change, kind, usedModel, args.task);
-	if (finished && sessionId) changes.upsert({ ...finished, sessionId });
+	// 验收命令来自用户配置，模型不能临时改命令或仅凭自述把失败标成功。
+	if (finished?.files.length && !parsed.isError && config.autonomy.enabled && config.autonomy.checks.length) {
+		const reports: string[] = [];
+		let passed = true;
+		const headBefore = await git(cwd, ["rev-parse", "HEAD"]);
+		if (headBefore.code !== 0 || headBefore.stdout.trim() !== finished.head) passed = false;
+		for (const check of config.autonomy.checks) {
+			if (io.signal.aborted) { passed = false; break; }
+			io.output(`验收：${check.name}\n`);
+			try {
+				const outcome = await runCli({ command: check.command === "node" ? process.execPath : check.command, args: check.args, cwd,
+					env: cleanEnv(config.stripEnv), timeoutMs: (check.timeoutSeconds ?? 120) * 1000, signal: io.signal });
+				const ok = outcome.exitCode === 0 && !outcome.aborted && !outcome.timedOut;
+				passed &&= ok;
+				reports.push(`${check.name}：${ok ? "通过" : "失败"}${ok ? "" : `\n${(outcome.stderr + outcome.stdout).slice(-1800)}`}`);
+			} catch (error) { passed = false; reports.push(`${check.name}：${error instanceof Error ? error.message : String(error)}`); }
+		}
+		const dirty = await git(cwd, ["status", "--porcelain", "--untracked-files=no"]);
+		const headAfter = await git(cwd, ["rev-parse", "HEAD"]);
+		if (headAfter.code !== 0 || headAfter.stdout.trim() !== finished.head) { passed = false; reports.push("验收期间提交发生变化，需要重新验收。"); }
+		if (dirty.code !== 0 || dirty.stdout.trim()) { passed = false; reports.push("验收后存在未提交改动，不能证明当前提交通过。"); }
+		parsed.isError = !passed;
+		parsed.text += `\n\n【配置验收】\n${reports.join("\n")}`;
+		changes.upsert({ ...finished, verification: { head: finished.head, passed, at: io.now(), checks: config.autonomy.checks.map((c) => c.name) } });
+		if (io.signal.aborted) {
+			await settleTask(deps, io, kind, args.task_id, "todo", finished.id, "验收已中止");
+			return { text: "验收已中止。", isError: true, aborted: true };
+		}
+	}
+	if (finished && sessionId) changes.upsert({ ...(changes.get(finished.id) ?? finished), sessionId });
 	await settleTask(
 		deps,
 		io,
@@ -451,6 +493,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 			const prev = sessions[sessionId];
 			// 持久化文档只接受严格 JSON：没有的字段不写
 			sessions[sessionId] = defined({
+				controllerId: String(io.conversationId),
 				agent: kind,
 				cwd,
 				updatedAt: io.now(),
@@ -463,7 +506,8 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		});
 	}
 	let body = parsed.text.trim() || "（没有文字输出）";
-	if (body.length > agent.maxOutputChars) body = `${body.slice(0, agent.maxOutputChars)}\n…（已截断，原文 ${parsed.text.length} 字符）`;
+	const outputLimit = config.autonomy.enabled ? Math.min(agent.maxOutputChars, config.autonomy.resultMaxChars) : agent.maxOutputChars;
+	if (body.length > outputLimit) body = `${body.slice(0, Math.floor(outputLimit * 0.6))}\n…（中间已省略，原文 ${parsed.text.length} 字符）\n${body.slice(-Math.floor(outputLimit * 0.4))}`;
 	const changeLine = finished
 		? finished.files.length
 			? `\n\n[改动 #${finished.id}：${finished.files.length} 个文件 +${finished.add} −${finished.del}，在分支 ${finished.branch}，还没有合并到主目录，等用户在终端确认（/apply ${finished.id}）]`

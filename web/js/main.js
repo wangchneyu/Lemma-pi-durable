@@ -4,6 +4,7 @@ import { buildRuns, connect, pendingChanges, runningJobs, store, subscribe } fro
 import { noteSlots } from "./ticket.js";
 import { $, $$, FAILURE_LABEL, copy, post, toast } from "./util.js";
 import { VIEWS } from "./views.js";
+import "./conversations.js";
 
 const content = $("#content");
 let view = null;
@@ -32,6 +33,7 @@ addEventListener("hashchange", route);
 // ---------- 顶栏 / 导航 ----------
 function renderChrome() {
 	const { live, state } = store;
+	if (state?.conversation) $("#pageSub").textContent = `会话：${state.conversation.title} (${state.conversation.id}) · 总控 CID:${state.conversation.controllerId} · ${view?.sub ?? ""}`;
 	const status = $("#status");
 	const running = live.tools.filter((t) => t.status === "running" && t.name.startsWith("ask_")).length;
 	const inbox = live.inbox ?? [];
@@ -101,9 +103,9 @@ $("#stopBtn").addEventListener("click", async () => {
 	}
 });
 $("#resetBtn").addEventListener("click", async () => {
-	if (!confirm("开始新的上下文？总调度将不再看到之前的对话（历史仍保存在存储里）。")) return;
+	if (!confirm("只重置当前总控上下文？记录仍保留在当前对话中，任务和用量不会分开。需要独立聊天与后台数据，请取消后点“新对话”。")) return;
 	try {
-		await post("/api/reset");
+		await post("/api/reset", { expectedSession: store.state?.conversation?.id });
 		toast("已开始新的上下文");
 	} catch (err) {
 		toast(`操作失败：${err.message}`);

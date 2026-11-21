@@ -114,6 +114,14 @@ export interface BudgetConfig {
 }
 
 export interface AppConfig {
+	/** 命名会话的分工表目录；项目目标与规则仍从工作目录读取。 */
+	projectStateDir?: string;
+	autonomy: {
+		enabled: boolean;
+		maxRepairAttempts: number;
+		resultMaxChars: number;
+		checks: { name: string; command: string; args: string[]; timeoutSeconds?: number }[];
+	};
 	orchestrator: OrchestratorConfig;
 	workdir: string;
 	storage: string;
@@ -128,6 +136,7 @@ export interface AppConfig {
 }
 
 const DEFAULTS: AppConfig = {
+	autonomy: { enabled: false, maxRepairAttempts: 2, resultMaxChars: 4000, checks: [] },
 	orchestrator: {
 		type: "anthropic-compatible",
 		modelId: "claude-sonnet-5-5",
@@ -268,11 +277,18 @@ export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 		agents,
 		isolation: { ...DEFAULTS.isolation, ...(raw.isolation ?? {}) },
 		budget: { ...DEFAULTS.budget, ...(raw.budget ?? {}) },
+		autonomy: { ...DEFAULTS.autonomy, ...(raw.autonomy ?? {}) },
 		roles: raw.roles ?? DEFAULTS.roles,
 		web: { ...DEFAULTS.web, ...(raw.web ?? {}) },
 	};
 	config.workdir = isAbsolute(config.workdir) ? config.workdir : resolve(base, config.workdir);
 	config.storage = isAbsolute(config.storage) ? config.storage : resolve(base, config.storage);
+	if (!Number.isInteger(config.autonomy.maxRepairAttempts) || config.autonomy.maxRepairAttempts < 0 || config.autonomy.maxRepairAttempts > 3) throw new Error("autonomy.maxRepairAttempts 需要是 0–3 的整数。");
+	if (!Number.isInteger(config.autonomy.resultMaxChars) || config.autonomy.resultMaxChars < 500 || config.autonomy.resultMaxChars > 20_000) throw new Error("autonomy.resultMaxChars 需要是 500–20000 的整数。");
+	for (const check of config.autonomy.checks) {
+		if (!check.name || !check.command || !Array.isArray(check.args) || check.args.some((a) => typeof a !== "string")) throw new Error("autonomy.checks 需要 name、command 和 args 字符串数组。");
+		if (check.timeoutSeconds !== undefined && (!Number.isFinite(check.timeoutSeconds) || check.timeoutSeconds <= 0 || check.timeoutSeconds > 1800)) throw new Error("验收超时需要大于 0 且不超过 1800 秒。");
+	}
 	return config;
 }
 

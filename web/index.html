@@ -22,6 +22,13 @@
 				</div>
 			</header>
 
+			<section class="conversation-manager" aria-labelledby="conversationHeading">
+				<div class="conversation-heading"><h2 id="conversationHeading">对话</h2><button type="button" class="ghost-btn" id="sideNewConversationBtn">＋ 新建</button></div>
+				<input type="search" id="conversationSearch" class="conversation-search" placeholder="查找历史对话" aria-label="查找历史对话" />
+				<div id="conversationList" class="conversation-list" aria-label="历史对话"><p class="muted">正在加载…</p></div>
+				<p class="conversation-note">新建不会清空旧对话或后台数据</p>
+			</section>
+
 			<nav class="nav" id="nav" aria-label="页面">
 				<a href="#/overview" data-view="overview"><svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z"/></svg><span>总览</span></a>
 				<a href="#/project" data-view="project"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 5v14M14 9h4M14 13h4"/></svg><span>项目</span><em class="count" data-count="project"></em></a>
@@ -66,7 +73,9 @@
 						<svg viewBox="0 0 24 24" width="13" height="13"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
 						中止本轮
 					</button>
-					<button type="button" class="ghost-btn" id="resetBtn" title="开始新的上下文，历史仍保留在存储里">新上下文</button>
+					<button type="button" class="ghost-btn" id="renameConversationBtn">重命名</button>
+					<button type="button" class="ghost-btn" id="resetBtn" title="只重置当前总控上下文，不创建新对话">重置上下文</button>
+					<button type="button" class="new-conversation-btn" id="newConversationBtn">＋ 新对话</button>
 				</div>
 			</header>
 			<main class="content" id="content"></main>
@@ -86,6 +95,17 @@
 		</aside>
 	</div>
 
+	<dialog id="conversationDialog" class="conversation-dialog" aria-labelledby="conversationDialogTitle">
+		<form id="conversationForm">
+			<h3 id="conversationDialogTitle">新建独立对话</h3>
+			<p id="conversationDialogHint">旧对话及对应的任务、派工、用量和改动完整保留。旧任务继续运行，新对话从空白上下文开始。</p>
+			<label for="conversationTitle">对话名称</label>
+			<input id="conversationTitle" name="title" maxlength="120" placeholder="例如：前端开发、接口排查" autocomplete="off" />
+			<p id="conversationError" class="conversation-error" role="alert" hidden></p>
+			<div class="conversation-dialog-actions"><button type="button" class="ghost-btn" id="cancelConversationBtn">取消</button><button type="submit" class="new-conversation-btn" id="saveConversationBtn">创建并切换</button></div>
+		</form>
+	</dialog>
+	<div id="conversationSwitching" class="conversation-switching" role="status" aria-live="polite" hidden>正在切换对话，旧数据已保留…</div>
 	<div class="toast" id="toast" role="status" aria-live="polite"></div>
 	<script type="module" src="/js/main.js"></script>
 </body>

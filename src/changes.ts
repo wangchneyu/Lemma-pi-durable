@@ -8,6 +8,7 @@ import type { FileStat } from "./git.ts";
 export type ChangeStatus = "running" | "pending" | "empty" | "applied" | "dropped" | "conflict";
 
 export interface ChangeRecord {
+	verification?: { head: string; passed: boolean; at: number; checks: string[] };
 	id: string;
 	agent: string;
 	callId: string;

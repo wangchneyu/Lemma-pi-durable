@@ -1,6 +1,7 @@
 // 工作区隔离用到的 git 操作：快照、worktree、提交、差异、合并回主目录。
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 export interface GitResult {
@@ -12,9 +13,9 @@ export interface GitResult {
 /** 在 worktree 里提交时用的身份：不依赖用户的全局 git 配置 */
 const AUTHOR = ["-c", "user.name=pi-agent", "-c", "user.email=pi-agent@localhost", "-c", "commit.gpgsign=false"];
 
-export function git(cwd: string, args: string[], input?: string): Promise<GitResult> {
+export function git(cwd: string, args: string[], input?: string, env?: NodeJS.ProcessEnv): Promise<GitResult> {
 	return new Promise((resolve) => {
-		const child = execFile("git", ["-C", cwd, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true, encoding: "utf8" }, (error, stdout, stderr) => {
+		const child = execFile("git", ["-C", cwd, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true, encoding: "utf8", ...(env ? { env } : {}) }, (error, stdout, stderr) => {
 			const code = error ? (typeof (error as any).code === "number" ? (error as any).code : 1) : 0;
 			resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
 		});
@@ -37,10 +38,23 @@ export async function repoRoot(cwd: string): Promise<string | undefined> {
 	return top.stdout.trim();
 }
 
-/** 当前工作区的快照提交：包含还没提交的改动（不含未跟踪的新文件）；没有改动时就是 HEAD */
+/** 在独立临时索引中拍工作区快照，包含未跟踪且未忽略的新文件，不改用户索引或分支。 */
 export async function snapshot(root: string): Promise<string> {
-	const stash = await must(root, ["stash", "create", "pi-agent snapshot"]);
-	return stash || (await must(root, ["rev-parse", "HEAD"]));
+	const directory = mkdtempSync(join(tmpdir(), "pi-agent-index-"));
+	const env = { ...process.env, GIT_INDEX_FILE: join(directory, "index") };
+	const run = async (args: string[]) => {
+		const result = await git(root, args, undefined, env);
+		if (result.code !== 0) throw new Error(`创建隔离快照失败：${result.stderr.trim().slice(-500)}`);
+		return result.stdout.trim();
+	};
+	try {
+		const head = await run(["rev-parse", "HEAD"]);
+		await run(["read-tree", head]);
+		await run(["add", "-A", "--", "."]);
+		const tree = await run(["write-tree"]);
+		if (tree === await run(["rev-parse", `${head}^{tree}`])) return head;
+		return await run([...AUTHOR, "commit-tree", tree, "-p", head, "-m", "pi-agent workspace snapshot"]);
+	} finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
 export async function addWorktree(root: string, path: string, branch: string, base: string): Promise<void> {

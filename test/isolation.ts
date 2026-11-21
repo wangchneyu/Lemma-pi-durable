@@ -21,6 +21,8 @@ git("init", "-q");
 git("add", "-A");
 git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
 writeFileSync(join(repo, "app.ts"), "export const a = 2; // 未提交的改动\n");
+writeFileSync(join(repo, "new-module.ts"), "export const untracked = true;\n");
+const originalIndex = git("diff", "--cached", "--name-only");
 writeFileSync(join(repo, "CLAUDE.md"), "# 刚写、还没提交的项目说明\n");
 mkdirSync(join(repo, "node_modules", "dep"), { recursive: true });
 writeFileSync(join(repo, "node_modules", "dep", "index.js"), "module.exports = 1;\n");
@@ -69,6 +71,8 @@ check(first && first.status === "pending" && first.files.some((f) => f.path.star
 check(call.cwd.toLowerCase().startsWith(first.path.toLowerCase()), "CLI 在 worktree 里运行，而不是主目录");
 check(!existsSync(join(repo, "docs")), "主目录没有被改动");
 check(readFileSync(join(first.path, "app.ts"), "utf8").includes("未提交的改动"), "worktree 以快照开工，包含主目录里还没提交的改动");
+check(readFileSync(join(first.path, "new-module.ts"), "utf8").includes("untracked"), "快照包含未跟踪的新模块，成员不会因为漏文件反复修复");
+check(git("diff", "--cached", "--name-only") === originalIndex, "创建快照不修改用户暂存区");
 check(existsSync(join(first.path, "node_modules", "dep", "index.js")), "被忽略的依赖目录挂进了 worktree");
 check(readFileSync(join(first.path, "CLAUDE.md"), "utf8").includes("还没提交的项目说明"), "还没提交的规范文件（CLAUDE.md）也带进了 worktree");
 check(git("branch", "--list", first.branch).includes(first.branch), `分支 ${first.branch} 已创建`);

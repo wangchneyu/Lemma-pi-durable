@@ -10,6 +10,7 @@ import { registerApiMembers } from "./api-member.ts";
 import { ProjectFiles } from "./board.ts";
 import { ChangeStore } from "./changes.ts";
 import { JobHub } from "./jobs.ts";
+import { writeLine } from "./printer.ts";
 import type { AppConfig } from "./config.ts";
 import { createLocalAgentsExtension, type AgentAvailability } from "./tools.ts";
 
@@ -38,8 +39,8 @@ function acquireLock(storagePath: string): () => void {
 			try {
 				process.kill(pid, 0);
 				alive = true;
-			} catch {
-				alive = false;
+			} catch (error) {
+				alive = (error as NodeJS.ErrnoException).code === "EPERM";
 			}
 		}
 		if (alive) {
@@ -69,7 +70,7 @@ export async function openApp(
 ): Promise<App> {
 	if (!options.memory) mkdirSync(dirname(config.storage), { recursive: true });
 	const changes = new ChangeStore(`${config.storage}.changes.json`);
-	const project = new ProjectFiles(config.workdir);
+	const project = new ProjectFiles(config.workdir, config.projectStateDir);
 	const jobs = new JobHub();
 	const { extension, agents, memberExtensions } = createLocalAgentsExtension(config, changes, project, jobs);
 	const registry = createRegistry();
@@ -99,7 +100,7 @@ export async function openApp(
 			},
 			onReport: (report) => {
 				const message = report.error instanceof Error ? report.error.message : String(report.error ?? "");
-				console.error(`\n[pi-durable] ${report.kind}${message ? `: ${message}` : ""}`);
+				writeLine(`\n[pi-durable] ${report.kind}${message ? `: ${message}` : ""}`);
 			},
 		},
 		context,

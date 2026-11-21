@@ -22,6 +22,7 @@ import {
 	type DispatchIO,
 } from "./dispatch.ts";
 import { clip, JOB_REPORT_ENTRY, JOB_REQUEST_PREFIX, JobDone, jobReport, Jobs, type JobHub, type JobRecord, type JobsState } from "./jobs.ts";
+import { managedDispatch } from "./repair.ts";
 
 export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
@@ -118,7 +119,7 @@ function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>) {
 				let cancelledBy: "user" | "orchestrator" | undefined;
 				try {
 					result = command
-						? await runDispatch(input.kind, command, deps, input.args, io, `后台派工 ${input.job}`)
+						? await managedDispatch(input.kind, command, deps, input.args, io, `后台派工 ${input.job}`)
 						: { text: `${input.kind} 现在不可用（没有找到 CLI 或已禁用）。`, isError: true };
 				} catch (error) {
 					// 进程关闭或被 Pi Durable 中止：交给重启后的续接 / abort 收尾
@@ -235,7 +236,7 @@ function createAgentTool(kind: AgentKind, command: string[], deps: DispatchDeps,
 			if (!background) {
 				const over = await checkBudget(io, config);
 				if (over) return text(over);
-				const r = await runDispatch(kind, command, deps, args, io);
+				const r = await managedDispatch(kind, command, deps, args, io);
 				return { output: [{ type: "text", text: r.text }], isError: r.isError, ...(r.details ? { details: r.details } : {}) };
 			}
 
@@ -375,7 +376,7 @@ function createJobTools(hub: JobHub) {
 const TASK_STATUSES = ["todo", "doing", "review", "done", "blocked", "dropped"] as const;
 
 /** 总调度维护分工表的工具：拆任务、改状态、起草目标 */
-function createBoardTools(config: AppConfig, project: ProjectFiles) {
+function createBoardTools(config: AppConfig, project: ProjectFiles, changes: ChangeStore) {
 	const roleNames = config.roles.map((r) => r.name);
 	const planTasks = defineTool({
 		name: "plan_tasks",
@@ -459,6 +460,10 @@ function createBoardTools(config: AppConfig, project: ProjectFiles) {
 			const { result, board } = await commitBoard(project, toolIO(api, context), (b) => {
 				const t = b.tasks[args.id];
 				if (!t) return false;
+				if (args.status === "done" && config.autonomy.enabled && t.changes.some((id) => {
+					const change = changes.get(id);
+					return change && change.files.length > 0 && config.autonomy.checks.length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed);
+				})) return "验收检查尚未通过，不能把任务标为完成。请根据失败证据修复并重新验证。";
 				Object.assign(t, defined({ status: args.status, owner: args.owner, role: args.role, title: args.title, acceptance: args.acceptance }));
 				const note = args.note ? `${new Date(api.now()).toLocaleString("zh-CN", { hour12: false })} 总调度：${args.status ? `[${STATUS_LABEL[args.status]}] ` : ""}${args.note}` : undefined;
 				if (note && t.notes.at(-1) !== note) t.notes.push(note);
@@ -466,6 +471,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles) {
 				return true;
 			});
 			if (!result) return { output: [{ type: "text", text: `分工表里没有任务 ${args.id}。` }], isError: true };
+			if (typeof result === "string") return text(result);
 			return { output: [{ type: "text", text: `已更新 ${args.id}。当前分工：\n${boardSummary(board)}` }] };
 		},
 	});
@@ -507,7 +513,7 @@ export function createLocalAgentsExtension(
 	const tools = [
 		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
 		...createJobTools(hub),
-		...createBoardTools(config, project),
+		...createBoardTools(config, project, changes),
 	];
 	const available = new Set(agents.filter((a) => a.available).map((a) => a.kind));
 	const roster = agents
@@ -552,6 +558,10 @@ export function createLocalAgentsExtension(
 						"5. 成员完成后任务会变成「待验收」：对照验收标准核对（必要时派审查角色），用 update_task 标完成或打回并写明原因。",
 						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
 						"7. 最后用中文向用户汇报：按任务编号说明谁做了什么、用了什么模型、结果、改动编号、还有什么没完成或有风险。",
+						...(config.autonomy.enabled ? [
+							`自动验收与修复已启用：由执行层运行配置中的检查，失败时最多修复 ${config.autonomy.maxRepairAttempts} 次。收到“停止重试”时不要再派相同任务，汇报失败证据和下一步。`,
+							"节省上下文：工具结果已给出结论、验收摘要和改动编号，不要把完整历史反复转给成员；续接用 session_id，跨成员交接用 based_on。未通过的检查不能通过改测试标准或标 done 绕过。",
+						] : []),
 						"",
 						"同步和异步：",
 						"- 不传 background 时，派工会等成员做完才返回；同一轮里的几个派工并行执行，但要等最慢的那个。",
