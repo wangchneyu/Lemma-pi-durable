@@ -11,7 +11,8 @@ import { ADAPTERS } from "./agents.ts";
 import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
 import type { OrchestratorModel } from "./models.ts";
-import { AgentSessions } from "./tools.ts";
+import { diffText } from "./git.ts";
+import { AgentSessions, RunBudget } from "./tools.ts";
 import { parseToolResult, toViewItem, toViewLive, type Dispatch, type ViewItem, type ViewLive } from "./view.ts";
 
 const WEB_DIR = fileURLToPath(new URL("../web/", import.meta.url));
@@ -49,7 +50,7 @@ const MIME: Record<string, string> = {
 
 export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	const { app, config, orchestrator, demo, context } = options;
-	const { harness, root, agents } = app;
+	const { harness, root, agents, changes } = app;
 	const startedAt = Date.now();
 
 	// ---------- 派工汇总：启动时扫一遍全部历史，之后随新条目增量更新 ----------
@@ -74,6 +75,8 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					at: item.at,
 					entryId: item.id,
 					status: "open",
+					model: typeof call.args.model === "string" ? call.args.model : config.agents[call.name.replace(/^ask_/, "") as AgentKind]?.defaultModel,
+					basedOn: typeof call.args.based_on === "string" ? call.args.based_on : undefined,
 				});
 			}
 		} else if (item.type === "tool") {
@@ -96,6 +99,9 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			d.cwd = parsed.cwd;
 			d.exitCode = parsed.exitCode;
 			d.preview = parsed.body.slice(0, 280);
+			if (typeof details?.model === "string") d.model = details.model;
+			d.costEstimated = details?.costEstimated === true || undefined;
+			if (typeof details?.changeId === "string") d.changeId = details.changeId;
 		}
 	}
 	let cursor: any;
@@ -123,6 +129,27 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			if (at && (!s.lastAt || at > s.lastAt)) s.lastAt = at;
 		}
 		return stats;
+	}
+
+	/** 按 成员 × 模型 汇总：用来对比不同模型的花费和成功率 */
+	function modelStats() {
+		const rows = new Map<string, { agent: string; model: string; total: number; done: number; error: number; durationMs: number; timed: number; cost: number; estimated: boolean }>();
+		for (const d of dispatches.values()) {
+			const model = d.model ?? "（CLI 默认）";
+			const key = `${d.agent}|${model}`;
+			let r = rows.get(key);
+			if (!r) rows.set(key, (r = { agent: d.agent, model, total: 0, done: 0, error: 0, durationMs: 0, timed: 0, cost: 0, estimated: false }));
+			r.total++;
+			if (d.status === "done") r.done++;
+			else if (d.status === "error") r.error++;
+			if (d.durationMs !== undefined) {
+				r.durationMs += d.durationMs;
+				r.timed++;
+			}
+			r.cost += d.cost ?? 0;
+			if (d.costEstimated) r.estimated = true;
+		}
+		return [...rows.values()].sort((a, b) => a.agent.localeCompare(b.agent) || b.total - a.total);
 	}
 
 	// ---------- 实时状态：一个 watch，广播给所有浏览器 ----------
@@ -155,6 +182,9 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			broadcast("live", live);
 		}
 	});
+	// 改动记录变了（派工收尾、终端里 /apply /drop）：通知页面刷新
+	const onChange = (record: unknown) => broadcast("change", record);
+	changes.on("change", onChange);
 	const ping = setInterval(() => {
 		for (const res of clients) res.write(": ping\n\n");
 	}, 20_000);
@@ -193,8 +223,13 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				host: orchestrator.info?.host,
 				keySource: orchestrator.info?.keySource ?? "",
 				maxTurns: o.maxTurns ?? 40,
+				price: o.price ?? null,
 			},
 			stripEnv: config.stripEnv,
+			isolation: config.isolation,
+			budget: { ...config.budget, ...((await harness.snapshot(RunBudget, context)) as any) },
+			modelStats: modelStats(),
+			changeCounts: changes.list().reduce<Record<string, number>>((m, ch) => ((m[ch.status] = (m[ch.status] ?? 0) + 1), m), {}),
 			agents: agents.map((a) => {
 				const c = config.agents[a.kind];
 				return {
@@ -209,6 +244,8 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					timeoutMinutes: c.timeoutMinutes,
 					maxOutputChars: c.maxOutputChars,
 					canResume: ADAPTERS[a.kind].canResume,
+					models: c.models,
+					defaultModel: c.defaultModel ?? null,
 				};
 			}),
 			agentStats: agentStats(),
@@ -308,6 +345,20 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				const d = await dispatchDetail(decodeURIComponent(detail[1]!));
 				return d ? sendJson(res, 200, d) : sendJson(res, 404, { error: "没有这次派工" });
 			}
+			if (url.pathname === "/api/changes" && req.method === "GET") return sendJson(res, 200, { changes: changes.list() });
+			const changeDiff = url.pathname.match(/^\/api\/changes\/([^/]+)\/diff$/);
+			if (changeDiff && req.method === "GET") {
+				const ch = changes.get(decodeURIComponent(changeDiff[1]!));
+				if (!ch) return sendJson(res, 404, { error: "没有这个改动" });
+				// 已合并的看完整改动，其余看还没合并的部分
+				const [from, to] = ch.status === "applied" ? [ch.base, ch.head] : changes.range(ch);
+				if (from === to) return sendJson(res, 200, { text: "", truncated: false });
+				try {
+					return sendJson(res, 200, await diffText(ch.root, from, to));
+				} catch (error) {
+					return sendJson(res, 200, { text: "", truncated: false, error: error instanceof Error ? error.message : String(error) });
+				}
+			}
 			if (url.pathname === "/api/abort" && req.method === "POST") {
 				await root.abort(context);
 				options.notify?.("后台网页：已中止本轮");
@@ -350,6 +401,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		url: `http://${HOST}:${port}`,
 		async close() {
 			clearInterval(ping);
+			changes.off("change", onChange);
 			for (const res of clients) res.end();
 			clients.clear();
 			const closed = new Promise<void>((resolve) => server.close(() => resolve()));

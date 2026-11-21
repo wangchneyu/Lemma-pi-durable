@@ -26,10 +26,13 @@ function render() {
 	drawer.style.setProperty("--c", agentColor(d.agent));
 	$("#drawerTitle").innerHTML = `<span class="agent-chip">${esc(AGENT_LABEL[d.agent] ?? d.agent)}</span><span class="ticket-no">#${esc(d.callId.slice(-6))}</span><span class="pill" data-s="${status === "running" ? "running" : status === "done" ? "done" : status === "error" ? "error" : "aborted"}">${esc(STATUS_LABEL[status] ?? status)}${status === "running" && started ? ` ${duration(Date.now() - started)}` : ""}</span>`;
 	const rows = [
+		["模型", d.model ? `<code>${esc(d.model)}</code>` : "CLI 默认"],
 		["派工时间", stamp(d.at)],
 		["结束时间", d.endAt ? stamp(d.endAt) : "—"],
 		["耗时", duration(d.durationMs)],
-		["花费", money(d.cost)],
+		["花费", `${money(d.cost)}${d.costEstimated ? "（按单价估算）" : ""}`],
+		["改动", d.changeId ? `<a class="linkish" href="#/changes/${esc(d.changeId)}">#${esc(d.changeId)}</a>` : d.basedOn ? "—" : "没有隔离（不在 git 仓库或没开启）"],
+		["基于", d.basedOn ? `<a class="linkish" href="#/changes/${esc(d.basedOn)}">#${esc(d.basedOn)}</a>` : "—"],
 		["会话", d.sessionId ? `<button type="button" class="linkish" data-copy="${esc(d.sessionId)}">${esc(d.sessionId)}</button>` : "—"],
 		["续接自", d.resume ? esc(d.resume) : "—"],
 		["目录", d.cwd ? `<code>${esc(d.cwd)}</code>` : "—"],

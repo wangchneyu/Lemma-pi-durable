@@ -96,6 +96,14 @@ export interface Dispatch {
 	cwd?: string;
 	exitCode?: number | null;
 	preview?: string;
+	/** 实际用的模型（CLI 报告的，或派工时选的） */
+	model?: string;
+	/** 花费是按单价估算的（CLI 没自报） */
+	costEstimated?: boolean;
+	/** 隔离派工的改动编号 */
+	changeId?: string;
+	/** 基于哪次改动开工 */
+	basedOn?: string;
 }
 
 /** 解析工具结果：去掉末尾的 [agent: … | 耗时: … | 花费: …]，识别 Pi Durable 写入的 <harness> 说明 */

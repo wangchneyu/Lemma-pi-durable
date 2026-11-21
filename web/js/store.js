@@ -7,6 +7,7 @@ export const store = {
 	live: { busy: false, turns: 0, partial: "", tools: [] },
 	state: null,
 	dispatches: [],
+	changes: [],
 	connected: false,
 	loaded: false,
 };
@@ -69,6 +70,22 @@ export function refreshDispatches(delay = 0) {
 	}, delay);
 }
 
+let changesTimer;
+export function refreshChanges(delay = 0) {
+	clearTimeout(changesTimer);
+	changesTimer = setTimeout(async () => {
+		try {
+			store.changes = (await getJson("/api/changes")).changes;
+			emit("changes");
+		} catch {
+			/* 忽略 */
+		}
+	}, delay);
+}
+export function pendingChanges() {
+	return store.changes.filter((c) => c.status === "pending" || c.status === "conflict");
+}
+
 export async function loadEarlier() {
 	const first = store.items[0];
 	if (!first || !store.hasMore) return 0;
@@ -128,7 +145,9 @@ export function buildRuns() {
 		if (run === last && store.live.busy) run.status = "running";
 		else if (lastAssistant?.stopReason === "aborted") run.status = "aborted";
 		else if (lastAssistant?.error) run.status = "error";
-		else if (run.answer) run.status = "done";
+		else if (run.answer)
+			// 总调度给了最终汇报，但中间有成员失败：标成"有失败"，别让失败藏在"完成"里
+			run.status = run.items.some((i) => i.type === "tool" && i.isError && !/<harness>/.test(i.text)) ? "partial" : "done";
 		else if (run === last && store.live.runFailure) run.status = store.live.runFailure.reason === "aborted" ? "aborted" : "error";
 		else if (run.items.some((i) => i.type === "tool" && /<harness>[\s\S]*aborted/i.test(i.text))) run.status = "aborted";
 		else run.status = "open";
@@ -157,7 +176,13 @@ export function connect() {
 		store.loaded = true;
 		refreshState();
 		refreshDispatches();
+		refreshChanges();
 		emit("snapshot");
+	});
+	// 改动记录变了：派工收尾、终端里 /apply /drop /clean
+	es.addEventListener("change", () => {
+		refreshChanges(150);
+		refreshState(400);
 	});
 	es.addEventListener("items", (e) => {
 		const fresh = mergeItems(JSON.parse(e.data));

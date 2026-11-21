@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { startAdmin, type AdminServer } from "./admin.ts";
+import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-ops.ts";
 import { openApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { demoConfig, demoOrchestrator } from "./demo.ts";
@@ -68,7 +69,73 @@ async function ask(text: string) {
 	return settled;
 }
 
+const STATUS_TEXT: Record<string, string> = {
+	running: "进行中",
+	pending: "待合并",
+	empty: "无改动",
+	applied: "已合并",
+	dropped: "已丢弃",
+	conflict: "有冲突",
+};
+
+function printChanges(all: boolean) {
+	const list = app.changes.list().filter((c) => all || c.status === "pending" || c.status === "conflict" || c.status === "running");
+	if (!list.length) {
+		console.log(c.dim(all ? "还没有隔离派工的改动。" : "没有待合并的改动（/changes all 查看全部）。"));
+		return;
+	}
+	for (const ch of list) {
+		const color = ch.status === "pending" ? c.yellow : ch.status === "conflict" ? c.red : ch.status === "applied" ? c.green : c.dim;
+		console.log(
+			`  ${color(`#${ch.id}`)} ${color(STATUS_TEXT[ch.status] ?? ch.status)}  ${ch.agent}${ch.model ? c.dim(`/${ch.model}`) : ""}  ${ch.files.length} 个文件 ${c.green(`+${ch.add}`)} ${c.red(`−${ch.del}`)}  ${c.dim(ch.task.replace(/\s+/g, " ").slice(0, 50))}`,
+		);
+	}
+	console.log(c.dim("  /diff <编号> 看改了哪些文件，/apply <编号> 合并到主目录，/drop <编号> 丢弃，/clean 清理已合并的 worktree"));
+}
+
+async function changeCommand(line: string): Promise<boolean> {
+	const [cmd, arg = ""] = line.split(/\s+/, 2);
+	switch (cmd) {
+		case "/changes":
+			printChanges(arg === "all");
+			return true;
+		case "/diff": {
+			const ch = app.changes.get(arg);
+			if (!ch) {
+				console.log(c.red(`找不到改动 ${arg || "（请给出编号）"}`));
+				return true;
+			}
+			console.log(`#${ch.id}  ${ch.branch}  ${STATUS_TEXT[ch.status] ?? ch.status}${ch.basedOn ? c.dim(`  基于 #${ch.basedOn}`) : ""}`);
+			for (const f of ch.files) console.log(`  ${c.green(`+${f.add}`.padStart(6))} ${c.red(`−${f.del}`.padEnd(6))} ${f.path}`);
+			if (admin) console.log(c.dim(`  完整差异：${admin.url}/#/changes/${ch.id}`));
+			return true;
+		}
+		case "/apply":
+		case "/drop": {
+			if (!arg) {
+				console.log(c.red(`用法：${cmd} <编号>（或 ${cmd} all 处理全部待合并的改动）`));
+				return true;
+			}
+			const ids = arg === "all" ? pendingChanges(app.changes).map((ch) => ch.id) : [arg];
+			if (!ids.length) console.log(c.dim("没有待合并的改动。"));
+			for (const id of ids) {
+				const r = cmd === "/apply" ? await applyChange(app.changes, id) : await dropChange(app.changes, id);
+				console.log(r.ok ? c.green(r.message) : c.red(r.message));
+			}
+			return true;
+		}
+		case "/clean": {
+			const r = await cleanChanges(app.changes);
+			console.log(c.green(r.message));
+			return true;
+		}
+		default:
+			return false;
+	}
+}
+
 async function command(line: string): Promise<boolean> {
+	if (await changeCommand(line)) return true;
 	switch (line) {
 		case "/exit":
 		case "/quit":
@@ -102,7 +169,13 @@ async function command(line: string): Promise<boolean> {
 
 function startRepl() {
 	printBanner();
-	console.log(c.dim("\n输入任务开始协作。命令：/agents /web /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。\n"));
+	console.log(c.dim("\n输入任务开始协作。命令：/agents /web /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。"));
+	console.log(c.dim("改动：/changes 待合并的改动、/diff <编号>、/apply <编号>、/drop <编号>、/clean\n"));
+	if (pendingChanges(app.changes).length) {
+		console.log(c.yellow(`有 ${pendingChanges(app.changes).length} 个改动等你确认合并：`));
+		printChanges(false);
+		console.log();
+	}
 	const repl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${c.cyan("你 ›")} ` });
 	rl = repl;
 	let busy = 0;

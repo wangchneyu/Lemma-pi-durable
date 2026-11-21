@@ -57,7 +57,13 @@ export function createOrchestratorModel(config: OrchestratorConfig): Orchestrato
 		baseUrl,
 		reasoning: false,
 		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		// 中转站模型没有内置定价：配了 orchestrator.price 才能算出总调度的花费
+		cost: {
+			input: config.price?.input ?? 0,
+			output: config.price?.output ?? 0,
+			cacheRead: config.price?.cacheRead ?? config.price?.input ?? 0,
+			cacheWrite: config.price?.input ?? 0,
+		},
 		contextWindow: config.contextWindow ?? 200_000,
 		maxTokens: config.maxTokens ?? 16_000,
 	};

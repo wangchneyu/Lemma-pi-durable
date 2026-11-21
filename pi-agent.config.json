@@ -8,20 +8,32 @@
 	},
 	"workdir": ".",
 	"storage": "./data/session.sqlite",
+	"isolation": { "enabled": true, "linkDirs": ["node_modules", ".venv", "venv"] },
+	"budget": { "perRunUsd": 3 },
 	"agents": {
 		"claude": {
 			"enabled": true,
 			"extraArgs": ["--permission-mode", "acceptEdits"],
+			"defaultModel": "claude-sonnet-5-5",
+			"models": [
+				{ "id": "claude-haiku-5-5", "tier": "economy", "note": "简单、机械的活：查资料、改格式、写小段文档" },
+				{ "id": "claude-sonnet-5-5", "tier": "standard", "note": "日常默认：写代码、重构、审查" },
+				{ "id": "claude-opus-5-5", "tier": "premium", "note": "复杂设计、跨模块重构、疑难问题" }
+			],
 			"timeoutMinutes": 30
 		},
 		"codex": {
 			"enabled": true,
 			"extraArgs": ["-c", "sandbox_mode=\"workspace-write\""],
+			"defaultModel": "gpt-6.1-sol",
+			"models": [{ "id": "gpt-6.1-sol", "tier": "standard", "note": "实现功能、跑测试、调试" }],
 			"timeoutMinutes": 30
 		},
 		"gemini": {
 			"enabled": true,
-			"extraArgs": ["--approval-mode", "auto_edit", "--skip-trust", "-m", "gemini-3.5-flash-lite"],
+			"extraArgs": ["--approval-mode", "auto_edit", "--skip-trust"],
+			"defaultModel": "gemini-3.5-flash-lite",
+			"models": [{ "id": "gemini-3.5-flash-lite", "tier": "economy", "note": "通读大量文件、调研、给第二意见（免费档只有这个可用）" }],
 			"timeoutMinutes": 30
 		}
 	}

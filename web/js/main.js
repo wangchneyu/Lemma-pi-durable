@@ -1,6 +1,6 @@
 // 后台入口：路由、顶栏状态、导航计数、主题，以及把数据变化分发给当前页面。
 import { closeDrawer } from "./drawer.js";
-import { buildRuns, connect, store, subscribe } from "./store.js";
+import { buildRuns, connect, pendingChanges, store, subscribe } from "./store.js";
 import { noteSlots } from "./ticket.js";
 import { $, $$, FAILURE_LABEL, copy, post, toast } from "./util.js";
 import { VIEWS } from "./views.js";
@@ -49,6 +49,7 @@ function renderChrome() {
 	const counts = {
 		runs: buildRuns().filter((r) => !r.divider).length + (store.hasMore ? "+" : ""),
 		dispatches: store.dispatches.length || "",
+		changes: pendingChanges().length || "",
 		sessions: state?.sessions.length || "",
 	};
 	for (const [k, v] of Object.entries(counts)) $(`[data-count="${k}"]`).textContent = v ? String(v) : "";
