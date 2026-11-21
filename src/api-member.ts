@@ -1,4 +1,4 @@
-// API 成员（比如 DeepSeek）：不需要本机装 CLI。pi-agent 直接调模型 API，在 Pi Durable 里开一个子对话，
+// API 成员（比如 DeepSeek）：不需要本机装 CLI。Lemma 直接调模型 API，在 Pi Durable 里开一个子对话，
 // 让它用内置的 read / write / edit / bash 工具在（隔离的）工作目录里干活。
 // 子对话本身是持久的：进程崩溃后重启，Pi Durable 会接着跑；会话 ID 就是子对话的编号，续接 = 往同一个子对话再发一条。
 import { existsSync, readFileSync } from "node:fs";
@@ -77,7 +77,7 @@ export function registerApiMembers(models: MutableModels, config: AppConfig): vo
 						name: `${kind} API key`,
 						resolve: async () => {
 							const { key } = memberKey(api);
-							return key ? { auth: { apiKey: key }, source: "pi-agent config" } : undefined;
+							return key ? { auth: { apiKey: key }, source: "Lemma config" } : undefined;
 						},
 					},
 				},
@@ -153,14 +153,14 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 	const rulesFile = join(workdir, ".pi-agent", "RULES.md");
 	const rules = existsSync(rulesFile) ? readFileSync(rulesFile, "utf8").trim().slice(0, 6000) : "";
 	return [
-		`你是 pi-agent 团队里的成员 ${label}（${kind}），由总调度派活。你在当前工作目录里完成交给你的任务。`,
+		`你是 Lemma 团队里的成员 ${label}（${kind}），由总调度派活。你在当前工作目录里完成交给你的任务。`,
 		"- 用 read 读文件，用 edit 精确修改，用 write 新建或整体重写文件。路径相对当前工作目录，只能读写工作目录里的文件（工作目录外的路径会被拒绝）；临时文件也放在工作目录里，用完删掉。",
 		api.bash === "off"
 			? "- 你没有 bash，不能运行命令。"
 			: api.bash === "all"
 				? "- 可以用 bash 运行命令（测试、构建、查看）。"
 				: `- 可以用 bash 运行这些命令（一次一条，不能串接或重定向）：${api.bashAllow.join("、")}。别的命令会被拒绝。`,
-		"- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（pi-agent 会替你提交到独立分支）。",
+		"- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（Lemma 会替你提交到独立分支）。",
 		"- 做完后用中文简要汇报：做了什么、改了哪些文件、测试结果、还有什么没做或有风险。",
 		...(rules ? ["", "项目的共同规则（.pi-agent/RULES.md）：", rules] : []),
 	].join("\n");

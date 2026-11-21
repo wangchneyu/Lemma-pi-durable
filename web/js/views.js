@@ -718,7 +718,7 @@ function changes() {
 // =====================================================================
 // Agent 规范：各家 CLI 的规范 / 配置文件
 // =====================================================================
-const OWNER_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", shared: "通用", "pi-agent": "pi-agent" };
+const OWNER_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", shared: "通用", "pi-agent": "Lemma" };
 const KIND_LABEL = { instructions: "说明", settings: "设置", subagent: "子 agent", command: "命令", skill: "技能", mcp: "MCP", project: "项目" };
 const KIND_ORDER = ["project", "instructions", "settings", "mcp", "subagent", "command", "skill"];
 

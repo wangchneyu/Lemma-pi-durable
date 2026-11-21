@@ -22,7 +22,7 @@ function route() {
 	closeDrawer();
 	$("#pageTitle").textContent = view.title;
 	$("#pageSub").textContent = view.sub;
-	document.title = `${view.title} · pi-agent 后台`;
+	document.title = `${view.title} · Lemma 后台`;
 	for (const a of $$("#nav a")) a.classList.toggle("active", a.dataset.view === target);
 	content.replaceChildren();
 	content.scrollTop = 0;

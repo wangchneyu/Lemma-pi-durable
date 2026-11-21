@@ -86,7 +86,7 @@ export class AgentTerminal {
 		document.addChild(this.partial);
 		this.scroll = new ScrollView(document, { follow: "end", primary: true, scrollbar: "hidden" });
 		this.tui.setLayoutRoot(new VStack([
-			{ component: new Line(() => c.cyan(` pi-agent${options.demo ? " · 演示模式" : ""}${options.session ? ` · ${terminalText(options.session)}` : ""}${options.conversationId ? ` · 总控 CID:${terminalText(options.conversationId)}` : ""}`) + c.dim(`  ${terminalText(options.model)}`)), shrink: 0 },
+			{ component: new Line(() => c.cyan(` Lemma${options.demo ? " · 演示模式" : ""}${options.session ? ` · ${terminalText(options.session)}` : ""}${options.conversationId ? ` · 总控 CID:${terminalText(options.conversationId)}` : ""}`) + c.dim(`  ${terminalText(options.model)}`)), shrink: 0 },
 			{ component: new Line(() => c.dim(` ${terminalText(options.workdir)}${options.web ? `  后台：${options.web}` : ""}`)), shrink: 0, visible: ({ height }) => height >= 10 },
 			{ component: this.scroll, basis: 0, grow: 1, minSize: 1 },
 			{ component: new Line(() => this.statusLine()), shrink: 0 },

@@ -171,7 +171,7 @@ async function sessionCommand(line: string) {
 }
 
 function printBanner() {
-	log(c.green(`pi-agent · 本机多 agent 协作（Pi Durable）${demo ? c.yellow("  [演示模式]") : ""}`));
+	log(c.green(`Lemma · 引理 · 本机多 Agent 协作（Pi Durable）${demo ? c.yellow("  [演示模式]") : ""}`));
 	log(c.dim(`总调度模型：${orchestrator.describe}`));
 	log(c.cyan(`会话：${sessionId} · ${sessionCatalog.get(sessionId).title}（/sessions 管理与切换）`));
 	log(c.cyan(`当前输入 → 总控对话 ${root.id}；成员各用独立 session_id（/conversation 查看隔离边界）`));
@@ -222,7 +222,7 @@ async function ask(text: string, whenBusy: "steer" | "followUp" = "followUp") {
 		log(c.red(`\n[${id}] 本轮没有完成：${reason ?? settled.status}${detail ? ` — ${detail}` : ""}`));
 		if (reason === "model_error" && CONTEXT_BLOCKED.test(detail ?? "")) {
 			// 服务商的内容检查拦下的是整段上下文：之后每次请求都会带上它，续跑和重发都没用
-			log(c.yellow("（这是模型服务商的内容检查拦截，不是 pi-agent 的故障。被拦的那条消息还在上下文里，之后每次请求都会被拦。输入 /new 重置上下文就能恢复；对话记录仍保存在存储里。）"));
+			log(c.yellow("（这是模型服务商的内容检查拦截，不是 Lemma 的故障。被拦的那条消息还在上下文里，之后每次请求都会被拦。输入 /new 重置上下文就能恢复；对话记录仍保存在存储里。）"));
 		} else if (reason === "model_error" || reason === "interrupted" || reason === "turn_limit") log(c.dim("（输入 /continue 可以在原来的上下文里续跑）"));
 	}
 	return settled;

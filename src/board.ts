@@ -87,7 +87,7 @@ export class ProjectFiles extends EventEmitter {
 	writeGoal(content: string, overwrite: boolean): { ok: boolean; message: string } {
 		if (existsSync(this.goalPath) && !overwrite) return { ok: false, message: "GOAL.md 已经存在，以用户写的为准；要改请先征得用户同意（overwrite: true）。" };
 		mkdirSync(this.dir, { recursive: true });
-		const body = `<!-- 由 pi-agent 总调度起草，待你确认：确认后删掉这一行，之后以你写的为准 -->\n${content.trim()}\n`;
+		const body = `<!-- 由 Lemma 总调度起草，待你确认：确认后删掉这一行，之后以你写的为准 -->\n${content.trim()}\n`;
 		writeFileSync(this.goalPath, body);
 		this.emit("change");
 		return { ok: true, message: `已写入 ${this.goalPath}（标明待用户确认）` };
@@ -130,7 +130,7 @@ export function renderAssign(tasks: BoardTask[], updatedAt: number): string {
 	const lines = [
 		"# 分工表（ASSIGN.md）",
 		"",
-		"> 由 pi-agent 总调度维护，**不要手动编辑**（手动改动会被另存为 ASSIGN.edited-*.md）。最终目标见同目录的 GOAL.md。",
+		"> 由 Lemma 总调度维护，**不要手动编辑**（手动改动会被另存为 ASSIGN.edited-*.md）。最终目标见同目录的 GOAL.md。",
 		`> 更新于 ${updatedAt ? new Date(updatedAt).toLocaleString("zh-CN", { hour12: false }) : "—"} · 共 ${active.length} 项：完成 ${count("done")}、进行中 ${count("doing")}、待验收 ${count("review")}、待办 ${count("todo")}、受阻 ${count("blocked")}`,
 		"",
 		"| 编号 | 状态 | 任务 | 角色 | 负责 | 依赖 |",

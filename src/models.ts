@@ -76,7 +76,7 @@ export function createOrchestratorModel(config: OrchestratorConfig): Orchestrato
 				name: "Orchestrator API key",
 				resolve: async () => {
 					const key = resolveKey(config);
-					return key ? { auth: { apiKey: key }, source: "pi-agent config" } : undefined;
+					return key ? { auth: { apiKey: key }, source: "Lemma config" } : undefined;
 				},
 			},
 		},

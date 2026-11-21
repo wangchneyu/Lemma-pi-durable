@@ -44,7 +44,7 @@ function acquireLock(storagePath: string): () => void {
 			}
 		}
 		if (alive) {
-			throw new Error(`会话存储 ${storagePath} 正被进程 ${pid} 使用（同一个存储只能开一个 pi-agent 终端）。`);
+			throw new Error(`会话存储 ${storagePath} 正被进程 ${pid} 使用（同一个存储只能开一个 Lemma 终端）。`);
 		}
 	}
 	writeFileSync(lock, String(process.pid));

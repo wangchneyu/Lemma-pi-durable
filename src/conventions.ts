@@ -68,7 +68,7 @@ const PATTERNS: Pattern[] = [
 	{ owner: "shared", kind: "instructions", dir: ".agent", match: /\.md$/i, depth: 2, scopes: ["project"] },
 	{ owner: "shared", kind: "instructions", dir: ".cursor/rules", match: /\.(md|mdc)$/i, depth: 2, scopes: ["project"] },
 	{ owner: "shared", kind: "instructions", file: ".github/copilot-instructions.md", scopes: ["project"] },
-	// pi-agent 自己
+	// Lemma 自己；owner 标识沿用旧值，兼容已有记录。
 	{ owner: "pi-agent", kind: "project", file: ".pi-agent/RULES.md", scopes: ["project"] },
 	{ owner: "pi-agent", kind: "project", file: ".pi-agent/GOAL.md", scopes: ["project"] },
 	{ owner: "pi-agent", kind: "project", file: ".pi-agent/ASSIGN.md", scopes: ["project"] },
@@ -304,7 +304,7 @@ export function syncRules(project: string): { ok: boolean; message: string; resu
 	const rules = readFileSync(rulesPath, "utf8").trim();
 	if (!rules) return { ok: false, message: "RULES.md 是空的。", results: [] };
 	const hash = rulesHash(rules);
-	const block = `<!-- pi-agent:rules hash=${hash} -->\n<!-- 下面这一段由 pi-agent 从 .pi-agent/RULES.md 同步，请改 RULES.md 再执行 /rules sync，不要直接改这里 -->\n\n${rules}\n\n${END}`;
+	const block = `<!-- pi-agent:rules hash=${hash} -->\n<!-- 下面这一段由 Lemma 从 .pi-agent/RULES.md 同步，请改 RULES.md 再执行 /rules sync，不要直接改这里 -->\n\n${rules}\n\n${END}`;
 	const results: { file: string; action: "created" | "updated" | "unchanged" }[] = [];
 	for (const t of SYNC_TARGETS) {
 		const path = join(project, t.file);

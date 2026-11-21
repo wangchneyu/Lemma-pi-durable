@@ -50,7 +50,7 @@ try {
 	check(state.orchestrator.keySource && !JSON.stringify(state).match(/sk-|token"/i), "配置信息只给出密钥来源，不含密钥");
 
 	const page = await raw("/");
-	check(page.status === 200 && page.body.includes("pi-agent 后台"), "首页可以访问");
+	check(page.status === 200 && page.body.includes("Lemma 后台") && page.body.includes("<h1>Lemma</h1>"), "首页可以访问并显示 Lemma 品牌");
 	const assets = await Promise.all(["/js/main.js", "/js/sankey.js", "/js/views.js", "/style.css"].map((p) => raw(p)));
 	check(assets.every((a) => a.status === 200), "静态资源可以访问");
 	const traversal = await raw("/..%2fpackage.json");

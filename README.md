@@ -1,56 +1,119 @@
-# pi-agent：本机多 agent 协作
+# Lemma（引理）
 
-基于 [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable)（`@earendil-works/pi-durable`，实验性）搭建。
-一个"总调度"agent 负责拆解任务、派活、汇总；本机已登录的 AI CLI，以及直接调 API 的模型（DeepSeek），作为干活的成员：
+> 把复杂目标，化为可验证的每一步。
 
+**Lemma 是一个以终端为入口、支持独立会话和持久化任务的本地多 Agent 协作工具。** 它把 Claude Code、Codex、Gemini CLI 和通过 API 接入的 DeepSeek 组织成一个团队：你提出目标，总调度拆解任务、选择成员和模型、协调并行工作，再汇总结果供你验收。
+
+项目基于 [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable)（`@earendil-works/pi-durable`，实验性）构建，用 SQLite 保存对话与执行状态；终端负责下发任务，本地网页展示进度、会话、改动和用量。
+
+## 为什么叫 Lemma
+
+在数学中，**引理是帮助证明后续命题的辅助命题**。一个复杂结论往往需要先建立若干引理，再把它们组合起来。
+
+Lemma 把这个思路用于 Agent 协作：把目标拆成有范围、有依赖、有验收标准的子任务，让不同成员分别完成；运行配置中的检查，保留结果与失败证据，再继续推进后续任务。名字表达的是“分解、验证、组合”的工作方式；实际验收能力取决于你配置的检查和人工审查。
+
+## 核心能力
+
+| 能力 | 在 Lemma 中如何工作 |
+|---|---|
+| 多 Agent 协作 | 总调度按角色分配任务，复用本机 CLI 登录；DeepSeek 可通过 API 子对话执行读写和测试 |
+| 并行与子调度 | 无依赖任务可并行或放到后台；较大子目标可交给一层子负责人拆解、派工和汇报 |
+| 独立对话 | 每个顶层会话单独保存消息、任务、成员上下文、派工、用量和修复记录；新建不清空旧数据 |
+| 持久化与恢复 | 切换后，已打开会话继续工作；进程重启后，打开对应会话可恢复历史并续接未完成任务 |
+| 代码改动隔离 | Git 项目中新派工默认在独立 worktree 中执行，改动供你检查并通过 `/apply` 应用 |
+| 验收与有限修复 | 按用户配置运行检查，失败后在次数和预算限制内修复；验证通过的修复记录可供后续任务参考 |
+| 上下文与花费管理 | 成员用自己的 `session_id` 续接，结果摘要限制长度；模型白名单、花费统计与成员预算帮助控制消耗 |
+| 本地管理网页 | 查看任务看板、协作拓扑、运行记录、改动、成员与用量，并管理对话、中止或取消任务 |
+
+## 协作流程
+
+```text
+你提出目标
+    │
+    ▼
+总调度 ── 拆任务、定范围与验收标准、选择成员和模型
+    ├─ ask_claude   → Claude Code
+    ├─ ask_codex    → Codex CLI
+    ├─ ask_gemini   → Gemini CLI
+    ├─ ask_deepseek → DeepSeek API 子对话
+    └─ delegate_to_lead → 子负责人 → 成员（最多一层子调度）
+    │
+    ▼
+收集结果 → 运行配置验收 → 失败时有限修复 → 汇总、人工审查与应用改动
+
+对话、任务和执行状态持久化；网页同步展示进度与历史。
 ```
-你 ──► 总调度（Pi Durable，SQLite 持久化）
-          ├─ ask_claude  → claude -p   （Claude Code）
-          ├─ ask_codex   → codex exec  （Codex / ChatGPT）
-          ├─ ask_gemini  → gemini      （Gemini CLI）
-          └─ ask_deepseek → Pi 子对话   （DeepSeek API + 内置读写工具）
+
+例如，你可以在终端输入：
+
+```text
+给项目增加 CSV 导出功能：先分析现有结构，再实现和补测试，最后审查。
+把任务和验收标准写进分工表，互不依赖的工作并行，改动先留在独立分支。
 ```
 
-- 每个成员都是完整的编码 agent，能在工作目录里读写文件、执行命令。DeepSeek 不需要装 CLI：pi-agent 在 Pi Durable 里给它开一个子对话，配上读、写、改文件和（白名单）bash 工具（见「API 成员：DeepSeek」）。
-- 同一轮里互不依赖的子任务会**并行**执行；耗时长的可以**放到后台**，总调度不用干等，结果回来后自动接着处理（见「同步和异步派工」）。
-- **一个成员可以同时开多个会话**；后台的「协作拓扑」页把总调度 → 成员 → 会话 → 每次派工画成泳道和时间线，谁和谁并行、谁基于谁的改动一目了然。
-- 成员返回 `session_id`，总调度之后可以在同一个上下文里继续追问或修改。CLI 的会话和启动目录绑定，续接时会自动回到会话当初的目录（会话登记表随对话一起持久化）。
-- **崩溃可恢复**：进程在成员干活时被杀，重启后会自动用 `--resume` 续接被中断的那个 CLI 会话，而不是从头重跑。
-- **工作区隔离**：工作目录是 git 仓库时，每次新派工都在独立的 git worktree 里干活，改动提交到独立分支，**等你在终端确认后才合并到主目录**。并行的成员不会互相覆盖文件。
-- **总调度选模型**：每位成员可以配一份模型清单（经济 / 标准 / 强力），总调度按任务难度挑；清单外的模型会被拒绝。
-- **花费上限**：一次运行（你的一次输入）里成员的花费超过上限后，后续派工被拒绝，总调度直接汇报已有结果。
+具体分工由总调度结合已启用的成员、角色、模型和任务依赖决定。每个成员只接收显式交付的任务、项目背景和自己的续接历史，不自动获得其他成员的完整聊天记录。
 
-## 运行
+## 适合的场景
 
-需要 Node ≥ 22.19。项目里的 `.npmrc` 让 `@earendil-works` 这组包走官方源（国内镜像同步有延迟），其他包仍走你的全局镜像。
+- 同时协调多个编码 Agent，让架构、实现、测试和审查围绕同一个目标协作。
+- 并行处理多个独立任务，希望各自保留对话、后台记录和代码改动。
+- 需要持续跟进较长任务，希望中断后恢复进度，并按验收结果修复问题。
+
+**当前边界**：执行进程随终端运行，关闭窗口后需要重新启动才能恢复；工作区与会话隔离不等于操作系统安全隔离；自动修复和记录复用也不等于模型训练。
+
+## 快速开始
+
+### 1. 准备环境
+
+- Node.js ≥ 22.19；使用 Git worktree 隔离时需要 Git 和一个 Git 仓库。
+- 在 `pi-agent.config.json` 中配置总调度模型及 API 密钥来源，见[配置说明](#配置)。
+- 准备至少一个可用成员：安装并登录相应的 Claude Code、Codex 或 Gemini CLI，或配置 DeepSeek API。
+- Windows 建议使用 Windows Terminal + PowerShell 7。
+
+项目里的 `.npmrc` 让 `@earendil-works` 这组包走官方源，其他包仍走你的全局镜像。
+
+### 2. 安装与启动
 
 ```bash
+git clone https://github.com/wangchneyu/pi-agent.git
+cd pi-agent
 npm install
-```
-
-先检查三个 CLI 能否调通（每个发一句话，会产生少量费用）：
-
-```bash
-npm run check
-```
-
-`npm run check` 用各成员的默认模型；想确认配置清单里的每个模型在你的中转站上都能用：
-
-```bash
-npm run check -- --models
-```
-
-```bash
+# 按配置说明准备总调度与成员后启动
 npm start
 ```
 
-终端是主体：任务只在终端里下发。启动交互模式时，同一个进程会顺带打开**后台网页** http://127.0.0.1:8787（地址会印在终端横幅里，也可以输入 `/web` 查看）。
+`npm start` 默认开启**真实模式**，会按所用模型和服务的规则计费。终端负责下发任务，同一个进程会启动本地后台网页，默认地址为 `http://127.0.0.1:8787`；以终端打印的地址或 `/web` 返回的地址为准。
 
-单次提问（答完退出，不开后台）：
+只想先体验界面和协作流程，可运行独立的演示模式（假模型与模拟 CLI，不调用真实 API）：
+
+```bash
+npm run demo:tui
+```
+
+### 3. 开始协作
+
+在终端描述目标，也可以先用 `/session new <编号>` 创建独立对话，再输入任务。`/tasks` 查看分工，`/jobs` 查看后台派工，`/changes` 查看待合并改动；审查后用 `/apply <改动编号>` 应用到主工作区。
+
+需要检查成员连接时，可选运行以下命令；它们会发送真实请求并可能产生费用：
+
+```bash
+npm run check
+npm run check -- --models
+```
+
+单次提问会在完成后退出，不启动后台网页：
 
 ```bash
 npm start -- "让 Codex 实现 X，再让 Claude 审查"
 ```
+
+详细说明：[终端操作](#新版终端默认真实模式) · [会话隔离](#多会话管理与隔离) · [自动修复](#验收自动修复与记录复用) · [配置](#配置) · [测试](#测试)
+
+### 从 pi-agent 继续使用
+
+项目现名为 **Lemma（引理）**，仓库地址与现有目录名仍保留 `pi-agent`。配置文件继续使用 `pi-agent.config.json`，环境变量继续使用 `PI_AGENT_*`，共同规则目录仍为 `.pi-agent/`。原有数据库、会话 ID、任务和后台记录沿用原路径，**无需迁移或清空数据**。
+
+## 使用指南
 
 ### 新版终端（默认真实模式）
 
@@ -170,7 +233,7 @@ npm run demo:tui
 
 ### Agent 规范文件
 
-三位成员各读各的规范文件：Claude 读 `CLAUDE.md` 和 `.claude/`（子 agent、命令、技能、设置），Codex 读 `AGENTS.md` 和 `~/.codex/`，Gemini 读 `GEMINI.md` 和 `.gemini/`；另外还有 `.agents/skills`、`.agent/`、`.cursor/rules` 等通用位置。pi-agent 把它们统一管起来：
+三位成员各读各的规范文件：Claude 读 `CLAUDE.md` 和 `.claude/`（子 agent、命令、技能、设置），Codex 读 `AGENTS.md` 和 `~/.codex/`，Gemini 读 `GEMINI.md` 和 `.gemini/`；另外还有 `.agents/skills`、`.agent/`、`.cursor/rules` 等通用位置。Lemma 把它们统一管起来：
 
 - **扫描**：项目和用户目录（`~`）里各家约定位置的文件，按"哪个成员会读到"归类，列出说明、设置、技能、命令、子 agent。只读白名单里的文件，设置文件里的 token / key 一律打码。
 - **检查**：哪个成员缺少项目级说明、共同规则是否同步、空文件、说明文件之间的矛盾（比如一份写 npm、一份写 pnpm）、设置文件里的明文密钥。
@@ -243,7 +306,9 @@ npm run demo
 
 可以在演示终端里试 `/changes`、`/diff`、`/apply`、`/drop`，改动会合并到沙盒仓库，不会碰你的真实项目。
 
-## 配置 `pi-agent.config.json`
+## 配置
+
+配置文件为项目根目录下的 `pi-agent.config.json`；可用 `PI_AGENT_CONFIG` 指定其他配置文件。
 
 **总调度模型**（`orchestrator`）：总调度本身需要一个 API 模型来做拆解和汇总，CLI 成员走它们各自的登录。
 
@@ -265,7 +330,7 @@ npm run demo
 - `command`：手动指定启动命令；不填时会在 npm 全局目录里自动查找真实入口
 - `timeoutMinutes`、`maxOutputChars`
 
-**API 成员：DeepSeek**（`agents.deepseek`）：不需要本机装 CLI。派工时 pi-agent 在 Pi Durable 里开一个子对话，用 DeepSeek 的 API 做模型，配上内置的 `read` / `write` / `edit` / `bash` 工具，在和其他成员一样的隔离 worktree 里干活。总调度看不到这些读写工具，只能派活给它。
+**API 成员：DeepSeek**（`agents.deepseek`）：不需要本机装 CLI。派工时 Lemma 在 Pi Durable 里开一个子对话，用 DeepSeek 的 API 做模型，配上内置的 `read` / `write` / `edit` / `bash` 工具，在和其他成员一样的隔离 worktree 里干活。总调度看不到这些读写工具，只能派活给它。
 
 - 要用它，需要两样：**密钥**（默认读环境变量 `DEEPSEEK_API_KEY`，可以改 `api.apiKeyEnv`）和**模型**。DeepSeek 的模型名会变（旧的 `deepseek-chat` / `deepseek-reasoner` 已计划退役），所以默认不写死，按 [DeepSeek 官方文档](https://api-docs.deepseek.com/quick_start/pricing) 填当前的模型名和单价：
 

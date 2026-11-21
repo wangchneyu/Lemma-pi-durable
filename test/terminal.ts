@@ -42,7 +42,7 @@ const frame = () => { ui.tui.renderNow(); return ui.tui.getScreenLines().map(ter
 
 try {
 	ui.start();
-	check(terminal.active && frame().includes("演示模式"), "新版终端可以启动并渲染完整界面");
+	check(terminal.active && frame().includes("Lemma") && frame().includes("演示模式"), "新版终端可以启动并显示 Lemma 品牌");
 	check(frame().includes("frontend") && frame().includes("总控 CID:controller-123"), "固定栏显示会话名称与总控对话 ID，区分会话与成员上下文");
 	ui.editor.setText("中文草稿🙂，不要被日志覆盖");
 	const cursor = ui.editor.getCursor();

@@ -1,7 +1,7 @@
 {
-  "name": "pi-agent",
+  "name": "lemma",
   "version": "1.0.0",
-  "description": "Local multi-agent orchestration (Claude Code / Codex / Gemini CLI) on Pi Durable",
+  "description": "Lemma: durable local multi-agent orchestration with isolated conversations and verified repair",
   "scripts": {
     "start": "node --no-warnings src/main.ts --tui --real",
     "demo": "node --no-warnings src/main.ts --demo",

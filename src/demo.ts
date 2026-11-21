@@ -41,7 +41,7 @@ const DEMO_MODELS: Record<"claude" | "codex" | "gemini", Pick<AgentConfig, "mode
 function ensureDemoWorkspace(dir: string): string {
 	if (existsSync(join(dir, ".git"))) return dir;
 	mkdirSync(join(dir, "src"), { recursive: true });
-	writeFileSync(join(dir, "README.md"), "# 演示项目\n\npi-agent 演示模式的沙盒仓库。成员的改动都在独立的 worktree 里，用 /apply 合并到这里。\n");
+	writeFileSync(join(dir, "README.md"), "# 演示项目\n\nLemma 演示模式的沙盒仓库。成员的改动都在独立的 worktree 里，用 /apply 合并到这里。\n");
 	writeFileSync(join(dir, "src", "cart.ts"), "export function total(items: { price: number; qty: number }[]) {\n\treturn items.reduce((s, i) => s + i.price * i.qty, 0);\n}\n");
 	writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
 	const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { stdio: "ignore", windowsHide: true });

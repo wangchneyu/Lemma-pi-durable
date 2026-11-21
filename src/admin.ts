@@ -53,7 +53,7 @@ const RESUME_COMMAND: Record<AgentKind, (id: string) => string> = {
 	claude: (id) => `claude --resume ${id}`,
 	codex: (id) => `codex resume ${id}`,
 	gemini: (id) => `gemini --resume ${id}`,
-	deepseek: () => "（Pi 子对话，由 pi-agent 续接）",
+	deepseek: () => "（Pi 子对话，由 Lemma 续接）",
 };
 
 function hostOf(url: string): string {
