@@ -2,8 +2,8 @@
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-export const AGENT_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
-export const KINDS = ["claude", "codex", "gemini"];
+export const AGENT_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", deepseek: "DeepSeek" };
+export const KINDS = ["claude", "codex", "gemini", "deepseek"];
 export const SLOT_LABEL = { pending: "排队", running: "执行中", sleeping: "等待中", waiting: "等待中", done: "完成" };
 export const STATUS_LABEL = { open: "无结果", running: "执行中", done: "完成", error: "失败", aborted: "已中止", interrupted: "被中断" };
 export const FAILURE_LABEL = {

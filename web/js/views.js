@@ -1047,9 +1047,18 @@ function agents() {
 						["最近", s.lastAt ? ago(s.lastAt) : "—"],
 					];
 					const config = [
+						...(a.api
+							? [
+									["接入方式", `API 成员（Pi 子对话）· <code>${esc(a.api.type)}</code> · ${esc(a.api.host)}`],
+									["密钥", esc(a.api.keySource)],
+									["工具", `read / write / edit${a.api.bash === "off" ? "" : ` / bash（${a.api.bash === "all" ? "全部放行" : `白名单 ${a.api.bashAllow.length} 条`}）`}`],
+								]
+							: []),
 						[
-							"启动命令",
-							a.command
+							a.api ? "启动命令" : "启动命令",
+							a.api
+								? `<span class="muted">不需要 CLI</span>`
+								: a.command?.length
 								? `<button type="button" class="cmd-chip" data-copy="${esc(a.command.join(" "))}" title="${esc(a.command.join(" "))}（点击复制）"><span>${esc(a.command.map((p) => p.split(/[\\/]/).pop()).join(" "))}</span></button>`
 								: `<span class="muted">${esc(a.reason ?? "未找到")}</span>`,
 						],

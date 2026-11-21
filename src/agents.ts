@@ -224,4 +224,18 @@ function geminiError(stderr: string): string | undefined {
 	return short(m[1]!.replace(/\\n/g, " ").replace(/\\"/g, '"'), 400);
 }
 
-export const ADAPTERS: Record<AgentKind, AgentAdapter> = { claude, codex, gemini };
+/**
+ * DeepSeek 是 API 成员：不启动 CLI，由 api-member.ts 在 Pi Durable 子对话里执行。
+ * 这里只提供名称和能力，供派工、后台展示共用；会话 = 子对话的编号，可以续接。
+ */
+const deepseek: AgentAdapter = {
+	kind: "deepseek",
+	label: "DeepSeek",
+	canResume: true,
+	presetSession: false,
+	buildArgs: () => [],
+	progress: () => ({}),
+	parse: (stdout) => ({ text: stdout, isError: false }),
+};
+
+export const ADAPTERS: Record<AgentKind, AgentAdapter> = { claude, codex, gemini, deepseek };

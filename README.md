@@ -1,16 +1,17 @@
 # pi-agent：本机多 agent 协作
 
 基于 [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable)（`@earendil-works/pi-durable`，实验性）搭建。
-一个"总调度"agent 负责拆解任务、派活、汇总；本机已登录的 AI CLI 作为干活的成员：
+一个"总调度"agent 负责拆解任务、派活、汇总；本机已登录的 AI CLI，以及直接调 API 的模型（DeepSeek），作为干活的成员：
 
 ```
 你 ──► 总调度（Pi Durable，SQLite 持久化）
           ├─ ask_claude  → claude -p   （Claude Code）
           ├─ ask_codex   → codex exec  （Codex / ChatGPT）
-          └─ ask_gemini  → gemini      （Gemini CLI）
+          ├─ ask_gemini  → gemini      （Gemini CLI）
+          └─ ask_deepseek → Pi 子对话   （DeepSeek API + 内置读写工具）
 ```
 
-- 每个成员都是完整的编码 agent，能在工作目录里读写文件、执行命令。
+- 每个成员都是完整的编码 agent，能在工作目录里读写文件、执行命令。DeepSeek 不需要装 CLI：pi-agent 在 Pi Durable 里给它开一个子对话，配上读、写、改文件和（白名单）bash 工具（见「API 成员：DeepSeek」）。
 - 同一轮里互不依赖的子任务会**并行**执行；耗时长的可以**放到后台**，总调度不用干等，结果回来后自动接着处理（见「同步和异步派工」）。
 - **一个成员可以同时开多个会话**；后台的「协作拓扑」页把总调度 → 成员 → 会话 → 每次派工画成泳道和时间线，谁和谁并行、谁基于谁的改动一目了然。
 - 成员返回 `session_id`，总调度之后可以在同一个上下文里继续追问或修改。CLI 的会话和启动目录绑定，续接时会自动回到会话当初的目录（会话登记表随对话一起持久化）。
@@ -62,7 +63,7 @@ npm start -- "让 Codex 实现 X，再让 Claude 审查"
 - **`.pi-agent/GOAL.md`：最终目标**。写清楚要做成什么、验收标准、约束和不做什么。**以你写的为准**；还没有这个文件时，你把项目目标告诉总调度，它会起草一份并标明"待你确认"，已经存在的不会被它改。
 - **`.pi-agent/ASSIGN.md`：分工表，由 AI 维护**。总调度把项目级任务拆成多项（`plan_tasks`），每项写明角色、负责成员、依赖和验收标准；派工时带上任务编号，成员完成后任务变成"待验收"，总调度对照验收标准核对，再标完成或打回（`update_task`）。任务数据存在 Pi Durable 里（和派工在同一个事务里，崩溃也不会错乱），每次变化后写出 ASSIGN.md，人和任何 AI 都能读。**不要手动编辑**：手动改过的会被另存为 `ASSIGN.edited-*.md`，不会丢，也不会被当成数据导回去。
 - **每次派工，成员都会拿到**：项目最终目标、自己负责的任务和验收标准、前置任务的状态，以及团队分工全貌（知道自己在全局里的位置）。
-- **角色**（配置里的 `roles`）：总调度按角色分工，比如架构用 Claude（opus）、设计用 Codex（GPT）、编码用 Gemini（不可用时由 Codex 顶上）、审查用 Claude（sonnet）。
+- **角色**（配置里的 `roles`）：总调度按角色分工，比如架构用 Claude（opus）、设计用 Codex（GPT）、编码用 DeepSeek（没配时由 Gemini / Codex 顶上）、审查用 Claude（sonnet）。
 
 终端里 `/goal` 看最终目标、`/tasks` 看分工表；后台的「项目」页显示目标、任务看板和角色分工。
 
@@ -147,7 +148,7 @@ npm run demo
 ```
 
 演示模式会真的在沙盒仓库的 worktree 里写文件。沙盒里带一份示例 GOAL.md；每个新任务都会先拆成任务写进分工表，按角色派工，完成后逐项验收。轮换几种剧本：
-- **异步**：设计、编码、调研三项放到后台并行，总调度用 `wait_jobs` 做完一个处理一个；编码做完后基于它的改动在后台派审查（Claude 同时开了两个会话）——打开「协作拓扑」看并行和依赖；
+- **异步**：设计（Claude）、实现（DeepSeek，演示里是脚本化的假模型，但真的在 worktree 里调用 `bash` / `write` 工具）、调研（Gemini）三项放到后台并行，总调度用 `wait_jobs` 做完一个处理一个；编码做完后基于它的改动在后台派审查（Claude 同时开了两个会话）——打开「协作拓扑」看并行和依赖；
 - Claude + Codex 同步并行；
 - Codex 实现完，再让 Claude 用强力模型**基于它的改动**审查（`based_on`）；
 - 三位成员并行，Claude 用经济档写文档，Codex 模拟一次失败；
@@ -178,11 +179,30 @@ npm run demo
 - `command`：手动指定启动命令；不填时会在 npm 全局目录里自动查找真实入口
 - `timeoutMinutes`、`maxOutputChars`
 
+**API 成员：DeepSeek**（`agents.deepseek`）：不需要本机装 CLI。派工时 pi-agent 在 Pi Durable 里开一个子对话，用 DeepSeek 的 API 做模型，配上内置的 `read` / `write` / `edit` / `bash` 工具，在和其他成员一样的隔离 worktree 里干活。总调度看不到这些读写工具，只能派活给它。
+
+- 要用它，需要两样：**密钥**（默认读环境变量 `DEEPSEEK_API_KEY`，可以改 `api.apiKeyEnv`）和**模型**。DeepSeek 的模型名会变（旧的 `deepseek-chat` / `deepseek-reasoner` 已计划退役），所以默认不写死，按 [DeepSeek 官方文档](https://api-docs.deepseek.com/quick_start/pricing) 填当前的模型名和单价：
+
+  ```json
+  "agents": {
+    "deepseek": {
+      "defaultModel": "<模型名>",
+      "models": [{ "id": "<模型名>", "tier": "economy", "note": "按设计写代码、写测试", "price": { "input": 0, "output": 0 } }]
+    }
+  }
+  ```
+
+  缺一样时它显示为不可用并说明原因，「编码」角色由 Gemini / Codex 顶上。配好后用 `npm run check -- deepseek` 发一句话确认能调通。
+- `api`：`type`（`openai-compatible` 或 `anthropic-compatible`）、`baseUrl`（默认 `https://api.deepseek.com`；用中转站就换成中转站地址）、`apiKeyEnv`、`contextWindow`、`maxTokens`、`maxTurns`（一次派工最多几轮工具调用，默认 40）。
+- `api.bash`：`allowlist`（默认）只放行 `api.bashAllow` 里开头的命令（测试、构建、`git status/diff/log`、`ls`、`cat`、`grep` 等），不能用 `;` `&&` `|` `>` `$()` 串接或重定向；`all` 全部放行；`off` 不给 bash。被拒绝的命令会告诉模型原因。
+- 会话 = 子对话：结果带回 `session_id`，总调度续接时 DeepSeek 能看到之前的对话。子对话本身是持久的，进程崩溃后重启会接着跑。可以同步派，也可以放后台。
+- 花费按 `models[].price` 计算；项目里有 `.pi-agent/RULES.md` 时，共同规则也会写进它的工作说明。
+
 **工作区隔离**（`isolation`）：`enabled`（默认 `true`，工作目录是 git 仓库时生效）；`linkDirs`（默认 `node_modules`、`.venv`、`venv`）：主目录里被 git 忽略的这些目录会用目录联接挂进 worktree，成员能直接跑测试。worktree 放在会话存储旁边的 `worktrees/` 里，不在你的仓库里。开工时会给当前工作区拍快照（`git stash create`，包含未提交的改动，但不含未跟踪的新文件）。
 
-**角色**（`roles`）：数组，每项 `{ "name", "agent", "model", "fallback", "note" }`。`agent` 是首选成员，`fallback` 是首选不可用时依次尝试的成员，`model` 是这个角色用的模型（不填用成员默认）。默认：架构 → claude（`claude-opus-5-5`）、设计 → codex、编码 → gemini（备选 codex）、审查 → claude（`claude-sonnet-5-5`）。
+**角色**（`roles`）：数组，每项 `{ "name", "agent", "model", "fallback", "note" }`。`agent` 是首选成员，`fallback` 是首选不可用时依次尝试的成员，`model` 是这个角色用的模型（不填用成员默认）。默认：架构 → claude（`claude-opus-5-5`）、设计 → codex、编码 → deepseek（备选 gemini、codex）、审查 → claude（`claude-sonnet-5-5`）。
 
-**花费上限**（`budget`）：`perRunUsd`（默认 `3`，`null` 不限）。只统计成员的花费：Claude 自报，Codex / Gemini 按 `models[].price` 估算，没配单价的计为 0。
+**花费上限**（`budget`）：`perRunUsd`（默认 `3`，`null` 不限）。只统计成员的花费：Claude 自报，Codex / Gemini / DeepSeek 按 `models[].price` 计算，没配单价的计为 0。
 
 **总调度单价**（`orchestrator.price`）：中转站模型没有内置定价，配上 `{ "input", "output" }`（每百万 tokens）才能在后台看到总调度花了多少。
 
@@ -202,6 +222,7 @@ npm test
 - `test/crash.ts`：成员执行到一半时强杀整个进程树，重启后续接同一会话并完成
 - `test/conventions.ts`：用临时项目和临时用户目录检查规范文件的扫描归类、一致性检查、密钥打码、只能按编号读文件，以及共同规则的新建 / 更新 / 保留原内容 / 过期检测
 - `test/board.ts`：拆任务 → 带目标和任务上下文派工 → 验收；ASSIGN.md 的内容、手动修改被另存；已有的 GOAL.md 不被总调度覆盖
+- `test/api-member.ts`：用 faux 模型代替 DeepSeek API：子对话里真的用 write / edit 改 worktree 的文件、bash 白名单拦下越界命令、总调度拿不到读写工具、续接同一个子对话、后台派工、按单价算花费；没配模型或密钥时不可用
 - `test/jobs.ts`：后台派工立刻返回；`wait_jobs` 的 all / any；没人等时结果自动发回并触发总调度继续；后台结果触发的运行不重置花费；总调度取消、任务退回待办；同一个会话不能同时被两次派工续接
 - `test/steer.ts`：插话在同一次运行里被总调度看到、排队的任务在这一轮之后处理、中止后 `continue` 续跑、手动压缩
 - `test/isolation.ts`：临时 git 仓库里走完整流程：模型白名单、在 worktree 里干活、快照包含未提交改动、依赖目录挂载、`based_on`、估算花费、超预算拦截、`/apply` 不冲掉主目录的未提交改动、`/drop` 删除分支
@@ -215,6 +236,7 @@ npm test
 | `src/agents.ts` | 各 CLI 适配器：参数、会话续接、输出解析、进度摘要 |
 | `src/tools.ts` | Pi Durable 工具：`ask_*`（同步 / 后台）、`wait_jobs`、`cancel_job`、分工表工具，后台派工任务，以及总调度的系统提示 |
 | `src/dispatch.ts` | 一次派工的完整过程（选模型、预算、隔离、带上下文、调用 CLI、提交改动、更新分工表），同步和后台派工共用 |
+| `src/api-member.ts` | API 成员（DeepSeek）：注册模型、读写工具和 bash 白名单、工作说明、在 Pi Durable 子对话里执行一次派工 |
 | `src/jobs.ts` | 后台派工：Pi Durable 里的记录、结果格式、本进程里的取消开关和实时输出 |
 | `src/board.ts` | 共同目标（GOAL.md）和分工表：任务数据、写出 ASSIGN.md、给总调度和成员的上下文 |
 | `src/conventions.ts` | Agent 规范文件：扫描归类、一致性检查、打码读取、共同规则同步 |

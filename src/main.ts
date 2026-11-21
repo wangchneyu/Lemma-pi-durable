@@ -14,7 +14,7 @@ import { initRules, scanConventions, syncRules } from "./conventions.ts";
 import { openApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { clip, Jobs, type JobRecord, type JobsState } from "./jobs.ts";
-import { demoConfig, demoOrchestrator } from "./demo.ts";
+import { demoConfig, demoOrchestrator, installDemoMember } from "./demo.ts";
 import { createOrchestratorModel } from "./models.ts";
 import { colors as c, follow } from "./printer.ts";
 
@@ -31,6 +31,7 @@ const app = await openApp(config, orchestrator, context).catch((error: Error) =>
 	process.exit(1);
 });
 const { harness, root, agents } = app;
+if (demo) installDemoMember(orchestrator.models);
 const stopFollowing = await follow(root, context);
 // 后台派工的实时输出：带上编号打印，提示符跟着重画
 app.jobs.on("output", (id: string, line: string) => {

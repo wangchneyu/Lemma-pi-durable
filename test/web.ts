@@ -44,7 +44,9 @@ try {
 	check(terminalOutput.includes(`后台网页：`) && terminalOutput.includes(String(port)), "终端横幅里显示后台地址");
 
 	const state = await json("/api/state");
-	check(state.demo === true && state.agents.length === 3 && state.agents.every((a: any) => a.available), "/api/state 返回演示模式和三个可用成员");
+	check(state.demo === true && state.agents.length === 4 && state.agents.every((a: any) => a.available), "/api/state 返回演示模式和四个可用成员");
+	const dsInfo = state.agents.find((a: any) => a.kind === "deepseek");
+	check(dsInfo?.api?.host === "api.deepseek.com" && /PI_AGENT_DEMO_KEY/.test(dsInfo.api.keySource) && !JSON.stringify(dsInfo).includes("demo-placeholder"), "DeepSeek 显示接入地址和密钥来源，不含密钥");
 	check(state.orchestrator.keySource && !JSON.stringify(state).match(/sk-|token"/i), "配置信息只给出密钥来源，不含密钥");
 
 	const page = await raw("/");
@@ -115,7 +117,7 @@ try {
 	check(typeof detail.result === "string" && detail.result.includes("_OK"), "后台派工的详情返回完整结果");
 	const after = await json("/api/state");
 	check(after.jobs.length === 4 && after.jobs.every((j: any) => j.status === "done"), "状态接口带上后台派工列表");
-	check(after.agentStats.claude?.done === 2 && after.agentStats.codex?.done === 1 && after.agentStats.gemini?.done === 1, "成员统计把后台派工算进去");
+	check(after.agentStats.claude?.done === 2 && after.agentStats.deepseek?.done === 1 && after.agentStats.gemini?.done === 1, "成员统计把后台派工算进去（实现由 DeepSeek 完成）");
 	const topo = await json("/api/topology");
 	const claudeLanes = topo.lanes.filter((l: any) => l.agent === "claude" && l.session);
 	check(topo.bars.length === 4 && topo.bars.every((b: any) => b.mode === "async"), "拓扑接口：四条后台派工时间条");

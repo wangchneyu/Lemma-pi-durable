@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord/context";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { ADAPTERS } from "./agents.ts";
+import { memberKey } from "./api-member.ts";
 import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
 import type { OrchestratorModel } from "./models.ts";
@@ -42,7 +43,16 @@ const RESUME_COMMAND: Record<AgentKind, (id: string) => string> = {
 	claude: (id) => `claude --resume ${id}`,
 	codex: (id) => `codex resume ${id}`,
 	gemini: (id) => `gemini --resume ${id}`,
+	deepseek: () => "（Pi 子对话，由 pi-agent 续接）",
 };
+
+function hostOf(url: string): string {
+	try {
+		return new URL(url).host;
+	} catch {
+		return url;
+	}
+}
 
 const MIME: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -395,6 +405,9 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					canResume: ADAPTERS[a.kind].canResume,
 					models: c.models,
 					defaultModel: c.defaultModel ?? null,
+					api: c.api
+						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow }
+						: null,
 				};
 			}),
 			agentStats: agentStats(),

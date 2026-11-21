@@ -4,7 +4,32 @@ import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-export type AgentKind = "claude" | "codex" | "gemini";
+/** claude / codex / gemini 是本机 CLI；deepseek 是 Pi 原生的 API 成员（Pi Durable 子对话 + 内置读写工具） */
+export type AgentKind = "claude" | "codex" | "gemini" | "deepseek";
+/** 走本机 CLI 的成员 */
+export const CLI_KINDS = ["claude", "codex", "gemini"] as const;
+
+/**
+ * API 成员：不需要本机装 CLI，pi-agent 直接调模型 API，在 Pi Durable 里开一个子对话，
+ * 用内置的 read / write / edit / bash 工具在（隔离的）工作目录里干活。
+ */
+export interface ApiMemberConfig {
+	/** openai-compatible：OpenAI Chat Completions 协议（DeepSeek 官方、各种中转站）；anthropic-compatible：Anthropic Messages 协议 */
+	type: "openai-compatible" | "anthropic-compatible";
+	baseUrl: string;
+	/** 读取密钥的环境变量名，按顺序尝试 */
+	apiKeyEnv: string[];
+	contextWindow?: number;
+	maxTokens?: number;
+	/** 一次派工里最多几轮工具调用 */
+	maxTurns?: number;
+	/**
+	 * bash 工具：allowlist 只放行 bashAllow 里开头的命令（不能用 ; && | > 等串接、重定向），
+	 * all 全部放行，off 不给 bash（只能读写文件）
+	 */
+	bash: "allowlist" | "all" | "off";
+	bashAllow: string[];
+}
 
 /** 每 100 万 tokens 的美元单价，用来估算不自报花费的 CLI（Codex、Gemini）和总调度的花费 */
 export interface Price {
@@ -38,6 +63,8 @@ export interface AgentConfig {
 	timeoutMinutes: number;
 	/** 返回给总调度的最大字符数，超出截断 */
 	maxOutputChars: number;
+	/** API 成员的接入方式（只有 API 成员有） */
+	api?: ApiMemberConfig;
 }
 
 export interface OrchestratorConfig {
@@ -138,13 +165,57 @@ const DEFAULTS: AppConfig = {
 			timeoutMinutes: 30,
 			maxOutputChars: 20000,
 		},
+		deepseek: {
+			enabled: true,
+			description: "DeepSeek（API 成员，Pi 原生）：便宜，适合按清楚的设计写代码、写测试、改小 bug。",
+			extraArgs: [],
+			// 模型名不写死：DeepSeek 的模型名会变，在配置里填实际可用的（见 api-docs.deepseek.com）
+			models: [],
+			timeoutMinutes: 30,
+			maxOutputChars: 20000,
+			api: {
+				type: "openai-compatible",
+				baseUrl: "https://api.deepseek.com",
+				apiKeyEnv: ["DEEPSEEK_API_KEY"],
+				contextWindow: 128_000,
+				maxTokens: 8192,
+				maxTurns: 40,
+				bash: "allowlist",
+				bashAllow: [
+					"npm test",
+					"npm run test",
+					"npm run lint",
+					"npm run typecheck",
+					"npm run build",
+					"npx tsc",
+					"node --test",
+					"pnpm test",
+					"yarn test",
+					"pytest",
+					"python -m pytest",
+					"cargo test",
+					"go test",
+					"git status",
+					"git diff",
+					"git log",
+					"ls",
+					"pwd",
+					"cat",
+					"head",
+					"tail",
+					"wc",
+					"grep",
+					"rg",
+				],
+			},
+		},
 	},
 	isolation: { enabled: true, linkDirs: ["node_modules", ".venv", "venv"] },
 	budget: { perRunUsd: 3 },
 	roles: [
 		{ name: "架构", agent: "claude", model: "claude-opus-5-5", note: "整体方案、模块划分、跨模块的复杂改动" },
 		{ name: "设计", agent: "codex", note: "接口和实现方案设计" },
-		{ name: "编码", agent: "gemini", fallback: ["codex"], note: "按设计实现功能、写测试" },
+		{ name: "编码", agent: "deepseek", fallback: ["gemini", "codex"], note: "按设计实现功能、写测试（DeepSeek 便宜；没配密钥时由 Gemini / Codex 顶上）" },
 		{ name: "审查", agent: "claude", model: "claude-sonnet-5-5", note: "代码审查、找问题、核对验收标准" },
 	],
 	web: { enabled: true, port: 8787 },
@@ -155,6 +226,7 @@ export const MODEL_FLAGS: Record<AgentKind, string[]> = {
 	claude: ["--model"],
 	codex: ["-m", "--model"],
 	gemini: ["-m", "--model"],
+	deepseek: [],
 };
 
 /** 去掉 extraArgs 里写死的模型参数，返回剩下的参数和其中的模型 */
@@ -179,6 +251,7 @@ export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 	const agents = { ...DEFAULTS.agents };
 	for (const kind of Object.keys(agents) as AgentKind[]) {
 		const merged = { ...DEFAULTS.agents[kind], ...(raw.agents?.[kind] ?? {}) };
+		if (DEFAULTS.agents[kind].api) merged.api = { ...DEFAULTS.agents[kind].api!, ...(raw.agents?.[kind]?.api ?? {}) };
 		// 兼容旧配置：extraArgs 里写死的 -m/--model 当作默认模型
 		const { rest, model } = splitModelArgs(kind, merged.extraArgs);
 		merged.extraArgs = rest;
@@ -216,7 +289,7 @@ function npmGlobalRoot(): string | undefined {
 	return npmRootCache || undefined;
 }
 
-const NPM_PACKAGES: Record<AgentKind, { pkg: string; bin: string }> = {
+const NPM_PACKAGES: Partial<Record<AgentKind, { pkg: string; bin: string }>> = {
 	claude: { pkg: "@anthropic-ai/claude-code", bin: "claude" },
 	codex: { pkg: "@openai/codex", bin: "codex" },
 	gemini: { pkg: "@google/gemini-cli", bin: "gemini" },
@@ -224,10 +297,13 @@ const NPM_PACKAGES: Record<AgentKind, { pkg: string; bin: string }> = {
 
 /** 返回 [可执行文件, ...前置参数]；找不到返回 undefined */
 export function resolveCommand(kind: AgentKind, agent: AgentConfig): string[] | undefined {
+	if (agent.api) return undefined; // API 成员不需要 CLI
 	if (agent.command && agent.command.length > 0) return agent.command;
+	const npm = NPM_PACKAGES[kind];
+	if (!npm) return undefined;
 	const root = npmGlobalRoot();
 	if (!root) return undefined;
-	const { pkg, bin } = NPM_PACKAGES[kind];
+	const { pkg, bin } = npm;
 	const pkgDir = join(root, ...pkg.split("/"));
 	const pkgJson = join(pkgDir, "package.json");
 	if (!existsSync(pkgJson)) return undefined;

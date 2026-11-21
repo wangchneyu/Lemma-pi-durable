@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { JsonValue } from "@earendil-works/chord/json";
-import { defineDoc, LiveDoc, type ConversationId, type JsonObject, type Tx } from "@earendil-works/pi-durable";
+import { defineDoc, LiveDoc, type ConversationId, type Extension, type JsonObject, type Tx } from "@earendil-works/pi-durable";
 import { ADAPTERS, type TokenUsage } from "./agents.ts";
 import { Board, taskBrief, type BoardState, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeRecord, ChangeStore } from "./changes.ts";
@@ -14,6 +14,7 @@ import type { AgentKind, AppConfig, ModelOption } from "./config.ts";
 import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
 import { addWorktree, commitAll, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
 import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
+import { memberInstructions, runApiMember, type ExecOutcome } from "./api-member.ts";
 
 /** 所有 CLI 会话的登记表：会话 ID → 哪个 agent、在哪个目录建立的、用了几轮。随对话一起持久化。 */
 export type SessionRecord = {
@@ -67,6 +68,8 @@ export interface DispatchDeps {
 	changes: ChangeStore;
 	project: ProjectFiles;
 	hub: JobHub;
+	/** API 成员的工具（读写文件 + 白名单 bash），按成员 */
+	memberTools?: Map<AgentKind, Extension>;
 }
 
 export type DispatchResult = {
@@ -330,7 +333,8 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 
 	let resumeId: string | undefined = args.session_id;
 	let prompt = `${brief}${args.task}`;
-	if (startedBefore && adapter.canResume) {
+	// API 成员的子对话本身是持久的：重放时按同一个提交接着等，不需要「中断后续接」的提示
+	if (startedBefore && adapter.canResume && !agent.api) {
 		const crashed = seenSession ?? presetSession;
 		if (crashed) {
 			resumeId = crashed;
@@ -339,7 +343,6 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	}
 	await io.memo("started", true);
 
-	const argv = [...command.slice(1), ...adapter.buildArgs({ resumeId, newSessionId: resumeId ? undefined : presetSession, model, extraArgs: agent.extraArgs })];
 	io.output(`▶ ${adapter.label} 开始执行${model ? `（模型 ${model}）` : ""}（cwd: ${cwd}${resumeId ? `，续接会话 ${resumeId}` : ""}${change ? `，隔离改动 #${change.id}` : ""}）\n`);
 	const detailBase = { agent: kind, cwd, resumeId: resumeId ?? null, model: model ?? null, changeId: change?.id ?? null };
 	await io.details({ ...detailBase, sessionId: (adapter.canResume ? (resumeId ?? presetSession) : undefined) ?? null } as JsonObject);
@@ -355,30 +358,54 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 
 	let memoizedSession = false;
 	let reportedModel: string | undefined;
-	let result: Awaited<ReturnType<typeof runCli>>;
+	/** 一拿到会话 ID 就持久化（进程崩了也能续接），并占住这个会话 */
+	const noteSession = (sid: string) => {
+		if (memoizedSession) return;
+		memoizedSession = true;
+		hold(sid);
+		void io.memo("seen-session", sid).catch(() => {});
+		if (adapter.canResume) void io.details({ ...detailBase, sessionId: sid } as JsonObject).catch(() => {});
+	};
+	let result: ExecOutcome;
 	try {
-		result = await runCli({
-			command: command[0]!,
-			args: argv,
-			cwd,
-			stdin: prompt,
-			env: cleanEnv(config.stripEnv),
-			timeoutMs: agent.timeoutMinutes * 60_000,
-			signal: io.signal,
-			onLine: (line, stream) => {
-				if (stream !== "stdout") return;
-				const p = adapter.progress(line);
-				if (p.model) reportedModel = p.model;
-				if (p.sessionId && !memoizedSession) {
-					memoizedSession = true;
-					hold(p.sessionId);
-					// 一拿到会话 ID 就持久化，进程崩了也能续接
-					void io.memo("seen-session", p.sessionId).catch(() => {});
-					if (adapter.canResume) void io.details({ ...detailBase, sessionId: p.sessionId } as JsonObject).catch(() => {});
-				}
-				if (p.summary) io.output(`${p.summary}\n`);
-			},
-		});
+		if (agent.api) {
+			// API 成员：Pi Durable 子对话 + 内置读写工具
+			const tools = deps.memberTools?.get(kind);
+			if (!hub.harness || !tools || !model) return fail(`${adapter.label} 没有就绪（模型或工具没有注册）。`);
+			result = await runApiMember({
+				harness: hub.harness,
+				hub,
+				kind,
+				api: agent.api,
+				tools,
+				model,
+				cwd,
+				prompt,
+				resumeId,
+				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label),
+				io,
+				timeoutMs: agent.timeoutMinutes * 60_000,
+				onSession: noteSession,
+			});
+		} else {
+			const argv = [...command.slice(1), ...adapter.buildArgs({ resumeId, newSessionId: resumeId ? undefined : presetSession, model, extraArgs: agent.extraArgs })];
+			result = await runCli({
+				command: command[0]!,
+				args: argv,
+				cwd,
+				stdin: prompt,
+				env: cleanEnv(config.stripEnv),
+				timeoutMs: agent.timeoutMinutes * 60_000,
+				signal: io.signal,
+				onLine: (line, stream) => {
+					if (stream !== "stdout") return;
+					const p = adapter.progress(line);
+					if (p.model) reportedModel = p.model;
+					if (p.sessionId) noteSession(p.sessionId);
+					if (p.summary) io.output(`${p.summary}\n`);
+				},
+			});
+		}
 	} finally {
 		for (const sid of holding) hub.busySessions.delete(sid);
 	}
@@ -397,7 +424,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		return { text, isError: true, summary: { changeId: c?.files.length ? c.id : undefined, body: text, durationMs: result.durationMs } };
 	}
 
-	const parsed = adapter.parse(result.stdout, result.stderr, result.exitCode);
+	const parsed = result.parsed ?? adapter.parse(result.stdout, result.stderr, result.exitCode);
 	const usedModel = parsed.model ?? reportedModel ?? model;
 	const estimated = parsed.costUsd === undefined ? estimateCost(models.find((m) => m.id === usedModel) ?? option, parsed.usage) : undefined;
 	const cost = parsed.costUsd ?? estimated;

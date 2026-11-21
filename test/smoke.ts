@@ -11,7 +11,8 @@ const config = testConfig();
 const orch = fauxOrchestrator();
 const { harness, root, agents } = await openApp(config, orch, context);
 
-check(agents.every((a) => a.available), "三个 agent（模拟 CLI）都被识别为可用");
+check(agents.filter((a) => a.kind !== "deepseek").every((a) => a.available), "三个 agent（模拟 CLI）都被识别为可用");
+check(agents.find((a) => a.kind === "deepseek")?.available === false, "没配 DeepSeek 时它不可用（不影响其他成员）");
 
 let claudeSession: string | undefined;
 orch.faux.setResponses([

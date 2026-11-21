@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import type { MutableModels } from "@earendil-works/pi-ai";
+import { memberProvider } from "./api-member.ts";
 import type { AgentConfig, AppConfig } from "./config.ts";
 import type { OrchestratorModel } from "./models.ts";
 
@@ -56,11 +58,21 @@ export function demoConfig(config: AppConfig): AppConfig {
 	for (const kind of ["claude", "codex", "gemini"] as const) {
 		demo.agents[kind] = { ...config.agents[kind], enabled: true, command: [process.execPath, FAKE_AGENT, kind], extraArgs: [], ...DEMO_MODELS[kind] };
 	}
+	// DeepSeek 是 API 成员：演示里用脚本化的假模型（installDemoMember），它会真的调用 write / bash 工具
+	demo.agents.deepseek = {
+		...config.agents.deepseek,
+		enabled: true,
+		defaultModel: "deepseek-demo",
+		models: [{ id: "deepseek-demo", tier: "economy", note: "演示用的假模型", price: { input: 0.3, output: 1.2 } }],
+		api: { ...config.agents.deepseek.api!, apiKeyEnv: ["PI_AGENT_DEMO_KEY"] },
+	};
+	process.env.PI_AGENT_DEMO_KEY ??= "demo-placeholder";
 	demo.budget = { perRunUsd: 0.5 };
 	// 演示的角色和剧本对上：Claude 设计 / 审查，Codex 编码，Gemini 调研
 	demo.roles = [
 		{ name: "设计", agent: "claude", note: "方案、文档" },
 		{ name: "编码", agent: "codex", note: "实现功能、跑测试" },
+		{ name: "实现", agent: "deepseek", fallback: ["codex"], note: "按设计写代码（便宜）" },
 		{ name: "审查", agent: "claude", model: "claude-opus-5-5", note: "严格审查、核对验收标准" },
 		{ name: "调研", agent: "gemini", note: "通读、列风险" },
 	];
@@ -98,6 +110,39 @@ function lastSession(messages: readonly any[], agent: string): string | undefine
 	return undefined;
 }
 
+/**
+ * 演示用的 DeepSeek：脚本化假模型，走和真实 API 成员一样的路径（Pi Durable 子对话 + read / write / bash 工具），
+ * 会在它的 worktree 里真的写一个文件、跑一条白名单命令，然后汇报。打开 Harness 之后调用（替换掉真实的 provider）。
+ */
+export function installDemoMember(models: MutableModels): void {
+	const faux = fauxProvider({ provider: memberProvider("deepseek"), models: [{ id: "deepseek-demo" }], tokensPerSecond: 80 });
+	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+	const delay = Number(process.env.FAKE_AGENT_DELAY_MS ?? 4000);
+	let n = 0;
+	const step = async (ctx: { messages: readonly any[] }) => {
+		let messages = ctx.messages;
+		while (messages.at(-1)?.role === "system") messages = messages.slice(0, -1);
+		const last = messages.at(-1);
+		await sleep(delay / 3);
+		if (last?.role === "user") {
+			const task = (textOf(last).split("【本次要做的事】").at(-1) ?? "").trim().slice(0, 40);
+			const slug = `${Date.now().toString(36).slice(-4)}${n++}`;
+			return fauxAssistantMessage(
+				[
+					fauxText("先看一下目录，再按设计写实现。"),
+					fauxToolCall("bash", { command: "ls" }, { id: `ds-ls-${slug}` }),
+					fauxToolCall("write", { path: `src/ds-${slug}.ts`, content: `// DeepSeek（演示）：${task}\nexport const done = true;\n` }, { id: `ds-w-${slug}` }),
+				],
+				{ stopReason: "toolUse" },
+			);
+		}
+		const wrote = messages.filter((m: any) => m.role === "toolResult" && m.toolName === "write").length;
+		return fauxAssistantMessage(fauxText(`DEEPSEEK_OK：按设计写好了实现（新建 ${wrote} 个文件），用 ls 确认了目录结构。演示环境没有 npm test，测试留给审查确认。`));
+	};
+	faux.setResponses(Array.from({ length: 2000 }, () => step));
+	models.setProvider(faux.provider);
+}
+
 export function demoOrchestrator(): OrchestratorModel {
 	const faux = fauxProvider({ provider: "demo", models: [{ id: "scripted-orchestrator" }], tokensPerSecond: 60 });
 	const models = createModels();
@@ -108,14 +153,14 @@ export function demoOrchestrator(): OrchestratorModel {
 	 * 一轮项目流程：plan（拆任务）→ work（按角色派工）→ review（剧本二：基于实现做审查）→ accept（验收）→ report。
 	 * 每个剧本的任务：[标题前缀, 角色, 成员, 额外参数, 依赖]
 	 */
-	type Step = { title: string; role: string; agent: "claude" | "codex" | "gemini"; args?: Record<string, unknown>; acceptance: string; deps?: string[] };
+	type Step = { title: string; role: string; agent: "claude" | "codex" | "gemini" | "deepseek"; args?: Record<string, unknown>; acceptance: string; deps?: string[] };
 	const SCENES: { intro: string; steps: Step[]; sequential?: boolean; async?: boolean }[] = [
 		{
-			intro: "设计、编码、调研互不依赖，放到后台并行；审查要等编码完成后再基于它的改动开工。",
+			intro: "设计（Claude）、实现（DeepSeek）、调研（Gemini）互不依赖，放到后台并行；审查要等实现完成后再基于它的改动开工。",
 			async: true,
 			steps: [
 				{ title: "设计方案", role: "设计", agent: "claude", acceptance: "方案写清楚接口和边界情况" },
-				{ title: "实现并跑测试", role: "编码", agent: "codex", args: { model: "codex-standard-demo" }, acceptance: "npm test 全部通过" },
+				{ title: "实现并跑测试", role: "实现", agent: "deepseek", acceptance: "npm test 全部通过" },
 				{ title: "调研并列出风险", role: "调研", agent: "gemini", acceptance: "列出至少 3 条风险" },
 				{ title: "审查实现", role: "审查", agent: "claude", args: { model: "claude-opus-5-5" }, acceptance: "没有阻塞性问题", deps: ["+2"] },
 			],

@@ -21,6 +21,7 @@
 	--claude: #e8875b;
 	--codex: #3ecfa5;
 	--gemini: #8b97ff;
+	--deepseek: #4fb3e8;
 	--orch: var(--signal);
 
 	--radius: 10px;
@@ -44,6 +45,7 @@
 	--claude: #c4612f;
 	--codex: #138a6a;
 	--gemini: #4b57d6;
+	--deepseek: #1f7fb5;
 	--shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 10px 24px -18px rgba(60, 40, 10, 0.35);
 	color-scheme: light;
 }
@@ -65,6 +67,7 @@
 		--claude: #c4612f;
 		--codex: #138a6a;
 		--gemini: #4b57d6;
+	--deepseek: #1f7fb5;
 		--shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 10px 24px -18px rgba(60, 40, 10, 0.35);
 		color-scheme: light;
 	}
@@ -1486,6 +1489,10 @@ pre {
 .ticket[data-kind="gemini"],
 .ticket[data-kind="gemini"] .pill {
 	--c: var(--gemini);
+}
+.ticket[data-kind="deepseek"],
+.ticket[data-kind="deepseek"] .pill {
+	--c: var(--deepseek);
 }
 .ticket-head {
 	display: flex;

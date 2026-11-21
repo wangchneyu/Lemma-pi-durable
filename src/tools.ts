@@ -5,6 +5,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { defineExtension, defineTask, defineTool, section, type Extension, type JsonObject } from "@earendil-works/pi-durable";
 import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { ADAPTERS } from "./agents.ts";
+import { createMemberTools, memberAvailability } from "./api-member.ts";
 import { Board, boardSummary, STATUS_LABEL, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeStore } from "./changes.ts";
 import { resolveCommand, type AgentKind, type AppConfig } from "./config.ts";
@@ -35,6 +36,11 @@ export function detectAgents(config: AppConfig): AgentAvailability[] {
 	return (Object.keys(ADAPTERS) as AgentKind[]).map((kind) => {
 		const agent = config.agents[kind];
 		if (!agent.enabled) return { kind, available: false, reason: "配置中已禁用" };
+		// API 成员：不需要 CLI，看模型和密钥
+		if (agent.api) {
+			const a = memberAvailability(agent);
+			return { kind, command: [], available: a.available, reason: a.reason };
+		}
 		const command = resolveCommand(kind, agent);
 		if (!command) return { kind, available: false, reason: "本机未安装（未找到 CLI）" };
 		return { kind, command, available: true };
@@ -487,9 +493,15 @@ export function createLocalAgentsExtension(
 	changes: ChangeStore,
 	project: ProjectFiles,
 	hub: JobHub,
-): { extension: Extension; agents: AgentAvailability[] } {
+): { extension: Extension; agents: AgentAvailability[]; memberExtensions: Extension[] } {
 	const agents = detectAgents(config);
-	const deps: DispatchDeps = { config, changes, project, hub };
+	// API 成员的工具扩展：只装给它们自己的子对话，总调度看不到
+	const memberTools = new Map<AgentKind, Extension>();
+	for (const a of agents) {
+		const api = config.agents[a.kind].api;
+		if (a.available && api) memberTools.set(a.kind, createMemberTools(a.kind, api));
+	}
+	const deps: DispatchDeps = { config, changes, project, hub, memberTools };
 	const commands = new Map(agents.filter((a) => a.available).map((a) => [a.kind, a.command!] as const));
 	const jobTask = createJobTask(deps, commands);
 	const tools = [
@@ -589,5 +601,5 @@ export function createLocalAgentsExtension(
 			}),
 		],
 	});
-	return { extension, agents };
+	return { extension, agents, memberExtensions: [...memberTools.values()] };
 }

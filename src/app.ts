@@ -5,6 +5,8 @@ import type { Context } from "@earendil-works/chord/context";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, MemoryStorage, type Conversation } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { registerApiMembers } from "./api-member.ts";
 import { ProjectFiles } from "./board.ts";
 import { ChangeStore } from "./changes.ts";
 import { JobHub } from "./jobs.ts";
@@ -69,9 +71,12 @@ export async function openApp(
 	const changes = new ChangeStore(`${config.storage}.changes.json`);
 	const project = new ProjectFiles(config.workdir);
 	const jobs = new JobHub();
-	const { extension, agents } = createLocalAgentsExtension(config, changes, project, jobs);
+	const { extension, agents, memberExtensions } = createLocalAgentsExtension(config, changes, project, jobs);
 	const registry = createRegistry();
 	registry.install(extension);
+	for (const ext of memberExtensions) registry.install(ext);
+	// API 成员（如 DeepSeek）的模型和总调度放在同一个模型目录里
+	registerApiMembers(orchestrator.models, config);
 
 	const releaseLock = options.memory || options.readOnly ? () => {} : acquireLock(config.storage);
 	const storage = options.memory ? new MemoryStorage() : await openNodeSqliteStorage(config.storage);
@@ -81,10 +86,14 @@ export async function openApp(
 		{
 			models: orchestrator.models,
 			registry,
+			// API 成员的读写工具通过执行环境访问文件和命令（工作目录 = 子对话的 cwd，即它的 worktree）
+			env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? config.workdir }),
 			readOnly: options.readOnly,
 			identity: { attribution: null },
 			settings: {
 				toolExecution: "parallel", // 同一轮里派给多个 agent 的任务并行执行
+				// 默认只选派工扩展：API 成员的读写工具不给总调度（它只派活，不自己改代码）
+				extensions: [extension],
 				retry: { maxRetries: 3 },
 				afterFailedRun: "continue",
 			},
