@@ -31,6 +31,8 @@ export function renderLogInto(box, output) {
 	if (stick) box.scrollTop = box.scrollHeight;
 }
 
+const JOB_LABEL = { done: "完成", failed: "失败", cancelled: "已取消" };
+
 export class Ticket {
 	constructor(call) {
 		this.callId = call.id;
@@ -80,14 +82,47 @@ export class Ticket {
 	}
 
 	settle(item) {
+		// 后台派工：这条结果只表示「已开工」，之后按后台记录更新（updateJob）
+		if (item.details?.job) return this.background(item.details.job);
 		this.settled = true;
 		this.node.classList.add("settled");
 		const r = parseResult(item);
 		this.pill.dataset.s = r.status === "done" ? "done" : r.status === "error" ? "error" : "aborted";
 		this.pill.textContent = `${STATUS_LABEL[r.status]}${r.durationMs ? ` · ${duration(r.durationMs)}` : ""}`;
+		this.showResult(r.body, r.status === "error");
+		this.showMeta(r);
+	}
 
+	background(jobId) {
+		this.jobId = jobId;
+		this.settled = true;
+		this.node.classList.add("bg");
+		this.pill.dataset.s = "running";
+		this.pill.textContent = `后台 ${jobId}`;
+		this.node.querySelector(".ticket-no").textContent = jobId;
+	}
+
+	/** 后台派工的状态和实时输出 */
+	updateJob(job) {
+		if (!job || this.jobDone) return;
+		if (job.status === "running") {
+			this.pill.dataset.s = "running";
+			this.pill.textContent = `后台执行中 ${duration(Date.now() - job.startedAt)}`;
+			renderLogInto(this.log, (job.output ?? []).join("\n"));
+			return;
+		}
+		this.jobDone = true;
+		this.node.classList.add("settled");
+		this.pill.dataset.s = job.status === "done" ? "done" : job.status === "failed" ? "error" : "aborted";
+		this.pill.textContent = `后台${JOB_LABEL[job.status] ?? job.status}${job.durationMs ? ` · ${duration(job.durationMs)}` : ""}`;
+		this.showResult(job.result ?? "", job.status === "failed");
+		this.showMeta({ sessionId: job.sessionId, cost: job.costUsd });
+	}
+
+	showResult(text, isError) {
 		this.result.hidden = false;
-		this.result.classList.toggle("err", r.status === "error");
+		this.result.classList.toggle("err", isError);
+		const r = { body: text };
 		const body = el("div", "result-body md", markdown(r.body || "（没有文字输出）"));
 		this.result.replaceChildren(body);
 		if (r.body.length > 900) {
@@ -100,7 +135,9 @@ export class Ticket {
 			});
 			this.result.append(more);
 		}
+	}
 
+	showMeta(r) {
 		const parts = [];
 		if (r.sessionId) parts.push(`会话 <button type="button" data-copy="${esc(r.sessionId)}">${esc(String(r.sessionId).slice(0, 8))}</button>`);
 		if (r.cost !== undefined && r.cost !== null) parts.push(`花费 ${esc(money(r.cost))}`);

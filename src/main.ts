@@ -4,7 +4,7 @@
 //   npm run demo              演示模式：假模型 + 模拟 CLI，不花钱（后台 8788）
 //   --no-web                  不开后台网页
 import { resolve } from "node:path";
-import { createInterface, type Interface } from "node:readline";
+import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { startAdmin, type AdminServer } from "./admin.ts";
@@ -13,6 +13,7 @@ import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-
 import { initRules, scanConventions, syncRules } from "./conventions.ts";
 import { openApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
+import { clip, Jobs, type JobRecord, type JobsState } from "./jobs.ts";
 import { demoConfig, demoOrchestrator } from "./demo.ts";
 import { createOrchestratorModel } from "./models.ts";
 import { colors as c, follow } from "./printer.ts";
@@ -31,9 +32,21 @@ const app = await openApp(config, orchestrator, context).catch((error: Error) =>
 });
 const { harness, root, agents } = app;
 const stopFollowing = await follow(root, context);
+// 后台派工的实时输出：带上编号打印，提示符跟着重画
+app.jobs.on("output", (id: string, line: string) => {
+	// 先擦掉当前的提示符行再打印；终端空闲时再把提示符（和已经输入的内容）画回来
+	if (rl && process.stdout.isTTY) {
+		clearLine(process.stdout, 0);
+		cursorTo(process.stdout, 0);
+	}
+	console.log(c.dim(`  [${id}] ${line}`));
+	if (replIdle()) rl?.prompt(true);
+});
 harness.resume(); // 上次进程中断时没跑完的任务，从断点继续
 
 let rl: Interface | undefined;
+/** 终端在等你输入（没有在等总调度回答） */
+let replIdle = () => false;
 let admin: AdminServer | undefined;
 let closing = false;
 
@@ -56,6 +69,8 @@ async function shutdown(code = 0): Promise<void> {
 	setImmediate(() => rl?.close());
 	await admin?.close().catch(() => {});
 	await stopFollowing();
+	// 关闭时被打断的后台派工不收尾，下次启动续接它的会话接着做
+	app.jobs.closing = true;
 	await harness.close(context);
 	// 不直接 process.exit()：Windows 上句柄未关完就退出会触发 libuv 断言。
 	// 让事件循环自然结束；万一有残留句柄，2 秒后兜底退出。
@@ -116,6 +131,58 @@ async function compactNow(instructions: string | undefined) {
 		);
 	} else {
 		console.log(c.red(`压缩没有完成：${outcome?.status ?? "未知"}${outcome?.error ? ` — ${outcome.error}` : ""}`));
+	}
+}
+
+const JOB_STATUS: Record<JobRecord["status"], string> = { running: "进行中", done: "完成", failed: "失败", cancelled: "已取消" };
+
+async function jobList(): Promise<JobRecord[]> {
+	const doc = (await harness.snapshot(Jobs, context)) as JobsState | undefined;
+	return Object.values(doc?.jobs ?? {}).sort((a, b) => b.startedAt - a.startedAt);
+}
+
+function jobLine(j: JobRecord): string {
+	const color = j.status === "running" ? c.cyan : j.status === "done" ? c.green : j.status === "failed" ? c.red : c.dim;
+	const seconds = Math.round(((j.endedAt ?? Date.now()) - j.startedAt) / 1000);
+	return `  ${color(`${j.id} ${JOB_STATUS[j.status]}`.padEnd(9))} ${j.agent}${j.model ? c.dim(`/${j.model}`) : ""}${j.taskId ? ` · ${j.taskId}` : ""}  ${c.dim(`${seconds}s${j.costUsd !== undefined ? ` · $${j.costUsd.toFixed(3)}` : ""}${j.changeId ? ` · 改动 #${j.changeId}` : ""}`)}  ${c.dim(clip(j.task, 50))}`;
+}
+
+async function jobsCommand(arg: string) {
+	const [sub, target = ""] = arg.split(/\s+/, 2);
+	const jobs = await jobList();
+	if (sub === "cancel") {
+		const ids = target === "all" ? jobs.filter((j) => j.status === "running").map((j) => j.id) : [target];
+		if (!ids[0]) return console.log(c.dim(target === "all" ? "没有进行中的后台派工。" : "用法：/jobs cancel <编号|all>"));
+		for (const id of ids) {
+			const r = await app.jobs.cancel(id, "user", context);
+			console.log(r === "cancelled" ? c.yellow(`已取消 ${id}（总调度会收到通知）`) : r === "not_running" ? c.dim(`${id} 已经结束了`) : c.red(`没有后台派工 ${id}`));
+		}
+		return;
+	}
+	if (sub) {
+		const j = jobs.find((x) => x.id.toLowerCase() === sub.toLowerCase());
+		if (!j) return console.log(c.red(`没有后台派工 ${sub}`));
+		console.log(jobLine(j));
+		console.log(c.dim(`  任务：${j.task}`));
+		if (j.sessionId) console.log(c.dim(`  会话：${j.sessionId}`));
+		const lines = app.jobs.recent(j.id).slice(-12);
+		if (lines.length) console.log([c.dim("  最近输出："), ...lines.map((l) => c.dim(`    ${l}`))].join("\n"));
+		if (j.result) console.log(`  结果：${clip(j.result, 600)}`);
+		return;
+	}
+	if (!jobs.length) return console.log(c.dim("还没有后台派工。总调度派耗时长、互不依赖的任务时会放到后台（background: true）。"));
+	const running = jobs.filter((j) => j.status === "running");
+	for (const j of [...running, ...jobs.filter((j) => j.status !== "running").slice(0, 10)]) console.log(jobLine(j));
+	console.log(c.dim(`  /jobs <编号> 看详情和实时输出，/jobs cancel <编号|all> 取消${admin ? `；拓扑：${admin.url}/#/topology` : ""}`));
+}
+
+/** 单次提问模式：等后台派工和它们触发的后续处理都结束 */
+async function untilSettled() {
+	for (;;) {
+		const running = (await jobList()).some((j) => j.status === "running");
+		const busy = (await liveState())?.run !== undefined;
+		if (!running && !busy) return;
+		await new Promise((r) => setTimeout(r, 500));
 	}
 }
 
@@ -254,6 +321,10 @@ async function command(line: string): Promise<boolean> {
 		console.log(c.dim(`  /rules init 生成共同规则模板、/rules sync 同步到各家说明文件${admin ? `；完整视图：${admin.url}/#/conventions` : ""}`));
 		return true;
 	}
+	if (head === "/jobs") {
+		await jobsCommand(arg);
+		return true;
+	}
 	if (head === "/continue") {
 		await continueRun();
 		return true;
@@ -281,9 +352,18 @@ async function command(line: string): Promise<boolean> {
 			return true;
 		}
 		case "/abort":
+		case "/abort all": {
 			await root.abort(context);
 			console.log(c.yellow("已中止。"));
+			const running = (await jobList()).filter((j) => j.status === "running");
+			if (line === "/abort all") {
+				for (const j of running) await app.jobs.cancel(j.id, "user", context);
+				if (running.length) console.log(c.yellow(`后台派工 ${running.map((j) => j.id).join("、")} 也已取消。`));
+			} else if (running.length) {
+				console.log(c.dim(`后台还有 ${running.length} 个派工在跑（${running.map((j) => j.id).join("、")}），做完后结果会发回总调度。/abort all 连它们一起停。`));
+			}
 			return true;
+		}
 		case "/new":
 			await root.reset(undefined, context);
 			console.log(c.yellow("已开始新的上下文（历史仍保存在存储里）。"));
@@ -298,6 +378,7 @@ function startRepl() {
 	console.log(c.dim("\n输入任务开始协作。命令：/agents /web /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。"));
 	console.log(c.dim("运行中：直接输入 = 插话（当前这一轮就能看到），/queue <任务> 排到下一轮；/continue 续跑中断的一轮，/compact 压缩上下文"));
 	console.log(c.dim("项目：/goal 最终目标、/tasks 分工表、/rules 各成员的规范文件（/rules init、/rules sync）"));
+	console.log(c.dim("后台：/jobs 后台派工（/jobs <编号>、/jobs cancel <编号|all>），/abort all 连后台派工一起停"));
 	console.log(c.dim("改动：/changes 待合并的改动、/diff <编号>、/apply <编号>、/drop <编号>、/clean\n"));
 	if (pendingChanges(app.changes).length) {
 		console.log(c.yellow(`有 ${pendingChanges(app.changes).length} 个改动等你确认合并：`));
@@ -307,6 +388,7 @@ function startRepl() {
 	const repl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${c.cyan("你 ›")} ` });
 	rl = repl;
 	let busy = 0;
+	replIdle = () => busy === 0 && !closing;
 
 	repl.on("SIGINT", async () => {
 		if (busy === 0) return shutdown(0);
@@ -318,7 +400,7 @@ function startRepl() {
 	// 命令按输入顺序一个一个执行（一次粘贴多行时，/apply 之后的 /clean 要等 /apply 做完）；
 	// /abort 和 /exit 不排队，随时生效。任务不排在这里：总调度自己有输入队列。
 	let commands = Promise.resolve();
-	const immediate = new Set(["/abort", "/exit", "/quit"]);
+	const immediate = new Set(["/abort", "/abort all", "/exit", "/quit"]);
 	repl.on("line", async (raw) => {
 		const line = raw.trim();
 		if (!line) return repl.prompt();
@@ -373,6 +455,7 @@ if (oneShot) {
 	printBanner();
 	console.log(`\n${c.cyan("你 ›")} ${oneShot}`);
 	const settled = await ask(oneShot);
+	await untilSettled();
 	await shutdown(settled.status === "done" ? 0 : 1);
 } else {
 	if (config.web.enabled && !flags.has("--no-web")) {

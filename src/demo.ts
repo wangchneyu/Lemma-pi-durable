@@ -109,7 +109,17 @@ export function demoOrchestrator(): OrchestratorModel {
 	 * 每个剧本的任务：[标题前缀, 角色, 成员, 额外参数, 依赖]
 	 */
 	type Step = { title: string; role: string; agent: "claude" | "codex" | "gemini"; args?: Record<string, unknown>; acceptance: string; deps?: string[] };
-	const SCENES: { intro: string; steps: Step[]; sequential?: boolean }[] = [
+	const SCENES: { intro: string; steps: Step[]; sequential?: boolean; async?: boolean }[] = [
+		{
+			intro: "设计、编码、调研互不依赖，放到后台并行；审查要等编码完成后再基于它的改动开工。",
+			async: true,
+			steps: [
+				{ title: "设计方案", role: "设计", agent: "claude", acceptance: "方案写清楚接口和边界情况" },
+				{ title: "实现并跑测试", role: "编码", agent: "codex", args: { model: "codex-standard-demo" }, acceptance: "npm test 全部通过" },
+				{ title: "调研并列出风险", role: "调研", agent: "gemini", acceptance: "列出至少 3 条风险" },
+				{ title: "审查实现", role: "审查", agent: "claude", args: { model: "claude-opus-5-5" }, acceptance: "没有阻塞性问题", deps: ["+2"] },
+			],
+		},
 		{
 			intro: "拆成设计和编码两项，并行派给 Claude 和 Codex。",
 			steps: [
@@ -134,7 +144,75 @@ export function demoOrchestrator(): OrchestratorModel {
 			],
 		},
 	];
-	let flow: { scene: (typeof SCENES)[number]; task: string; ids: string[]; next: number; results: any[]; phase: "plan" | "work" | "accept" } | undefined;
+	let flow:
+		| {
+				scene: (typeof SCENES)[number];
+				task: string;
+				ids: string[];
+				next: number;
+				results: any[];
+				phase: "plan" | "work" | "accept";
+				/** 异步剧本：后台编号 → 第几项任务、是否结束、结果 */
+				jobs?: Record<string, { step: number; done: boolean; ok?: boolean; change?: string; agent?: string; model?: string }>;
+				reviewSent?: boolean;
+		  }
+		| undefined;
+
+	/** 从后台结果（wait_jobs 的返回或自动发回的消息）里认出哪些后台派工结束了 */
+	const finishedJobs = (text: string) =>
+		[...text.matchAll(/【后台结果 (J\d+) · (完成|失败|已取消)】([^\n]*)[\s\S]*?(?=【后台结果 |$)/g)].map((m) => ({
+			id: m[1]!,
+			ok: m[2] === "完成",
+			agent: m[3]!.split(" · ")[0],
+			model: m[3]!.match(/模型 ([^ ·]+)/)?.[1],
+			change: m[0].match(/\[改动 #(\w+)：\d+ 个文件/)?.[1],
+		}));
+
+	/** 异步剧本的一步：开后台派工 → 等结果 → 每结束一个就验收，编码完成后在后台派审查 → 全部结束后汇报 */
+	const asyncStep = (results: any[], steer: string | undefined) => {
+		const f = flow!;
+		f.jobs ??= {};
+		const texts = [...results.map((m) => textOf(m)), ...(steer?.startsWith("【后台结果") ? [steer] : [])];
+		for (const t of results.filter((m) => String(m.toolName).startsWith("ask_")).map((m) => textOf(m))) {
+			const id = t.match(/已在后台开工 (J\d+)/)?.[1];
+			const task = t.match(/任务 (T\d+)/)?.[1];
+			if (id) f.jobs[id] = { step: Math.max(0, f.ids.indexOf(task ?? "")), done: false };
+		}
+		const fresh = texts.flatMap(finishedJobs).filter((j) => f.jobs![j.id] && !f.jobs![j.id]!.done);
+		const calls: any[] = [];
+		const lines: string[] = [];
+		for (const j of fresh) {
+			const rec = f.jobs[j.id]!;
+			Object.assign(rec, { done: true, ok: j.ok, change: j.change, agent: j.agent, model: j.model });
+			const id = f.ids[rec.step]!;
+			calls.push(
+				fauxToolCall("update_task", j.ok ? { id, status: "done", note: "对照验收标准核对通过（演示）" } : { id, status: "blocked", note: "成员失败，需要看报错后重派" }, {
+					id: `demo-u-${run}-${round}-${j.id}`,
+				}),
+			);
+			lines.push(`${j.id}（${id}）${j.ok ? "完成" : "失败"}`);
+			// 编码完成：基于它的改动，在后台派审查
+			if (rec.step === 1 && j.ok && !f.reviewSent) {
+				f.reviewSent = true;
+				calls.push(dispatch(f.scene.steps[3]!, f.ids[3]!, { background: true, ...(j.change ? { based_on: j.change } : {}) }));
+				lines.push(`基于改动 #${j.change ?? "?"} 在后台派审查 ${f.ids[3]}`);
+			}
+		}
+		if (calls.length) return fauxAssistantMessage([fauxText(`${lines.join("；")}。`), ...calls], { stopReason: "toolUse" });
+		const running = Object.entries(f.jobs).filter(([, j]) => !j.done).map(([id]) => id);
+		if (running.length) {
+			return fauxAssistantMessage([fauxText(`${running.join("、")} 还在后台进行，先等做完的那个。`), fauxToolCall("wait_jobs", { mode: "any" }, { id: `demo-w-${run}-${round}-${Object.keys(f.jobs).length}-${running.length}` })], {
+				stopReason: "toolUse",
+			});
+		}
+		const report = Object.entries(f.jobs).map(([jid, j]) => `- **${f.ids[j.step]}** ${j.agent ?? f.scene.steps[j.step]!.agent}${j.model ? `（${j.model}）` : ""}，后台 ${jid}：${j.ok ? "完成并通过验收" : "失败，标为受阻"}${j.change ? `　改动 \`#${j.change}\`` : ""}`);
+		flow = undefined;
+		return fauxAssistantMessage(
+			fauxText(
+				`## 汇报\n\n四项任务里三项一开始就在后台并行，审查等编码做完后基于它的改动开工；期间总调度没有干等。\n\n${report.join("\n")}\n\n改动都在独立分支里，确认后在终端 \`/apply all\`。并行情况见后台「协作拓扑」页。`,
+			),
+		);
+	};
 
 	const dispatch = (s: Step, id: string, extra: Record<string, unknown> = {}) =>
 		fauxToolCall(`ask_${s.agent}`, { task: `${s.title}：${flow!.task}`, task_id: id, ...(s.args ?? {}), ...extra }, { id: `demo-${s.agent}-${run}-${round}-${id}` });
@@ -151,7 +229,15 @@ export function demoOrchestrator(): OrchestratorModel {
 			messages = messages.slice(0, -1);
 			last = messages.at(-1);
 		}
-		const heard = steer ? `收到你的插话：「${steer}」，已按它调整。\n\n` : "";
+		const heard = steer && !steer.startsWith("【后台结果") ? `收到你的插话：「${steer}」，已按它调整。\n\n` : "";
+		if (flow?.scene.async && flow.phase === "work" && (last?.role === "toolResult" || steer)) {
+			const results: any[] = [];
+			for (const m of messages.slice().reverse()) {
+				if (m.role !== "toolResult") break;
+				results.unshift(m);
+			}
+			return asyncStep(results, steer);
+		}
 
 		if (last?.role === "toolResult" && flow) {
 			const results: any[] = [];
@@ -163,6 +249,13 @@ export function demoOrchestrator(): OrchestratorModel {
 			if (results.some((m) => m.toolName === "plan_tasks")) {
 				flow.ids = [...textOf(results.find((m) => m.toolName === "plan_tasks")).matchAll(/T\d+(?= )/g)].map((m) => m[0]).slice(0, flow.scene.steps.length);
 				flow.phase = "work";
+				if (flow.scene.async) {
+					const free = flow.scene.steps.map((st, i) => (st.deps ? -1 : i)).filter((i) => i >= 0);
+					return fauxAssistantMessage(
+						[fauxText(`${heard}分工表已更新。${free.map((i) => flow!.ids[i]).join("、")} 互不依赖，放到后台同时做。`), ...free.map((i) => dispatch(flow!.scene.steps[i]!, flow!.ids[i]!, { background: true }))],
+						{ stopReason: "toolUse" },
+					);
+				}
 				const batch = flow.scene.sequential ? [0] : flow.scene.steps.map((_, i) => i);
 				flow.next = batch.length;
 				return fauxAssistantMessage([fauxText(`${heard}分工表已更新，按角色派工。`), ...batch.map((i) => dispatch(flow!.scene.steps[i]!, flow!.ids[i]!))], { stopReason: "toolUse" });
@@ -208,6 +301,9 @@ export function demoOrchestrator(): OrchestratorModel {
 			);
 		}
 
+		if (lastUserText(ctx.messages).startsWith("【后台结果")) {
+			return fauxAssistantMessage(fauxText("收到后台结果（演示）。这一批的其余任务已经停了，需要的话重新下达。"));
+		}
 		const task = lastUserText(ctx.messages).slice(0, 60) || "演示任务";
 		// 提问：不派工，直接回答
 		if (/[?？]$|什么|多少|怎么样/.test(task)) {

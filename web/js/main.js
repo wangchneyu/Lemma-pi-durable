@@ -1,6 +1,6 @@
 // 后台入口：路由、顶栏状态、导航计数、主题，以及把数据变化分发给当前页面。
 import { closeDrawer } from "./drawer.js";
-import { buildRuns, connect, pendingChanges, store, subscribe } from "./store.js";
+import { buildRuns, connect, pendingChanges, runningJobs, store, subscribe } from "./store.js";
 import { noteSlots } from "./ticket.js";
 import { $, $$, FAILURE_LABEL, copy, post, toast } from "./util.js";
 import { VIEWS } from "./views.js";
@@ -37,10 +37,14 @@ function renderChrome() {
 	const inbox = live.inbox ?? [];
 	const steers = inbox.filter((i) => i.mode === "steer").length;
 	const queued = inbox.length - steers;
-	const waiting = `${steers ? ` · 插话 ${steers}` : ""}${queued ? ` · 排队 ${queued}` : ""}`;
+	const jobs = runningJobs().length;
+	const waiting = `${steers ? ` · 插话 ${steers}` : ""}${queued ? ` · 排队 ${queued}` : ""}${jobs ? ` · 后台 ${jobs}` : ""}`;
 	if (live.busy) {
 		status.dataset.state = "busy";
 		$("#statusText").textContent = `调度中 · 第 ${live.turns + 1} 轮${running ? ` · ${running} 名成员执行中` : ""}${live.retry ? " · 模型重试中" : ""}${waiting}`;
+	} else if (jobs) {
+		status.dataset.state = "busy";
+		$("#statusText").textContent = `后台执行中 · ${jobs} 项（总调度空闲，结果回来后自动继续）`;
 	} else if (live.runFailure && live.runFailure.reason !== "aborted") {
 		status.dataset.state = "failed";
 		$("#statusText").textContent = `上一轮未完成：${FAILURE_LABEL[live.runFailure.reason] ?? live.runFailure.reason}`;
@@ -59,6 +63,7 @@ function renderChrome() {
 			return tasks.length ? `${tasks.filter((t) => t.status === "done").length}/${tasks.length}` : "";
 		})(),
 		sessions: state?.sessions.length || "",
+		topology: runningJobs().length ? `后台 ${runningJobs().length}` : "",
 	};
 	for (const [k, v] of Object.entries(counts)) $(`[data-count="${k}"]`).textContent = v ? String(v) : "";
 }
@@ -83,7 +88,7 @@ subscribe((kind, payload) => {
 
 // 每秒刷新计时（执行中的派工、运行时长）
 setInterval(() => {
-	if (store.live.busy) view?.update("tick");
+	if (store.live.busy || runningJobs().length) view?.update("tick");
 }, 1000);
 
 // ---------- 控制 ----------

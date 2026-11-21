@@ -7,6 +7,7 @@ import { createRegistry, Harness, MemoryStorage, type Conversation } from "@eare
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { ProjectFiles } from "./board.ts";
 import { ChangeStore } from "./changes.ts";
+import { JobHub } from "./jobs.ts";
 import type { AppConfig } from "./config.ts";
 import { createLocalAgentsExtension, type AgentAvailability } from "./tools.ts";
 
@@ -18,6 +19,8 @@ export interface App {
 	changes: ChangeStore;
 	/** 项目目标（GOAL.md）和分工表文件（ASSIGN.md） */
 	project: ProjectFiles;
+	/** 后台派工的运行时状态：取消、实时输出 */
+	jobs: JobHub;
 }
 
 /**
@@ -65,7 +68,8 @@ export async function openApp(
 	if (!options.memory) mkdirSync(dirname(config.storage), { recursive: true });
 	const changes = new ChangeStore(`${config.storage}.changes.json`);
 	const project = new ProjectFiles(config.workdir);
-	const { extension, agents } = createLocalAgentsExtension(config, changes, project);
+	const jobs = new JobHub();
+	const { extension, agents } = createLocalAgentsExtension(config, changes, project, jobs);
 	const registry = createRegistry();
 	registry.install(extension);
 
@@ -100,5 +104,6 @@ export async function openApp(
 		// 配置文件改了模型时，让已存在的会话跟着更新
 		await root.configure({ model: orchestrator.ref, maxTurns: config.orchestrator.maxTurns ?? 40, cwd: config.workdir }, context);
 	}
-	return { harness, root, agents, changes, project };
+	jobs.harness = harness;
+	return { harness, root, agents, changes, project, jobs };
 }

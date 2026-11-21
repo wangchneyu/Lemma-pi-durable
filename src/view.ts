@@ -1,5 +1,6 @@
 // 把 Pi Durable 的条目和 pi.live 文档转换成前端直接能渲染的简单 JSON。
 import type { EntryRecord } from "@earendil-works/pi-durable";
+import { JOB_REPORT_ENTRY } from "./jobs.ts";
 
 export type ViewItem =
 	| { id: number; type: "user"; text: string; at?: number }
@@ -13,7 +14,9 @@ export type ViewItem =
 			at?: number;
 	  }
 	| { id: number; type: "tool"; callId: string; name: string; text: string; isError: boolean; details?: unknown; at?: number }
-	| { id: number; type: "divider"; label: string };
+	| { id: number; type: "divider"; label: string }
+	/** 后台派工的结果发回总调度 */
+	| { id: number; type: "job"; job: string; agent: string; status: string; text: string; at?: number };
 
 export interface ViewLive {
 	busy: boolean;
@@ -67,6 +70,10 @@ export function toViewItem(entry: EntryRecord): ViewItem | undefined {
 				details: message?.details,
 				at: message?.timestamp,
 			};
+		case JOB_REPORT_ENTRY: {
+			const data = (entry as any).data ?? {};
+			return { id, type: "job", job: String(data.job ?? ""), agent: String(data.agent ?? ""), status: String(data.status ?? ""), text: textOf(message?.content), at: message?.timestamp };
+		}
 		case "pi.reset":
 			return { id, type: "divider", label: "新的上下文" };
 		case "pi.compaction":
@@ -106,6 +113,10 @@ export interface Dispatch {
 	changeId?: string;
 	/** 基于哪次改动开工 */
 	basedOn?: string;
+	/** 分工表任务 */
+	taskId?: string;
+	/** 后台派工的编号（background: true） */
+	job?: string;
 }
 
 /** 解析工具结果：去掉末尾的 [agent: … | 耗时: … | 花费: …]，识别 Pi Durable 写入的 <harness> 说明 */

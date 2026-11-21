@@ -1,6 +1,7 @@
 // 在终端里实时打印总调度和各 agent 的进度。
 import type { Context } from "@earendil-works/chord/context";
 import type { Conversation, EntryRecord } from "@earendil-works/pi-durable";
+import { JOB_REPORT_ENTRY } from "./jobs.ts";
 
 const c = {
 	dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -28,12 +29,19 @@ function clip(text: string, max: number): string {
 export function printEntry(entry: EntryRecord): void {
 	const message = entry.model?.[0] as any;
 	if (!message) return;
+	if (entry.kind === JOB_REPORT_ENTRY) {
+		// 后台派工的结果发回总调度：标题行醒目，正文截一段
+		const [head = "", ...body] = textOf(message.content).split("\n");
+		const failed = /· (失败|已取消)】/.test(head);
+		console.log(`\n${failed ? c.red(`◆ ${head}`) : c.yellow(`◆ ${head}`)}\n${c.dim(clip(body.join("\n").replace(/\n*（这是后台派工的结果[\s\S]*$/, ""), 800))}`);
+		return;
+	}
 	if (entry.kind === "pi.assistant") {
 		for (const block of message.content ?? []) {
 			if (block.type === "text" && block.text?.trim()) console.log(`\n${c.green("总调度 ›")} ${block.text.trim()}`);
 			if (block.type === "toolCall") {
 				const args = block.arguments ?? {};
-				const extra = args.session_id ? c.dim(` (续接 ${args.session_id})`) : "";
+				const extra = c.dim(`${args.background ? " (后台)" : ""}${args.session_id ? ` (续接 ${args.session_id})` : ""}`);
 				console.log(`\n${c.cyan(`→ ${block.name}`)}${extra}\n${c.dim(clip(String(args.task ?? JSON.stringify(args)), 400))}`);
 			}
 		}

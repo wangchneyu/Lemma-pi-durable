@@ -14,6 +14,7 @@ import type { OrchestratorModel } from "./models.ts";
 import { Board, boardTasks, type BoardState } from "./board.ts";
 import { readConvention, scanConventions } from "./conventions.ts";
 import { diffText } from "./git.ts";
+import { Jobs, type JobRecord, type JobsState } from "./jobs.ts";
 import { AgentSessions, RunBudget } from "./tools.ts";
 import { parseToolResult, toViewItem, toViewLive, type Dispatch, type ViewItem, type ViewLive } from "./view.ts";
 
@@ -80,6 +81,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					status: "open",
 					model: typeof call.args.model === "string" ? call.args.model : config.agents[call.name.replace(/^ask_/, "") as AgentKind]?.defaultModel,
 					basedOn: typeof call.args.based_on === "string" ? call.args.based_on : undefined,
+					taskId: typeof call.args.task_id === "string" ? call.args.task_id : undefined,
 				});
 			}
 		} else if (item.type === "tool") {
@@ -106,8 +108,42 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			if (typeof details?.model === "string") d.model = details.model;
 			d.costEstimated = details?.costEstimated === true || undefined;
 			if (typeof details?.changeId === "string") d.changeId = details.changeId;
+			// 后台派工：这条结果只是「已开工」，真正的结果在后台派工记录里（见 withJob）
+			if (typeof details?.job === "string") {
+				d.job = details.job;
+				d.status = "open";
+				d.endAt = undefined;
+				d.durationMs = undefined;
+			}
 		}
 	}
+
+	// ---------- 后台派工：Pi Durable 文档里的记录，叠加到派工汇总上 ----------
+	let jobs: Record<string, JobRecord> = {};
+	async function refreshJobs() {
+		jobs = ((await harness.snapshot(Jobs, context)) as JobsState | undefined)?.jobs ?? {};
+	}
+	await refreshJobs();
+	/** 后台派工以后台记录为准（状态、会话、花费、结束时间） */
+	function withJob(d: Dispatch): Dispatch {
+		const j = d.job ? jobs[d.job] : undefined;
+		if (!j) return d;
+		const status: Dispatch["status"] = j.status === "running" ? "open" : j.status === "done" ? "done" : j.status === "failed" ? "error" : "aborted";
+		return {
+			...d,
+			status,
+			at: j.startedAt,
+			endAt: j.endedAt,
+			durationMs: j.durationMs,
+			cost: j.costUsd,
+			costEstimated: j.costEstimated,
+			sessionId: j.sessionId,
+			model: j.model ?? d.model,
+			changeId: j.changeId,
+			preview: j.result ? j.result.slice(0, 280) : d.preview,
+		};
+	}
+	const allDispatches = () => [...dispatches.values()].map(withJob);
 	let cursor: any;
 	do {
 		const page = await root.entries({ order: "ascending" }, 500, cursor, context);
@@ -117,7 +153,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 
 	function agentStats() {
 		const stats: Record<string, { total: number; done: number; error: number; aborted: number; open: number; durationMs: number; timed: number; cost: number; lastAt?: number }> = {};
-		for (const d of dispatches.values()) {
+		for (const d of allDispatches()) {
 			const s = (stats[d.agent] ??= { total: 0, done: 0, error: 0, aborted: 0, open: 0, durationMs: 0, timed: 0, cost: 0 });
 			s.total++;
 			if (d.status === "done") s.done++;
@@ -138,7 +174,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	/** 按 成员 × 模型 汇总：用来对比不同模型的花费和成功率 */
 	function modelStats() {
 		const rows = new Map<string, { agent: string; model: string; total: number; done: number; error: number; durationMs: number; timed: number; cost: number; estimated: boolean }>();
-		for (const d of dispatches.values()) {
+		for (const d of allDispatches()) {
 			const model = d.model ?? "（CLI 默认）";
 			const key = `${d.agent}|${model}`;
 			let r = rows.get(key);
@@ -192,6 +228,13 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	// 目标或分工表变了：通知页面刷新「项目」
 	const onProject = () => broadcast("project", null);
 	project.on("change", onProject);
+	// 后台派工开工 / 结束：刷新记录并通知页面；成员的实时输出直接转发
+	const onJobs = () => {
+		void refreshJobs().then(() => broadcast("jobs", Object.values(jobs)));
+	};
+	const onJobOutput = (id: string, line: string) => broadcast("job-output", { id, line });
+	app.jobs.on("change", onJobs);
+	app.jobs.on("output", onJobOutput);
 	const ping = setInterval(() => {
 		for (const res of clients) res.write(": ping\n\n");
 	}, 20_000);
@@ -222,11 +265,89 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		return { items, hasMore };
 	}
 
+	/** 后台派工列表：进行中的在前，带最近的实时输出 */
+	function jobList() {
+		return Object.values(jobs)
+			.sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || b.startedAt - a.startedAt)
+			.map((j) => ({ ...j, waiter: undefined, output: j.status === "running" ? app.jobs.recent(j.id).slice(-20) : undefined }));
+	}
+
+	/**
+	 * 协作拓扑：总调度 → 成员 → 会话（泳道）→ 每次派工（时间条），加上「基于某次改动」的依赖。
+	 * 同一个成员的多条泳道 = 它同时 / 先后开的多个会话；时间条重叠 = 并行。
+	 */
+	async function topology(limit = 80) {
+		const sessions = ((await harness.snapshot(AgentSessions, context)) as any)?.sessions ?? {};
+		const live = lastLive;
+		const now = Date.now();
+		const list = allDispatches()
+			.filter((d) => d.at !== undefined)
+			.sort((a, b) => a.at! - b.at!)
+			.slice(-limit);
+		type Lane = { id: string; agent: string; session: string | null; rounds: number; first: number; last: number; running: boolean; model?: string; lastTask?: string; tasks: string[] };
+		const lanes = new Map<string, Lane>();
+		const bars = list.map((d) => {
+			const running = d.status === "open";
+			// 同步派工还在跑时，会话 ID 在实时槽位的 details 里
+			const slot = running && !d.job ? live.tools.find((t) => t.callId === d.callId) : undefined;
+			const session = d.resume ?? d.sessionId ?? ((slot?.details as any)?.sessionId as string | undefined) ?? null;
+			const laneId = session ?? `solo:${d.key}`;
+			const end = d.endAt ?? (running ? now : d.at!);
+			let lane = lanes.get(laneId);
+			if (!lane) lanes.set(laneId, (lane = { id: laneId, agent: d.agent, session, rounds: 0, first: d.at!, last: end, running: false, tasks: [] }));
+			lane.rounds++;
+			lane.last = Math.max(lane.last, end);
+			lane.running ||= running;
+			if (d.model) lane.model = d.model;
+			lane.lastTask = d.task.replace(/\s+/g, " ").trim().slice(0, 80);
+			if (d.taskId && !lane.tasks.includes(d.taskId)) lane.tasks.push(d.taskId);
+			return {
+				key: d.key,
+				lane: laneId,
+				agent: d.agent,
+				start: d.at!,
+				end,
+				running,
+				status: d.status,
+				mode: d.job ? "async" : "sync",
+				job: d.job ?? null,
+				task: d.task.replace(/\s+/g, " ").trim().slice(0, 140),
+				taskId: d.taskId ?? null,
+				changeId: d.changeId ?? null,
+				basedOn: d.basedOn ?? null,
+				resume: d.resume,
+				model: d.model ?? null,
+				cost: d.cost ?? null,
+			};
+		});
+		// 依赖：基于某次改动开工的派工 ← 产出那次改动的派工
+		const byChange = new Map(bars.filter((b) => b.changeId).map((b) => [b.changeId!, b.key]));
+		const links = bars.filter((b) => b.basedOn && byChange.has(b.basedOn)).map((b) => ({ from: byChange.get(b.basedOn!)!, to: b.key, change: b.basedOn }));
+		// 同一时刻最多有几个派工在跑
+		const edges = bars.flatMap((b) => [
+			{ t: b.start, d: 1 },
+			{ t: b.end, d: -1 },
+		]);
+		edges.sort((a, b) => a.t - b.t || a.d - b.d);
+		let current = 0;
+		let peak = 0;
+		for (const e of edges) peak = Math.max(peak, (current += e.d));
+		return {
+			now,
+			orchestrator: { model: orchestrator.info?.modelId ?? config.orchestrator.modelId, busy: live.busy, turns: live.turns },
+			members: agents.map((a) => ({ kind: a.kind, label: ADAPTERS[a.kind].label, available: a.available })),
+			lanes: [...lanes.values()].map((l) => ({ ...l, known: l.session ? !!sessions[l.session] : false })),
+			bars,
+			links,
+			stats: { running: bars.filter((b) => b.running).length, peak, async: bars.filter((b) => b.mode === "async").length, total: bars.length },
+		};
+	}
+
 	async function state() {
 		const usage = (await harness.usage(context)) as any;
 		const sessions = ((await harness.snapshot(AgentSessions, context)) as any)?.sessions ?? {};
 		const useCount = new Map<string, number>();
-		for (const d of dispatches.values()) if (d.sessionId) useCount.set(d.sessionId, (useCount.get(d.sessionId) ?? 0) + 1);
+		for (const d of allDispatches()) if (d.sessionId) useCount.set(d.sessionId, (useCount.get(d.sessionId) ?? 0) + 1);
 		const o = config.orchestrator;
 		return {
 			demo,
@@ -236,6 +357,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			workdir: config.workdir,
 			storage: config.storage,
 			entries: entryCount,
+			jobs: jobList(),
 			orchestrator: {
 				describe: orchestrator.describe,
 				type: orchestrator.info?.type ?? o.type,
@@ -283,6 +405,11 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					cwd: s.cwd,
 					updatedAt: s.updatedAt,
 					uses: useCount.get(id) ?? 0,
+					rounds: s.rounds ?? null,
+					createdAt: s.createdAt ?? null,
+					lastTask: s.lastTask ?? null,
+					model: s.model ?? null,
+					change: s.change ?? null,
 					resume: RESUME_COMMAND[s.agent as AgentKind]?.(id) ?? null,
 				}))
 				.sort((a, b) => b.updatedAt - a.updatedAt),
@@ -299,7 +426,8 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 
 	/** 按 key 查；也接受 callId（取最近一次） */
 	async function dispatchDetail(id: string) {
-		const d = dispatches.get(id) ?? dispatches.get(latestByCall.get(id) ?? "");
+		const raw = dispatches.get(id) ?? dispatches.get(latestByCall.get(id) ?? "");
+		const d = raw ? withJob(raw) : undefined;
 		if (!d) return undefined;
 		let result: string | undefined;
 		if (d.resultEntryId !== undefined) {
@@ -307,7 +435,9 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			const item = page.items[0] ? toViewItem(page.items[0]) : undefined;
 			if (item?.type === "tool") result = parseToolResult(item.text, item.isError, item.details).body;
 		}
-		return { ...d, result };
+		const job = d.job ? jobs[d.job] : undefined;
+		if (job) result = job.result ?? (job.status === "running" ? undefined : result);
+		return { ...d, result, output: job?.status === "running" ? app.jobs.recent(job.id) : undefined };
 	}
 
 	// ---------- HTTP ----------
@@ -364,7 +494,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				return sendJson(res, 200, await history(limit, Number.isFinite(before) && before > 0 ? before : undefined));
 			}
 			if (url.pathname === "/api/dispatches" && req.method === "GET") {
-				const list = [...dispatches.values()].sort((a, b) => (b.entryId ?? b.resultEntryId ?? 0) - (a.entryId ?? a.resultEntryId ?? 0));
+				const list = allDispatches().sort((a, b) => (b.entryId ?? b.resultEntryId ?? 0) - (a.entryId ?? a.resultEntryId ?? 0));
 				return sendJson(res, 200, { dispatches: list });
 			}
 			const detail = url.pathname.match(/^\/api\/dispatches\/([^/]+)$/);
@@ -383,6 +513,16 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				if (!file) return sendJson(res, 404, { error: "没有这个文件" });
 				const { path: _p, ...meta } = file.file;
 				return sendJson(res, 200, { file: meta, text: file.text, truncated: file.truncated });
+			}
+			if (url.pathname === "/api/topology" && req.method === "GET") return sendJson(res, 200, await topology(Math.min(Math.max(Number(url.searchParams.get("limit")) || 40, 5), 200)));
+			if (url.pathname === "/api/jobs" && req.method === "GET") return sendJson(res, 200, { jobs: jobList() });
+			// 取消后台派工（控制操作，和「中止本轮」同级）
+			const jobCancel = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
+			if (jobCancel && req.method === "POST") {
+				const id = decodeURIComponent(jobCancel[1]!);
+				const r = await app.jobs.cancel(id, "user", context);
+				if (r === "cancelled") options.notify?.(`后台网页：已取消后台派工 ${id}`);
+				return sendJson(res, r === "not_found" ? 404 : 200, { ok: r === "cancelled", result: r });
 			}
 			if (url.pathname === "/api/changes" && req.method === "GET") return sendJson(res, 200, { changes: changes.list() });
 			const changeDiff = url.pathname.match(/^\/api\/changes\/([^/]+)\/diff$/);
@@ -442,6 +582,8 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			clearInterval(ping);
 			changes.off("change", onChange);
 			project.off("change", onProject);
+			app.jobs.off("change", onJobs);
+			app.jobs.off("output", onJobOutput);
 			for (const res of clients) res.end();
 			clients.clear();
 			const closed = new Promise<void>((resolve) => server.close(() => resolve()));

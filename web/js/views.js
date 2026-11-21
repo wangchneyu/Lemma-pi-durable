@@ -1,7 +1,8 @@
 // 后台各页面。每个页面：mount(root, params) 渲染，update(kind, payload) 响应数据变化，unmount() 清理。
 import { openDispatch } from "./drawer.js";
 import { METRICS, RANGES, Sankey } from "./sankey.js";
-import { buildRuns, callInfo, dispatchRows, isDispatch, loadEarlier, pendingChanges, store } from "./store.js";
+import { buildRuns, callInfo, dispatchRows, isDispatch, loadEarlier, pendingChanges, runningJobs, store } from "./store.js";
+import { topology } from "./topology.js";
 import { Ticket, slotStart } from "./ticket.js";
 import { Timeline } from "./timeline.js";
 import {
@@ -22,10 +23,11 @@ import {
 	stamp,
 	toast,
 	getJson,
+	post,
 } from "./util.js";
 
-const RUN_LABEL = { running: "进行中", done: "完成", partial: "有失败", error: "失败", aborted: "已中止", open: "未完成" };
-const PILL = { running: "running", done: "done", partial: "error", error: "error", aborted: "aborted", interrupted: "aborted", open: "aborted" };
+const RUN_LABEL = { running: "进行中", background: "后台进行中", done: "完成", partial: "有失败", error: "失败", aborted: "已中止", open: "未完成" };
+const PILL = { running: "running", background: "running", done: "done", partial: "error", error: "error", aborted: "aborted", interrupted: "aborted", open: "aborted" };
 
 function empty(text) {
 	return `<div class="empty-state">${esc(text)}</div>`;
@@ -190,6 +192,7 @@ function overview() {
 		},
 		update(kind) {
 			const q = (n) => root.querySelector(`[data-n="${n}"]`);
+			if (kind === "job-output") return this.running(q("running"), q("runningNote"));
 			// 按次数看时，计时刷新不改变流向，跳过；按耗时看时每秒更新带子宽度
 			if (kind !== "tick" || sankey.metric === "time") sankey.render();
 			this.routeSummary();
@@ -288,7 +291,9 @@ function overview() {
 		},
 		running(box, note) {
 			const active = store.live.tools.filter((t) => t.status !== "done" && isDispatch(t.name));
-			note.textContent = active.length ? `${active.length} 项` : "";
+			const jobs = runningJobs();
+			note.textContent = active.length || jobs.length ? `${active.length + jobs.length} 项${jobs.length ? `（后台 ${jobs.length}）` : ""}` : "";
+			this.jobs(box, jobs);
 			// 还没放进对话的插话 / 排队（来自终端）
 			const inbox = store.live.inbox ?? [];
 			let waitBox = box.querySelector(".inbox-list");
@@ -310,7 +315,7 @@ function overview() {
 					line = el("div", "empty-inline");
 					box.prepend(line);
 				}
-				const text = store.live.busy ? "总调度正在规划，还没有派工" : "没有正在执行的派工";
+				const text = jobs.length ? "总调度这边没有同步派工；后台派工见下方" : store.live.busy ? "总调度正在规划，还没有派工" : "没有正在执行的派工";
 				if (line.dataset.t !== text) {
 					line.dataset.t = text;
 					line.innerHTML = `<span class="dot"></span>${esc(text)}`;
@@ -343,6 +348,44 @@ function overview() {
 					tickets.delete(id);
 				}
 			}
+		},
+		/** 后台派工：编号、成员、任务、最近一行输出、计时，可以取消 */
+		jobs(box, jobs) {
+			let wrap = box.querySelector(".bg-jobs");
+			if (!jobs.length) return wrap?.remove();
+			if (!wrap) {
+				wrap = el("div", "bg-jobs");
+				wrap.addEventListener("click", async (e) => {
+					const b = e.target instanceof Element ? e.target.closest("[data-cancel]") : null;
+					if (b) {
+						if (!confirm(`取消后台派工 ${b.dataset.cancel}？`)) return;
+						b.disabled = true;
+						try {
+							await post(`/api/jobs/${encodeURIComponent(b.dataset.cancel)}/cancel`);
+							toast(`已取消 ${b.dataset.cancel}`);
+						} catch (err) {
+							toast(`取消失败：${err.message}`);
+						}
+						return;
+					}
+					const row = e.target instanceof Element ? e.target.closest("[data-call]") : null;
+					if (row) openDispatch(row.dataset.call);
+				});
+				box.append(wrap);
+			}
+			wrap.innerHTML = `<div class="bg-jobs-head">后台派工 · 总调度不用等它们，做完后结果自动发回</div>${jobs
+				.map((j) => {
+					const last = (j.output ?? []).at(-1) ?? "等待输出…";
+					return `<div class="job-row" data-s="running" data-call="${esc(j.callId)}" style="--c:${agentColor(j.agent)}">
+						<span class="job-id">${esc(j.id)}</span>
+						<span class="agent-chip">${esc(AGENT_LABEL[j.agent] ?? j.agent)}</span>
+						<span class="job-task">${j.taskId ? `<b>${esc(j.taskId)}</b> ` : ""}${esc(short(j.task, 60))}<span class="job-last">${esc(short(last, 90))}</span></span>
+						<span class="job-time mono">${duration(Date.now() - j.startedAt)}</span>
+						<span class="pill" data-s="running">执行中</span>
+						<button type="button" class="ghost-btn tiny" data-cancel="${esc(j.id)}">取消</button>
+					</div>`;
+				})
+				.join("")}`;
 		},
 		recent(box) {
 			const runs = buildRuns().filter((r) => !r.divider).slice(-5).reverse();
@@ -512,8 +555,8 @@ function runs() {
 			shownId = null;
 		},
 		update(kind) {
-			if (kind === "tick" || kind === "state" || kind === "dispatches") {
-				if (timeline && kind === "tick") timeline.live(store.live, shownId === this.latestId);
+			if (kind === "tick" || kind === "state" || kind === "dispatches" || kind === "job-output") {
+				if (timeline && (kind === "tick" || kind === "job-output")) timeline.live(store.live, shownId === this.latestId);
 				return;
 			}
 			const all = buildRuns();
@@ -1275,4 +1318,4 @@ function config() {
 	};
 }
 
-export const VIEWS = { overview, project, runs, dispatches, changes, agents, conventions, sessions, usage, config };
+export const VIEWS = { overview, project, topology, runs, dispatches, changes, agents, conventions, sessions, usage, config };

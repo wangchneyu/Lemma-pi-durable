@@ -96,21 +96,32 @@ try {
 	const all = items();
 	const lives = events.filter((e) => e.event === "live").map((e) => e.data);
 	check(all.some((i: any) => i.type === "user" && i.text === "加一个导出按钮"), "终端输入的任务实时推送到后台");
-	check(all.some((i: any) => i.type === "assistant" && i.toolCalls.length === 2), "推送了总调度的派工（两个工具调用）");
-	check(all.filter((i: any) => i.type === "tool" && i.name.startsWith("ask_") && !i.isError).length === 2, "推送了两个成员的结果");
-	check(lives.some((l) => l.tools.filter((t: any) => t.status === "running").length === 2), "实时状态里两个成员同时处于执行中（并行）");
-	check(lives.some((l) => l.tools.some((t: any) => t.output.includes("🔧"))), "实时状态里有成员的进度日志");
+	// 演示剧本一是异步的：设计、编码、调研三项放后台并行，编码做完后基于它的改动在后台派审查
+	const jobEvents = events.filter((e) => e.event === "jobs").map((e) => e.data as any[]);
+	const outputs = events.filter((e) => e.event === "job-output").map((e) => e.data);
+	check(all.some((i: any) => i.type === "assistant" && i.toolCalls.length === 3 && i.toolCalls.every((c: any) => c.args.background === true)), "推送了总调度的三个后台派工");
+	check(all.filter((i: any) => i.type === "tool" && i.name.startsWith("ask_") && /已在后台开工 J\d/.test(i.text)).length === 4, "四次派工都立刻返回了后台编号");
+	check(all.some((i: any) => i.type === "assistant" && i.toolCalls.some((c: any) => c.name === "wait_jobs")), "总调度用 wait_jobs 等后台结果");
+	check(jobEvents.some((list) => list.filter((j) => j.status === "running").length >= 3), "三个后台派工同时在跑（并行）");
+	check(outputs.some((o: any) => /^J\d+$/.test(o.id) && o.line.includes("🔧")), "推送了后台派工的实时输出");
 	check(lives.some((l) => l.partial.length > 0), "实时状态里有总调度的流式草稿");
 	check(all.some((i: any) => i.type === "assistant" && i.text.includes("汇报")), "推送了最终汇报");
 	await sleep(300);
 	check(events.filter((e) => e.event === "live").at(-1)?.data.busy === false, "结束后状态回到空闲");
 
 	const { dispatches } = await json("/api/dispatches");
-	check(dispatches.length === 2 && dispatches.every((d: any) => d.status === "done" && d.durationMs > 0 && d.sessionId), "派工汇总里有两次完成的派工（耗时、会话齐全）");
+	check(dispatches.length === 4 && dispatches.every((d: any) => d.job && d.status === "done" && d.durationMs > 0 && d.sessionId), "派工汇总里四次后台派工都完成了（状态、耗时、会话来自后台记录）");
 	const detail = await json(`/api/dispatches/${encodeURIComponent(dispatches[0].key)}`);
-	check(typeof detail.result === "string" && detail.result.includes("_OK"), "派工详情返回完整结果");
+	check(typeof detail.result === "string" && detail.result.includes("_OK"), "后台派工的详情返回完整结果");
 	const after = await json("/api/state");
-	check(after.sessions.length === 2 && after.agentStats.claude?.done === 1 && after.agentStats.codex?.done === 1, "会话登记表和成员统计都更新了");
+	check(after.jobs.length === 4 && after.jobs.every((j: any) => j.status === "done"), "状态接口带上后台派工列表");
+	check(after.agentStats.claude?.done === 2 && after.agentStats.codex?.done === 1 && after.agentStats.gemini?.done === 1, "成员统计把后台派工算进去");
+	const topo = await json("/api/topology");
+	const claudeLanes = topo.lanes.filter((l: any) => l.agent === "claude" && l.session);
+	check(topo.bars.length === 4 && topo.bars.every((b: any) => b.mode === "async"), "拓扑接口：四条后台派工时间条");
+	check(claudeLanes.length === 2, "拓扑接口：Claude 开了两个会话（设计、审查），各占一条泳道");
+	check(topo.links.length === 1 && topo.stats.peak >= 3, "拓扑接口：审查基于编码的改动（一条依赖），并行峰值至少 3 路");
+	check((await raw("/api/jobs/J99/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status === 404, "取消不存在的后台派工返回 404");
 	const firstId = all[0].id;
 	const older = await json(`/api/history?before=${all.at(-1).id}&limit=2`);
 	check(older.items.length === 2 && older.items.every((i: any) => i.id < all.at(-1).id) && older.hasMore === true && firstId > 0, "历史分页接口按 id 往前翻");
@@ -118,10 +129,10 @@ try {
 	// 一次写入多行命令：必须按顺序执行（/clean 要等 /apply all 做完，才能清掉刚合并的改动）
 	const { changes: before } = await json("/api/changes");
 	const pendingCount = before.filter((c: any) => c.status === "pending").length;
-	check(pendingCount === 2, "演示派工在沙盒仓库里产生了两个待合并的改动");
+	check(pendingCount >= 3, `演示派工在沙盒仓库里产生了待合并的改动（${pendingCount} 个）`);
 	terminal.stdin!.write("/apply all\n/clean\n");
 	for (let i = 0; i < 50 && !/清理了 \d+ 个 worktree|没有需要清理/.test(terminalOutput); i++) await sleep(100);
-	check(terminalOutput.includes(`清理了 ${pendingCount} 个 worktree`), "多行命令按顺序执行：/clean 清掉了刚合并的改动");
+	check(Number(terminalOutput.match(/清理了 (\d+) 个 worktree/)?.[1] ?? 0) >= pendingCount, "多行命令按顺序执行：/clean 清掉了刚合并的改动");
 
 	const conv = await json("/api/conventions");
 	check(Array.isArray(conv.files) && conv.members?.claude && conv.files.every((f: any) => f.path === undefined), "规范文件接口返回扫描结果，不暴露绝对路径");

@@ -8,6 +8,8 @@ export const store = {
 	state: null,
 	dispatches: [],
 	changes: [],
+	/** 后台派工（background: true）：状态来自 Pi Durable 记录，实时输出来自 SSE */
+	jobs: [],
 	connected: false,
 	loaded: false,
 };
@@ -52,6 +54,7 @@ export function refreshState(delay = 0) {
 	stateTimer = setTimeout(async () => {
 		try {
 			store.state = await getJson("/api/state");
+			if (Array.isArray(store.state.jobs)) setJobs(store.state.jobs);
 			emit("state");
 		} catch {
 			/* 断线时由连接状态提示 */
@@ -119,6 +122,18 @@ export function dispatchRows() {
 /** 派给成员的工具（ask_*）才算派工；plan_tasks / update_task / set_goal 是总调度维护分工表的操作 */
 export const isDispatch = (name) => String(name ?? "").startsWith("ask_");
 
+// ---------- 后台派工 ----------
+export function jobById(id) {
+	return id ? store.jobs.find((j) => j.id === id) : undefined;
+}
+export const runningJobs = () => store.jobs.filter((j) => j.status === "running");
+function setJobs(list) {
+	const outputs = new Map(store.jobs.map((j) => [j.id, j.output]));
+	store.jobs = list
+		.map((j) => ({ ...j, output: j.output ?? outputs.get(j.id) ?? [] }))
+		.sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || b.startedAt - a.startedAt);
+}
+
 // ---------- 运行记录：按"你的一次输入"分组 ----------
 export function buildRuns() {
 	const runs = [];
@@ -131,8 +146,15 @@ export function buildRuns() {
 			prev = item;
 			continue;
 		}
+		// 后台结果发回来、以及总调度接着处理它，都算在发起它的那次运行里
+		if (item.type === "job" && current) {
+			current.items.push(item);
+			prev = item;
+			continue;
+		}
 		// 插话（steer）只会放在一轮工具结果之后：紧跟在成员结果后面的用户消息属于当前这次运行
-		const steer = item.type === "user" && current && prev?.type === "tool";
+		// 上一轮在工具执行中被中止的：之后的输入是新的一轮，不是插话
+		const steer = item.type === "user" && current && prev?.type === "tool" && !/<harness>[\s\S]*(aborted|interrupted)/i.test(prev.text);
 		if (steer) item.steer = true;
 		prev = item;
 		if ((item.type === "user" && !steer) || !current) {
@@ -160,6 +182,10 @@ export function buildRuns() {
 		else if (run === last && store.live.runFailure) run.status = store.live.runFailure.reason === "aborted" ? "aborted" : "error";
 		else if (run.items.some((i) => i.type === "tool" && /<harness>[\s\S]*aborted/i.test(i.text))) run.status = "aborted";
 		else run.status = "open";
+		// 总调度已经回复，但这次运行开的后台派工还没做完
+		const jobs = run.items.filter((i) => i.type === "tool" && i.details?.job).map((i) => i.details.job);
+		run.jobs = jobs;
+		if (run.status !== "running" && jobs.some((id) => jobById(id)?.status === "running")) run.status = "background";
 	}
 	return runs;
 }
@@ -194,6 +220,21 @@ export function connect() {
 	es.addEventListener("change", () => {
 		refreshChanges(150);
 		refreshState(400);
+	});
+	// 后台派工开工 / 结束
+	es.addEventListener("jobs", (e) => {
+		setJobs(JSON.parse(e.data));
+		refreshDispatches(200);
+		refreshState(600);
+		emit("jobs");
+	});
+	// 后台派工的实时输出
+	es.addEventListener("job-output", (e) => {
+		const { id, line } = JSON.parse(e.data);
+		const job = jobById(id);
+		if (!job) return;
+		job.output = [...(job.output ?? []), line].slice(-40);
+		emit("job-output", id);
 	});
 	es.addEventListener("items", (e) => {
 		const fresh = mergeItems(JSON.parse(e.data));

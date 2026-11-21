@@ -1,40 +1,28 @@
 // 把本机 CLI 包装成 Pi Durable 工具：ask_claude / ask_codex / ask_gemini。
 // 每次派工可以：由总调度选模型；在独立的 git worktree 里干活（改动等用户在终端确认后才合并）；
-// 受单次运行的花费上限约束。
-import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { defineDoc, defineExtension, defineTool, LiveDoc, section, type Extension } from "@earendil-works/pi-durable";
-import { arr, bool, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import { ADAPTERS, type TokenUsage } from "./agents.ts";
-import { Board, boardSummary, STATUS_LABEL, taskBrief, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
-import type { ChangeRecord, ChangeStore } from "./changes.ts";
-import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
-import { cleanEnv, runCli } from "./cli-runner.ts";
-import { resolveCommand, type AgentKind, type AppConfig, type ModelOption } from "./config.ts";
-import { addWorktree, commitAll, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
+// 受单次运行的花费上限约束；同步等结果，或者放到后台（background: true）由 wait_jobs 收结果。
+import type { Context } from "@earendil-works/chord/context";
+import { defineExtension, defineTask, defineTool, section, type Extension, type JsonObject } from "@earendil-works/pi-durable";
+import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
+import { ADAPTERS } from "./agents.ts";
+import { Board, boardSummary, STATUS_LABEL, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
+import type { ChangeStore } from "./changes.ts";
+import { resolveCommand, type AgentKind, type AppConfig } from "./config.ts";
+import {
+	checkBudget,
+	commitBoard,
+	defined,
+	finishChange,
+	runDispatch,
+	settleTask,
+	validateDispatch,
+	type DispatchArgs,
+	type DispatchDeps,
+	type DispatchIO,
+} from "./dispatch.ts";
+import { clip, JOB_REPORT_ENTRY, JOB_REQUEST_PREFIX, JobDone, jobReport, Jobs, type JobHub, type JobRecord, type JobsState } from "./jobs.ts";
 
-/** 所有 CLI 会话的登记表：会话 ID → 哪个 agent、在哪个目录建立的。随对话一起持久化。 */
-type SessionRecord = { agent: AgentKind; cwd: string; updatedAt: number; change?: string };
-export const AgentSessions = defineDoc<{ sessions: Record<string, SessionRecord> }>({
-	kind: "pi-agent.sessions",
-	version: 1,
-	scope: "session",
-	initial: () => ({ sessions: {} }),
-	checkpointWhen: () => false,
-});
-
-/** 当前运行（你的一次输入）已经花了多少：换了一次运行就从零算起 */
-export const RunBudget = defineDoc<{ runKey: string | null; spent: number; dispatches: number; blocked: number }>({
-	kind: "pi-agent.budget",
-	version: 1,
-	scope: "session",
-	initial: () => ({ runKey: null, spent: 0, dispatches: 0, blocked: 0 }),
-	checkpointWhen: () => false,
-});
-
-const RESUME_AFTER_CRASH =
-	"（系统提示：上一次执行在中途被中断了。请检查当前进度，把这个任务做完，然后给出最终结果。）";
+export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
 export interface AgentAvailability {
 	kind: AgentKind;
@@ -53,52 +41,158 @@ export function detectAgents(config: AppConfig): AgentAvailability[] {
 	});
 }
 
-/** 按单价估算花费（CLI 没自报时）；没有单价返回 undefined */
-export function estimateCost(option: ModelOption | undefined, usage: TokenUsage | undefined): number | undefined {
-	if (!option?.price || !usage) return undefined;
-	const p = option.price;
-	const fresh = Math.max(0, usage.input - (usage.cacheRead ?? 0));
-	return (fresh * p.input + (usage.cacheRead ?? 0) * (p.cacheRead ?? p.input) + usage.output * p.output) / 1_000_000;
-}
-
 const TIER_LABEL = { economy: "经济", standard: "标准", premium: "强力" } as const;
-
-/** worktree 提交的信息：标题是任务的第一句（不截断在半个词上），正文是完整任务和模型 */
-function commitMessage(kind: string, model: string | undefined, task: string): string {
-	const flat = task.replace(/\s+/g, " ").trim();
-	const first = flat.split(/(?<=[。！？!?；;])\s*|[:：]\s*(?=\d[)）.、])/)[0] ?? flat;
-	const subject = first.length > 60 ? `${first.slice(0, 60).replace(/[，,、\s][^，,、\s]*$/, "")}…` : first;
-	return `pi-agent(${kind}): ${subject}\n\n${task.trim()}\n\n成员：${kind}${model ? `\n模型：${model}` : ""}`;
-}
 
 function text(message: string) {
 	return { output: [{ type: "text" as const, text: message }], isError: true };
 }
 
-/** 在一个事务里改分工表，提交后写出 ASSIGN.md；返回改完后的分工表快照 */
-async function commitBoard<R>(
-	project: ProjectFiles,
-	api: { commit: (change: (tx: any) => any, context: any) => Promise<any>; now(): number; output(chunk: string): void },
-	context: any,
-	mutate: (board: BoardState) => R,
-): Promise<{ result: R; board: BoardState }> {
-	const out = await api.commit(async (tx: any) => {
-		const board = (await tx.doc(Board)) as BoardState;
-		const result = mutate(board);
-		board.updatedAt = api.now();
-		return { result, board: JSON.parse(JSON.stringify(board)) as BoardState };
-	}, context);
-	const { savedManualEdit } = project.writeAssign(out.board);
-	if (savedManualEdit) api.output(`ℹ ASSIGN.md 被手动改过，已另存为 ${savedManualEdit}，再按分工表重新写出\n`);
-	return out;
+/** 工具调用提供的持久化能力 */
+function toolIO(api: any, context: any): DispatchIO {
+	return {
+		callId: api.callId,
+		taskId: String(api.taskId),
+		conversationId: api.conversationId,
+		signal: context.abortSignal,
+		now: () => api.now(),
+		commit: (change) => api.commit(change, context),
+		memo: (name, candidate) => (candidate === undefined ? api.memo(name, context) : api.memo(name, candidate, context)),
+		output: (chunk) => api.output(chunk),
+		details: (value) => api.details(value, context),
+	};
 }
 
-/** 只保留有值的字段（持久化文档只接受严格 JSON，不能有 undefined） */
-function defined<T extends Record<string, unknown>>(o: T): T {
-	return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
+type JobInput = { job: string; kind: AgentKind; callId: string; args: DispatchArgs };
+
+/** 后台派工任务：在 Pi Durable 里作为后台任务运行，做完后把结果交给总调度 */
+function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>) {
+	const { hub, changes } = deps;
+	/** 后台任务提供的持久化能力 */
+	const jobIO = (runtime: any, context: Context, input: JobInput, signal: AbortSignal): DispatchIO => ({
+		callId: input.callId,
+		taskId: String(runtime.taskId),
+		conversationId: runtime.conversationId,
+		signal,
+		now: () => runtime.now(),
+		commit: async (change) => {
+			let out: any;
+			await runtime.commit(async (tx: any) => {
+				out = await change(tx);
+				return undefined;
+			}, context);
+			return out;
+		},
+		memo: (name, candidate) => (candidate === undefined ? runtime.memo(name, context) : runtime.memo(name, candidate, context)),
+		output: (chunk) => hub.output(input.job, chunk),
+		details: async (value) => {
+			await runtime.commit(async (tx: any) => {
+				const job = ((await tx.doc(Jobs)) as JobsState).jobs[input.job];
+				if (!job) return undefined;
+				if (typeof value.changeId === "string") job.changeId = value.changeId;
+				if (typeof value.model === "string") job.model = value.model;
+				if (typeof value.sessionId === "string") job.sessionId = value.sessionId;
+				return undefined;
+			}, context);
+			hub.changed();
+		},
+	});
+
+	return defineTask<JobInput, { phase: "run" }, { job: string; status: string }>({
+		name: "pi-agent.job",
+		version: 1,
+		initial: () => ({ phase: "run" }),
+		phases: {
+			run: async (task, runtime, context) => {
+				const input = task.input;
+				const command = commands.get(input.kind);
+				const cancel = hub.register(input.job);
+				const signal = AbortSignal.any([runtime.signal, cancel]);
+				const io = jobIO(runtime, context, input, signal);
+				let result: Awaited<ReturnType<typeof runDispatch>>;
+				let cancelledBy: "user" | "orchestrator" | undefined;
+				try {
+					result = command
+						? await runDispatch(input.kind, command, deps, input.args, io, `后台派工 ${input.job}`)
+						: { text: `${input.kind} 现在不可用（没有找到 CLI 或已禁用）。`, isError: true };
+				} catch (error) {
+					// 进程关闭或被 Pi Durable 中止：交给重启后的续接 / abort 收尾
+					if (runtime.signal.aborted) return;
+					result = { text: `后台派工出错：${error instanceof Error ? error.message : String(error)}`, isError: true };
+				} finally {
+					cancelledBy = hub.release(input.job);
+				}
+				if (runtime.signal.aborted) return;
+
+				const status: JobRecord["status"] = result.aborted ? "cancelled" : result.isError ? "failed" : "done";
+				const conversation = await runtime.conversation(runtime.conversationId, context);
+				await runtime.commit(async (tx) => {
+					const doc = (await tx.doc(Jobs)) as JobsState;
+					const current = doc.jobs[input.job];
+					if (!current) return { status: "terminal", outcome: { status: "completed", result: { job: input.job, status } } };
+					const s = result.summary;
+					const next: JobRecord = defined({
+						...current,
+						status,
+						endedAt: runtime.now(),
+						durationMs: s?.durationMs ?? runtime.now() - current.startedAt,
+						result: s?.body || result.text,
+						isError: result.isError,
+						sessionId: s?.sessionId ?? current.sessionId,
+						changeId: s?.changeId ?? current.changeId,
+						model: s?.model ?? current.model,
+						costUsd: s?.costUsd,
+						costEstimated: s?.costEstimated || undefined,
+						cancelledBy: status === "cancelled" ? (cancelledBy ?? "user") : undefined,
+						waiter: undefined,
+					}) as JobRecord;
+					// 交付结果：有 wait_jobs 在等就叫醒它；否则作为一条消息发回总调度（总调度自己取消的不发）
+					const waiter = current.waiter;
+					const waiterTask = waiter ? await tx.task(waiter.task as any) : undefined;
+					if (waiter && waiterTask && waiterTask.state.status !== "terminal" && waiterTask.state.status !== "completing") {
+						await tx.signal(waiter.task as any, JobDone, waiter.key, { id: input.job });
+					} else if (!(status === "cancelled" && next.cancelledBy === "orchestrator") && conversation) {
+						await conversation.submit(tx, {
+							type: "input",
+							content: `${jobReport(next)}\n\n（这是后台派工的结果，由系统自动发来，不是用户的新要求。请验收、更新分工表，继续推进依赖它的任务；全部结束后再向用户汇报。）`,
+							whenBusy: "steer",
+							onAbort: "keep",
+							requestId: `${JOB_REQUEST_PREFIX}${input.job}`,
+							entry: { kind: JOB_REPORT_ENTRY, data: { job: input.job, agent: input.kind, status } },
+						});
+						next.delivered = "report";
+					}
+					doc.jobs[input.job] = next;
+					return { status: "terminal", outcome: { status: "completed", result: { job: input.job, status } } };
+				}, context);
+				hub.changed();
+			},
+		},
+		// 被 Pi Durable 中止（比如 /abort all 连后台一起停）：提交已有改动，任务退回待办，不再发消息
+		abort: async (task, runtime, context) => {
+			const input = task.input;
+			const io = jobIO(runtime, context, input, new AbortController().signal);
+			const job = await io.commit(async (tx) => {
+				const j = ((await tx.doc(Jobs)) as JobsState).jobs[input.job];
+				return j ? (JSON.parse(JSON.stringify(j)) as JobRecord) : undefined;
+			});
+			const change = job?.changeId ? changes.get(job.changeId) : undefined;
+			const finished = change?.status === "running" ? await finishChange(deps, change, input.kind, job?.model, input.args.task) : change;
+			if (job?.taskId) await settleTask(deps, io, input.kind, job.taskId, "todo", finished?.files.length ? finished.id : undefined, "后台派工被中止");
+			await runtime.commit(async (tx) => {
+				const doc = (await tx.doc(Jobs)) as JobsState;
+				const current = doc.jobs[input.job];
+				if (current && current.status === "running") {
+					doc.jobs[input.job] = defined({ ...current, status: "cancelled", cancelledBy: current.cancelledBy ?? "user", endedAt: runtime.now(), waiter: undefined }) as JobRecord;
+				}
+				return { status: "terminal", outcome: { status: "aborted" } };
+			}, context);
+			hub.changed();
+		},
+	});
 }
 
-function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, changes: ChangeStore, project: ProjectFiles) {
+function createAgentTool(kind: AgentKind, command: string[], deps: DispatchDeps, jobTask: ReturnType<typeof createJobTask>) {
+	const { config } = deps;
 	const adapter = ADAPTERS[kind];
 	const agent = config.agents[kind];
 	const models = agent.models;
@@ -112,9 +206,10 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 	return defineTool({
 		name: `ask_${kind}`,
 		description:
-			`把一个任务交给本机的 ${adapter.label} 去完成，并返回它的最终回答。${agent.description}\n` +
+			`把一个任务交给本机的 ${adapter.label} 去完成。${agent.description}\n` +
 			"它是一个完整的编码 agent，能在 cwd 目录里读写文件、执行命令。task 要写清楚目标、范围和期望的输出格式。" +
 			"续接会话时会自动回到会话当初的目录，不必再传 cwd。" +
+			"background: true 时放到后台执行、立刻返回后台编号（Jn），结果之后自动发回或用 wait_jobs 收取；不传则等它做完再返回结果。" +
 			resumeHint +
 			modelHint,
 		parameters: obj({
@@ -123,301 +218,152 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			...(models.length ? { model: opt(str({ description: `用哪个模型：${models.map((m) => m.id).join(" / ")}` })) } : {}),
 			based_on: opt(str({ description: "在某次改动（改动编号）的基础上开工，比如审查或接着修改另一个成员刚做的改动" })),
 			task_id: opt(str({ description: "这次派工对应分工表里的哪项任务（如 T3）；会把目标和任务上下文一起交给成员，并更新任务状态" })),
+			background: opt(bool({ description: "放到后台执行，不等结果（耗时长、可以和别的工作并行的任务用）" })),
 			...(adapter.canResume ? { session_id: opt(str({ description: "续接之前的会话（之前返回的 session_id）" })) } : {}),
 		}),
 		// 崩溃重启后允许重新执行：靠记下来的会话 ID 和 worktree 续接，而不是从头再跑
 		replay: "safe",
-		execute: async (args: { task: string; cwd?: string; model?: string; based_on?: string; session_id?: string; task_id?: string }, api, context) => {
-			// ---- 模型：只能从清单里选 ----
+		execute: async (raw: DispatchArgs & { background?: boolean }, api, context) => {
+			const { background, ...args } = raw;
+			const io = toolIO(api, context);
+			if (!background) {
+				const over = await checkBudget(io, config);
+				if (over) return text(over);
+				const r = await runDispatch(kind, command, deps, args, io);
+				return { output: [{ type: "text", text: r.text }], isError: r.isError, ...(r.details ? { details: r.details } : {}) };
+			}
+
+			// ---- 后台派工：先把能查的错误报出来，再建后台任务，立刻返回 ----
+			const invalid = await validateDispatch(kind, deps, args, io);
+			if (invalid) return text(invalid);
+			const over = await checkBudget(io, config);
+			if (over) return text(over);
 			const model = args.model ?? agent.defaultModel;
-			if (args.model && models.length && !models.some((m) => m.id === args.model)) {
-				return text(`${adapter.label} 没有配置模型 ${args.model}。可选：${models.map((m) => m.id).join("、")}。`);
-			}
-			const option = models.find((m) => m.id === model);
-
-			// ---- 预算：这次运行成员已经花了多少 ----
-			const limit = config.budget.perRunUsd;
-			const budget = await api.commit(async (tx) => {
-				const live = await tx.doc(LiveDoc, api.conversationId);
-				const runKey = String(live.run?.inputs?.[0] ?? live.run?.taskId ?? "none");
-				const doc = await tx.doc(RunBudget);
-				if (doc.runKey !== runKey) {
-					doc.runKey = runKey;
-					doc.spent = 0;
-					doc.dispatches = 0;
-					doc.blocked = 0;
-				}
-				const over = limit !== null && doc.spent >= limit;
-				if (over) doc.blocked++;
-				else doc.dispatches++;
-				return { spent: doc.spent, over };
-			}, context);
-			if (budget.over) {
-				return text(
-					`本次运行的成员花费已达上限 $${limit!.toFixed(2)}（已花 $${budget.spent.toFixed(2)}），不再派工。请把已有结果汇报给用户，说明还有哪些没做；用户可以调高 budget.perRunUsd 或开始新的一轮。`,
-				);
-			}
-
-			// ---- 工作目录：续接会话时回到当初的目录 ----
-			const known = args.session_id
-				? await api.commit(async (tx) => {
-						const record = (await tx.doc(AgentSessions)).sessions[args.session_id!];
-						return record ? { agent: record.agent, cwd: record.cwd } : undefined;
-					}, context)
-				: undefined;
-			if (known && known.agent !== kind) return text(`session_id ${args.session_id} 属于 ${known.agent}，不能交给 ${kind} 续接。`);
-			const requested = args.cwd ? (isAbsolute(args.cwd) ? args.cwd : resolve(config.workdir, args.cwd)) : undefined;
-			let cwd = known?.cwd ?? requested ?? config.workdir;
-			if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
-				const dropped = changes.byPath(cwd);
-				return text(dropped ? `会话所在的改动 #${dropped.id} 已被丢弃，不能再续接；请开新会话。` : `工作目录不存在：${cwd}`);
-			}
-			if (known && requested && resolve(requested) !== resolve(known.cwd)) {
-				api.output(`ℹ 会话 ${args.session_id} 建立在 ${known.cwd}，续接时使用原目录（忽略 cwd=${requested}）\n`);
-			}
-
-			// ---- 隔离：新会话在独立的 worktree 里干活 ----
-			let change: ChangeRecord | undefined = changes.byPath(cwd);
-			if (args.based_on && known) return text("based_on 只能用于新会话；续接会话会回到它自己的目录。");
-			if (!known && config.isolation.enabled) {
-				const root = await repoRoot(cwd);
-				if (root) {
-					// 随机编号（memo 保证崩溃重放时拿回同一个），避免重建会话存储后和旧分支撞名
-					const id = createHash("sha1").update(`${api.taskId}:${randomUUID()}`).digest("hex").slice(0, 6);
-					const plan = await api.memo(
-						"worktree",
-						{ id, branch: `pi/${kind}-${id}`, path: join(config.storage, "..", "worktrees", id), subdir: relative(root, cwd) },
-						context,
-					);
-					change = changes.get(plan.id);
-					if (!change) {
-						let base: string;
-						let basedOn: string | undefined;
-						if (args.based_on) {
-							const from = changes.get(args.based_on);
-							if (!from || from.status === "dropped") return text(`找不到可用的改动 ${args.based_on}。`);
-							if (from.root !== root) return text(`改动 ${args.based_on} 属于另一个仓库（${from.root}）。`);
-							base = from.head;
-							basedOn = from.id;
-						} else {
-							base = await snapshot(root);
-						}
-						const copied: string[] = [];
-						if (!existsSync(plan.path)) {
-							await addWorktree(root, plan.path, plan.branch, base);
-							// 快照不含未跟踪的文件：新写的规范文件（CLAUDE.md / AGENTS.md / GEMINI.md / RULES.md）还没提交时也带过去，成员才读得到
-							for (const rel of WORKTREE_CONVENTION_FILES) {
-								const from = join(root, rel);
-								const to = join(plan.path, rel);
-								if (existsSync(from) && !existsSync(to)) {
-									mkdirSync(dirname(to), { recursive: true });
-									copyFileSync(from, to);
-									copied.push(rel);
-								}
-							}
-						}
-						const linked = await linkIgnoredDirs(root, plan.path, plan.subdir, config.isolation.linkDirs);
-						change = changes.upsert({
-							id: plan.id,
-							agent: kind,
-							callId: api.callId,
-							task: args.task,
-							model,
-							root,
-							subdir: plan.subdir,
-							path: plan.path,
-							branch: plan.branch,
-							base,
-							basedOn,
-							head: base,
-							files: [],
-							add: 0,
-							del: 0,
-							status: "running",
-							linked,
-							...(copied.length ? { copied } : {}),
-							createdAt: Date.now(),
-							updatedAt: Date.now(),
-						});
-					}
-					cwd = join(plan.path, plan.subdir);
-				}
-			} else if (args.based_on) {
-				return text("工作区隔离没有开启（或工作目录不是 git 仓库），不能用 based_on。");
-			}
-			if (change && change.status !== "running") changes.upsert({ ...change, status: "running" });
-
-			// ---- 分工表：标记任务进行中；把共同目标 + 这项任务 + 分工全貌交给成员 ----
-			const goal = project.goal();
-			let brief = "";
-			if (args.task_id || goal) {
-				const { board } = await commitBoard(project, api, context, (b) => {
-					const t = args.task_id ? b.tasks[args.task_id] : undefined;
-					if (!t) return;
-					if (t.status !== "done") t.status = "doing";
-					t.owner = kind;
-					if (!t.dispatches.includes(api.callId)) t.dispatches.push(api.callId);
-					t.updatedAt = api.now();
+			const job = await api.commit(async (tx) => {
+				const doc = (await tx.doc(Jobs)) as JobsState;
+				// 同一次调用重放时不重复开工
+				const existing = doc.byCall[api.callId];
+				if (existing && doc.jobs[existing]) return JSON.parse(JSON.stringify(doc.jobs[existing])) as JobRecord;
+				const id = `J${doc.nextId++}`;
+				const piTask = await tx.createTask(jobTask, { job: id, kind, callId: api.callId, args: defined(args) } as JobInput, {
+					ownership: { kind: "conversation" },
+					conversationId: api.conversationId,
+					background: true,
 				});
-				if (args.task_id && !board.tasks[args.task_id]) return text(`分工表里没有任务 ${args.task_id}。先用 plan_tasks 建任务，或者不传 task_id。`);
-				brief = taskBrief(goal, board, args.task_id);
-			}
-
-			// ---- 这次调用之前是否已经启动过（即：这是崩溃后的重放） ----
-			const startedBefore = await api.memo<boolean>("started", context);
-			const presetSession = adapter.presetSession ? await api.memo<string>("session", args.session_id ?? randomUUID(), context) : undefined;
-			const seenSession = await api.memo<string>("seen-session", context);
-
-			let resumeId: string | undefined = args.session_id;
-			let prompt = `${brief}${args.task}`;
-			if (startedBefore && adapter.canResume) {
-				const crashed = seenSession ?? presetSession;
-				if (crashed) {
-					resumeId = crashed;
-					prompt = `${RESUME_AFTER_CRASH}\n\n原始任务：\n${brief}${args.task}`;
-				}
-			}
-			/** 派工结束后更新任务：关联改动，按结果改状态（成功 → 待验收，由总调度核对后标完成） */
-			const settleTask = async (status: TaskStatus, changeId: string | undefined, note: string) => {
-				if (!args.task_id) return;
-				await commitBoard(project, api, context, (b) => {
-					const t = b.tasks[args.task_id!];
-					if (!t) return;
-					if (t.status !== "done") t.status = status;
-					if (changeId && !t.changes.includes(changeId)) t.changes.push(changeId);
-					t.notes.push(`${new Date(api.now()).toLocaleString("zh-CN", { hour12: false })} ${kind}：${note}`);
-					t.updatedAt = api.now();
-				});
-			};
-			await api.memo("started", true, context);
-
-			const argv = [
-				...command.slice(1),
-				...adapter.buildArgs({ resumeId, newSessionId: resumeId ? undefined : presetSession, model, extraArgs: agent.extraArgs }),
-			];
-			api.output(
-				`▶ ${adapter.label} 开始执行${model ? `（模型 ${model}）` : ""}（cwd: ${cwd}${resumeId ? `，续接会话 ${resumeId}` : ""}${change ? `，隔离改动 #${change.id}` : ""}）\n`,
-			);
-			await api.details({ agent: kind, cwd, resumeId: resumeId ?? null, model: model ?? null, changeId: change?.id ?? null }, context);
-
-			let memoizedSession = false;
-			let reportedModel: string | undefined;
-			const result = await runCli({
-				command: command[0]!,
-				args: argv,
-				cwd,
-				stdin: prompt,
-				env: cleanEnv(config.stripEnv),
-				timeoutMs: agent.timeoutMinutes * 60_000,
-				signal: context.abortSignal,
-				onLine: (line, stream) => {
-					if (stream !== "stdout") return;
-					const p = adapter.progress(line);
-					if (p.model) reportedModel = p.model;
-					if (p.sessionId && !memoizedSession) {
-						memoizedSession = true;
-						// 一拿到会话 ID 就持久化，进程崩了也能续接
-						void api.memo("seen-session", p.sessionId, context).catch(() => {});
-					}
-					if (p.summary) api.output(`${p.summary}\n`);
-				},
-			});
-
-			// ---- 收尾：提交 worktree 里的改动 ----
-			const finishChange = async (): Promise<ChangeRecord | undefined> => {
-				if (!change) return undefined;
-				try {
-					const head = (await commitAll(change.path, commitMessage(kind, reportedModel ?? model, args.task), change.copied)) ?? change.head;
-					const [from] = changes.range({ ...change, head });
-					const files = head === from ? [] : await numstat(change.root, from, head);
-					return changes.upsert({
-						...change,
-						head,
-						files,
-						add: files.reduce((s, f) => s + f.add, 0),
-						del: files.reduce((s, f) => s + f.del, 0),
-						status: files.length ? "pending" : change.appliedHead ? "applied" : "empty",
-						model: reportedModel ?? model,
-					});
-				} catch (error) {
-					return changes.upsert({ ...change, status: "pending", message: error instanceof Error ? error.message : String(error) });
-				}
-			};
-
-			if (result.aborted) {
-				const c = await finishChange();
-				await settleTask("todo", c?.files.length ? c.id : undefined, "被中止");
-				return text(`${adapter.label} 已被中止。`);
-			}
-			if (result.timedOut) {
-				const c = await finishChange();
-				await settleTask("blocked", c?.files.length ? c.id : undefined, `超时（${agent.timeoutMinutes} 分钟）`);
-				return text(`${adapter.label} 超时（${agent.timeoutMinutes} 分钟）被终止。`);
-			}
-
-			const parsed = adapter.parse(result.stdout, result.stderr, result.exitCode);
-			const usedModel = parsed.model ?? reportedModel ?? model;
-			const estimated = parsed.costUsd === undefined ? estimateCost(models.find((m) => m.id === usedModel) ?? option, parsed.usage) : undefined;
-			const cost = parsed.costUsd ?? estimated;
-			if (cost) {
-				await api.commit(async (tx) => {
-					(await tx.doc(RunBudget)).spent += cost;
-				}, context);
-			}
-			const sessionId = parsed.sessionId ?? seenSession ?? presetSession;
-			const finished = await finishChange();
-			if (finished && sessionId) changes.upsert({ ...finished, sessionId });
-			await settleTask(
-				parsed.isError ? "blocked" : "review",
-				finished?.files.length ? finished.id : undefined,
-				parsed.isError ? `失败：${parsed.text.trim().split("\n")[0]!.slice(0, 80)}` : `完成${finished?.files.length ? `，改动 #${finished.id}` : ""}，待验收`,
-			);
-			if (sessionId && adapter.canResume) {
-				await api.commit(async (tx) => {
-					// 持久化文档只接受严格 JSON：没有改动编号时不写这个字段
-					(await tx.doc(AgentSessions)).sessions[sessionId] = { agent: kind, cwd, updatedAt: api.now(), ...(finished ? { change: finished.id } : {}) };
-				}, context);
-			}
-			let body = parsed.text.trim() || "（没有文字输出）";
-			if (body.length > agent.maxOutputChars) {
-				body = `${body.slice(0, agent.maxOutputChars)}\n…（已截断，原文 ${parsed.text.length} 字符）`;
-			}
-			const changeLine = finished
-				? finished.files.length
-					? `\n\n[改动 #${finished.id}：${finished.files.length} 个文件 +${finished.add} −${finished.del}，在分支 ${finished.branch}，还没有合并到主目录，等用户在终端确认（/apply ${finished.id}）]`
-					: `\n\n[改动 #${finished.id}：没有修改文件]`
-				: "";
-			const taskLine = args.task_id
-				? parsed.isError
-					? `\n\n[任务 ${args.task_id} 标为受阻；可以换成员 / 换模型重派，或用 update_task 调整]`
-					: `\n\n[任务 ${args.task_id} 标为待验收：请对照验收标准核对，用 update_task 标完成（done）或打回（todo 并写明原因）]`
-				: "";
-			const meta = [
-				`agent: ${kind}`,
-				usedModel ? `模型: ${usedModel}` : undefined,
-				sessionId && adapter.canResume ? `session_id: ${sessionId}` : undefined,
-				`耗时: ${Math.round(result.durationMs / 1000)}s`,
-				cost !== undefined ? `花费: $${cost.toFixed(4)}${estimated !== undefined ? "（估算）" : ""}` : undefined,
-			].filter(Boolean);
-
-			return {
-				output: [{ type: "text", text: `${body}${changeLine}${taskLine}\n\n[${meta.join(" | ")}]` }],
-				isError: parsed.isError,
-				details: {
+				const record = defined({
+					id,
 					agent: kind,
-					cwd,
-					sessionId: sessionId ?? null,
-					exitCode: result.exitCode,
-					durationMs: result.durationMs,
-					costUsd: cost ?? null,
-					costEstimated: estimated !== undefined,
-					model: usedModel ?? null,
-					usage: parsed.usage ? { ...parsed.usage } : null,
-					changeId: finished?.id ?? null,
-				},
+					callId: api.callId,
+					piTask: String(piTask),
+					task: args.task,
+					taskId: args.task_id,
+					model,
+					resume: args.session_id,
+					basedOn: args.based_on,
+					status: "running",
+					startedAt: api.now(),
+				}) as JobRecord;
+				doc.jobs[id] = record;
+				doc.byCall[api.callId] = id;
+				return JSON.parse(JSON.stringify(record)) as JobRecord;
+			}, context);
+			deps.hub.changed();
+			api.output(`⇢ 已在后台开工 ${job.id}\n`);
+			return {
+				output: [
+					{
+						type: "text",
+						text:
+							`已在后台开工 ${job.id}：${adapter.label}${model ? `（模型 ${model}）` : ""}${args.task_id ? `，任务 ${args.task_id}` : ""}${args.session_id ? `，续接会话 ${args.session_id}` : ""}。\n` +
+							`结果出来后会自动发给你（以【后台结果 ${job.id}】开头）。这期间可以继续派不依赖它的任务；需要它的结果才能往下走时，调用 wait_jobs。`,
+					},
+				],
+				details: defined({ agent: kind, job: job.id, background: true, model: model ?? null, taskId: args.task_id ?? null }) as JsonObject,
 			};
 		},
 	});
+}
+
+/** 后台派工的等待和取消 */
+function createJobTools(hub: JobHub) {
+	const waitJobs = defineTool<any, JsonObject, { round: number; deadline: number; ids: string[] }>({
+		name: "wait_jobs",
+		description:
+			"等后台派工（Jn）的结果：mode any（默认）是有一个做完就返回，all 是全部做完才返回。不传 ids 就等所有还在进行的后台派工。" +
+			"等待期间不占用任何资源；已经自动发回过的结果不会重复给全文。",
+		parameters: obj({
+			ids: opt(arr(str(), { description: "要等的后台编号，如 [\"J1\",\"J3\"]" })),
+			mode: opt(oneOf(["any", "all"])),
+			timeout_minutes: opt(num({ description: "最多等多久（分钟），默认 30" })),
+		}),
+		replay: "safe",
+		execute: async (args: { ids?: string[]; mode?: "any" | "all"; timeout_minutes?: number }, api, context) => {
+			const mode = args.mode ?? "any";
+			const round = api.checkpoint ? api.checkpoint.round + 1 : 0;
+			const deadline = api.checkpoint?.deadline ?? api.now() + Math.max(0.1, args.timeout_minutes ?? 30) * 60_000;
+			const expired = api.now() >= deadline;
+			const state = await api.commit(async (tx) => {
+				const doc = (await tx.doc(Jobs)) as JobsState;
+				const ids = api.checkpoint?.ids ?? (args.ids?.length ? args.ids : Object.values(doc.jobs).filter((j) => j.status === "running").map((j) => j.id));
+				const unknown = ids.filter((id) => !doc.jobs[id]);
+				if (unknown.length) return { kind: "error" as const, message: `没有后台派工 ${unknown.join("、")}。` };
+				if (!ids.length) return { kind: "none" as const };
+				const running = ids.filter((id) => doc.jobs[id]!.status === "running");
+				const fresh = ids.filter((id) => doc.jobs[id]!.status !== "running" && !doc.jobs[id]!.delivered);
+				const ready = mode === "any" ? fresh.length > 0 || running.length === 0 : running.length === 0;
+				if (ready || expired) {
+					const jobs = ids.map((id) => JSON.parse(JSON.stringify(doc.jobs[id])) as JobRecord);
+					for (const id of ids) {
+						const j = doc.jobs[id]!;
+						if (j.waiter?.task === String(api.taskId)) delete j.waiter;
+						if (j.status !== "running" && !j.delivered) j.delivered = "wait";
+					}
+					return { kind: "done" as const, jobs, expired: expired && !ready };
+				}
+				for (const id of running) doc.jobs[id]!.waiter = { task: String(api.taskId), key: `${id}.${round}` };
+				return { kind: "wait" as const, ids, running };
+			}, context);
+			if (state.kind === "error") return text(state.message);
+			if (state.kind === "none") return { output: [{ type: "text", text: "现在没有进行中的后台派工。" }] };
+			if (state.kind === "wait") {
+				await api.details({ waiting: state.running }, context);
+				return { sleep: { signals: state.running.map((id) => JobDone.key(`${id}.${round}`)), until: deadline, checkpoint: { round, deadline, ids: state.ids } } } as any;
+			}
+			const blocks = state.jobs.map((j) => {
+				if (j.status === "running") return `【${j.id} · 进行中】${j.agent}${j.taskId ? ` · 任务 ${j.taskId}` : ""}：${clip(j.task, 60)}`;
+				if (j.delivered === "report") return `【后台结果 ${j.id}】已经自动发给过你（见前面的消息），这里不重复全文。`;
+				return jobReport(j);
+			});
+			const running = state.jobs.filter((j) => j.status === "running").map((j) => j.id);
+			const footer = state.expired
+				? `\n\n等待超时，${running.join("、")} 还在进行。可以先汇报进度，或再次 wait_jobs。`
+				: running.length
+					? `\n\n还在进行：${running.join("、")}。`
+					: "\n\n这些后台派工都结束了。";
+			return { output: [{ type: "text", text: blocks.join("\n\n———\n\n") + footer }], details: { jobs: state.jobs.map((j) => j.id) } };
+		},
+		// 等待中被中止（比如用户 /abort）：撤掉登记，之后做完的结果改为自动发回
+		cancel: async (_args, api, context) => {
+			await api.commit(async (tx) => {
+				const doc = (await tx.doc(Jobs)) as JobsState;
+				for (const j of Object.values(doc.jobs)) if (j.waiter?.task === String(api.taskId)) delete j.waiter;
+			}, context);
+		},
+	});
+
+	const cancelJob = defineTool({
+		name: "cancel_job",
+		description: "取消一个还在进行的后台派工（比如方向错了、不再需要）。已有的改动会保留在它的分支里，对应任务退回待办。",
+		parameters: obj({ id: str({ description: "后台编号，如 J2" }) }),
+		replay: "safe",
+		execute: async (args: { id: string }, _api, context) => {
+			const r = await hub.cancel(args.id, "orchestrator", context);
+			if (r === "not_found") return text(`没有后台派工 ${args.id}。`);
+			if (r === "not_running") return { output: [{ type: "text", text: `${args.id} 已经结束了，不用取消。` }] };
+			return { output: [{ type: "text", text: `已取消 ${args.id}。` }] };
+		},
+	});
+	return [waitJobs, cancelJob];
 }
 
 const TASK_STATUSES = ["todo", "doing", "review", "done", "blocked", "dropped"] as const;
@@ -445,7 +391,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles) {
 		}),
 		replay: "safe",
 		execute: async (args: { tasks: { title: string; acceptance?: string; role?: string; owner?: string; deps?: string[]; detail?: string }[] }, api, context) => {
-			const { result } = await commitBoard(project, api, context, (b) => {
+			const { result } = await commitBoard(project, toolIO(api, context), (b) => {
 				// 同一次调用重放时不重复建任务
 				const done = (b as any).calls?.[api.callId] as string[] | undefined;
 				if (done) return done;
@@ -504,7 +450,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles) {
 		}),
 		replay: "safe",
 		execute: async (args: { id: string; status?: TaskStatus; owner?: string; role?: string; title?: string; acceptance?: string; note?: string }, api, context) => {
-			const { result, board } = await commitBoard(project, api, context, (b) => {
+			const { result, board } = await commitBoard(project, toolIO(api, context), (b) => {
 				const t = b.tasks[args.id];
 				if (!t) return false;
 				Object.assign(t, defined({ status: args.status, owner: args.owner, role: args.role, title: args.title, acceptance: args.acceptance }));
@@ -540,9 +486,17 @@ export function createLocalAgentsExtension(
 	config: AppConfig,
 	changes: ChangeStore,
 	project: ProjectFiles,
+	hub: JobHub,
 ): { extension: Extension; agents: AgentAvailability[] } {
 	const agents = detectAgents(config);
-	const tools = [...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, config, changes, project)), ...createBoardTools(config, project)];
+	const deps: DispatchDeps = { config, changes, project, hub };
+	const commands = new Map(agents.filter((a) => a.available).map((a) => [a.kind, a.command!] as const));
+	const jobTask = createJobTask(deps, commands);
+	const tools = [
+		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
+		...createJobTools(hub),
+		...createBoardTools(config, project),
+	];
 	const available = new Set(agents.filter((a) => a.available).map((a) => a.kind));
 	const roster = agents
 		.map((a) => {
@@ -566,6 +520,7 @@ export function createLocalAgentsExtension(
 	const extension = defineExtension({
 		name: "local-agents",
 		tools,
+		tasks: [jobTask],
 		sections: [
 			section(
 				"team",
@@ -579,12 +534,19 @@ export function createLocalAgentsExtension(
 						...(roles ? ["角色分工（规划任务时给每项定角色，派工时按角色找成员；首选不可用时用后面的）：", roles, ""] : []),
 						"工作方式：",
 						"1. 先理解用户目标。简单问题直接回答，不必派活，也不必建分工表。",
-						"2. 项目级、多步骤的任务：先用 plan_tasks 拆解，每项写清楚验收标准、角色、依赖；然后按依赖顺序派工，互不依赖的任务在同一轮里并行派。",
+						"2. 项目级、多步骤的任务：先用 plan_tasks 拆解，每项写清楚验收标准、角色、依赖；然后按依赖顺序派工，互不依赖的任务同时派。",
 						"3. 派工时传 task_id：成员会同时拿到项目目标、这项任务和分工全貌，知道自己在全局里的位置。",
 						"4. 选模型：按任务难度传 model。简单、机械的活用［经济］，日常开发用［标准］，复杂设计、跨模块改动、疑难问题才用［强力］。不确定就不传，用默认（角色配置里写了模型的优先用它）。",
 						"5. 成员完成后任务会变成「待验收」：对照验收标准核对（必要时派审查角色），用 update_task 标完成或打回并写明原因。",
-						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。",
+						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
 						"7. 最后用中文向用户汇报：按任务编号说明谁做了什么、用了什么模型、结果、改动编号、还有什么没完成或有风险。",
+						"",
+						"同步和异步：",
+						"- 不传 background 时，派工会等成员做完才返回；同一轮里的几个派工并行执行，但要等最慢的那个。",
+						"- 耗时长、互不依赖的任务用 background: true 放到后台：立刻返回后台编号 Jn，你可以接着派别的、先回复用户。",
+						"- 后台结果会以「【后台结果 Jn …】」开头的消息自动发来（不是用户的新要求）：收到后验收、更新分工表、继续派依赖它的任务。",
+						"- 需要等结果才能往下走时调用 wait_jobs（mode any：做完一个就返回，先处理它；mode all：全部做完）。不要在同一轮里既开后台派工又调用 wait_jobs。",
+						"- 方向错了或不再需要的后台派工用 cancel_job 取消。所有任务都结束后再给用户最终汇报；中途可以简短告知进度。",
 						"",
 						...(config.isolation.enabled
 							? [
@@ -596,27 +558,35 @@ export function createLocalAgentsExtension(
 									"",
 								]
 							: []),
-						limit !== null ? `花费上限：一次运行里成员的花费最多 $${limit}。超过后派工会被拒绝，届时直接汇报已有结果。能用便宜模型完成的活不要用贵的。` : "",
+						limit !== null ? `花费上限：一次运行里成员的花费最多 $${limit}（后台结果触发的后续处理也算在这一轮里）。超过后派工会被拒绝，届时直接汇报已有结果。能用便宜模型完成的活不要用贵的。` : "",
 						`默认工作目录：${config.workdir}`,
 					]
 						.filter((l) => l !== undefined)
 						.join("\n"),
 				{ tag: false },
 			),
-			// 项目目标 + 分工表：每次请求都按最新状态渲染（分工表变了这一段才重发，其余部分的提示缓存不受影响）
-			section(
-				"project",
-				async (input, context) => {
-					const goal = project.goal();
-					const board = (await input.read.snapshot(Board, context)) as BoardState | undefined;
-					return [
-						goal ? `项目最终目标（.pi-agent/GOAL.md，以用户写的为准）：\n${goal}` : "还没有 .pi-agent/GOAL.md。用户给出项目级目标时，用 set_goal 起草一份，并请用户确认。",
-						"",
-						"当前分工表（.pi-agent/ASSIGN.md 由你通过 plan_tasks / update_task 维护）：",
-						boardSummary(board),
-					].join("\n");
-				},
-			),
+			// 项目目标 + 分工表 + 后台派工：每次请求都按最新状态渲染（变了这一段才重发，其余部分的提示缓存不受影响）
+			section("project", async (input, context) => {
+				const goal = project.goal();
+				const board = (await input.read.snapshot(Board, context)) as BoardState | undefined;
+				const jobs = Object.values(((await input.read.snapshot(Jobs, context)) as JobsState | undefined)?.jobs ?? {});
+				const running = jobs.filter((j) => j.status === "running");
+				const unread = jobs.filter((j) => j.status !== "running" && !j.delivered);
+				return [
+					goal ? `项目最终目标（.pi-agent/GOAL.md，以用户写的为准）：\n${goal}` : "还没有 .pi-agent/GOAL.md。用户给出项目级目标时，用 set_goal 起草一份，并请用户确认。",
+					"",
+					"当前分工表（.pi-agent/ASSIGN.md 由你通过 plan_tasks / update_task 维护）：",
+					boardSummary(board),
+					...(running.length || unread.length
+						? [
+								"",
+								"后台派工：",
+								...running.map((j) => `- ${j.id} 进行中 · ${j.agent}${j.taskId ? ` · 任务 ${j.taskId}` : ""} · ${clip(j.task, 50)}`),
+								...unread.map((j) => `- ${j.id} 已结束（${j.status === "done" ? "完成" : j.status === "failed" ? "失败" : "已取消"}），结果还没取：用 wait_jobs ids:["${j.id}"] 取`),
+							]
+						: []),
+				].join("\n");
+			}),
 		],
 	});
 	return { extension, agents };

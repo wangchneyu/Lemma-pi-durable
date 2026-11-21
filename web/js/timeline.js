@@ -1,4 +1,5 @@
 // 一次运行的时间线：你的输入 → 总调度的消息和派工单 → 成员结果 → 最终回答。
+import { jobById } from "./store.js";
 import { Ticket } from "./ticket.js";
 import { clock, el, esc, markdown } from "./util.js";
 
@@ -15,6 +16,11 @@ function boardOpText(call) {
 		return `<span class="op-icon">✔</span><b>${esc(a.id ?? "")}${a.status ? ` → ${esc(STATUS_TEXT[a.status] ?? a.status)}` : ""}</b><span>${esc(String(a.note ?? "").slice(0, 120))}</span>`;
 	}
 	if (call.name === "set_goal") return `<span class="op-icon">🎯</span><b>起草项目目标</b><span>GOAL.md，待你确认</span>`;
+	if (call.name === "wait_jobs") {
+		const ids = Array.isArray(a.ids) && a.ids.length ? a.ids.join("、") : "所有进行中的后台派工";
+		return `<span class="op-icon">⏳</span><b>等后台结果</b><span>${esc(ids)} · ${a.mode === "all" ? "全部做完才继续" : "做完一个就先处理"}</span>`;
+	}
+	if (call.name === "cancel_job") return `<span class="op-icon">✕</span><b>取消后台派工 ${esc(a.id ?? "")}</b><span>改动留在分支里，任务退回待办</span>`;
 	return `<span class="op-icon">⚙</span><b>${esc(call.name)}</b>`;
 }
 
@@ -50,6 +56,17 @@ export class Timeline {
 			return node;
 		}
 		if (item.type === "divider") return el("div", "item divider", esc(item.label));
+		if (item.type === "job") {
+			// 后台派工的结果发回总调度
+			const [head = "", ...rest] = item.text.split("\n");
+			const body = rest.join("\n").replace(/\n*（这是后台派工的结果[\s\S]*$/, "").trim();
+			const failed = item.status === "failed" || item.status === "cancelled";
+			const node = el("div", `item job${failed ? " failed" : ""}`, `${whoLine(`后台结果 · ${esc(item.job)}`, item.at)}<div class="job-card" style="--c:var(--${esc(item.agent)}, var(--muted))"><div class="job-head"></div><div class="job-body md"></div></div>`);
+			node.querySelector(".job-head").textContent = head;
+			const bodyEl = node.querySelector(".job-body");
+			bodyEl.innerHTML = markdown(body.length > 1200 ? `${body.slice(0, 1200)}…` : body);
+			return node;
+		}
 		if (item.type === "assistant") {
 			if (!item.text.trim() && !item.toolCalls.length && !item.error) return null;
 			const node = el("div", "item orch", whoLine("总调度", item.at));
@@ -116,6 +133,10 @@ export class Timeline {
 		}
 		const slots = new Map(live.tools.map((t) => [t.callId, t]));
 		for (const [callId, ticket] of this.tickets) {
+			if (ticket.jobId) {
+				ticket.updateJob(jobById(ticket.jobId));
+				continue;
+			}
 			const slot = slots.get(callId);
 			if (slot) ticket.update(slot);
 			else if (!live.busy || !current) ticket.markOpen();
