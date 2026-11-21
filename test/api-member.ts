@@ -112,6 +112,38 @@ orch.faux.setResponses([
 await (await root.submit({ type: "input", content: "继续" }, context)).wait(context);
 check(sawHistory && second.includes("DS_OK2") && second.includes(`session_id: ${sid}`), "续接回到同一个子对话（看得到上一轮）");
 
+// ---- 2b. 读写只限工作目录：越界的 write / read 被拦下，文件没有写到外面 ----
+const outside = join(repo, "..", `pi-agent-escape-${Date.now().toString(36)}.txt`);
+let blocked: { name: string; text: string; isError: boolean }[] = [];
+ds.setResponses([
+	() =>
+		fauxAssistantMessage(
+			[
+				fauxToolCall("write", { path: outside, content: "x" }, { id: "x1" }),
+				fauxToolCall("write", { path: "../escape-rel.txt", content: "x" }, { id: "x2" }),
+				fauxToolCall("read", { path: "/mnt/d/tmp/whatever.txt" }, { id: "x3" }),
+				fauxToolCall("bash", { command: "cat ../../secret.txt" }, { id: "x4" }),
+				fauxToolCall("write", { path: "inside.txt", content: "ok" }, { id: "x5" }),
+			],
+			{ stopReason: "toolUse" },
+		),
+	(ctx: any) => {
+		blocked = toolResults(ctx).slice(-5);
+		return fauxAssistantMessage(fauxText("DS_ESCAPE_DONE"));
+	},
+]);
+orch.faux.setResponses([
+	() => fauxAssistantMessage([fauxToolCall("ask_deepseek", { task: "试试写到外面" }, { id: "d9" })], { stopReason: "toolUse" }),
+	() => fauxAssistantMessage(fauxText("好")),
+]);
+await (await root.submit({ type: "input", content: "越界测试" }, context)).wait(context);
+check(blocked.slice(0, 3).every((r) => r.isError && r.text.includes("工作目录之外")), "写到工作目录外（绝对路径、..、Unix 路径）和读外面的文件都被拦下");
+check(blocked[3]?.isError && blocked[3].text.includes("不能用绝对路径、~ 或 .."), "bash 参数里的 .. 也被拦下");
+check(!blocked[4]?.isError, "工作目录里的写入正常");
+check(!existsSync(outside) && !existsSync(join(repo, "..", "escape-rel.txt")), "工作目录外没有出现文件");
+const escapeChange = changes.list().find((c) => c.agent === "deepseek" && c.task === "试试写到外面");
+check(!!escapeChange && existsSync(join(escapeChange.path, "inside.txt")), "工作目录里的文件写进了它的 worktree");
+
 // ---- 3. 后台派工 ----
 ds.setResponses([() => fauxAssistantMessage(fauxText("DS_BG_OK"))]);
 let waited = "";

@@ -280,7 +280,8 @@ npm run demo
 
   缺一样时它显示为不可用并说明原因，「编码」角色由 Gemini / Codex 顶上。配好后用 `npm run check -- deepseek` 发一句话确认能调通。
 - `api`：`type`（`openai-compatible` 或 `anthropic-compatible`）、`baseUrl`（默认 `https://api.deepseek.com`；用中转站就换成中转站地址）、`apiKeyEnv`、`contextWindow`、`maxTokens`、`maxTurns`（一次派工最多几轮工具调用，默认 40）。
-- `api.bash`：`allowlist`（默认）只放行 `api.bashAllow` 里开头的命令（测试、构建、`git status/diff/log`、`ls`、`cat`、`grep` 等），不能用 `;` `&&` `|` `>` `$()` 串接或重定向；`all` 全部放行；`off` 不给 bash。被拒绝的命令会告诉模型原因。
+- **读写只限工作目录**：`read` / `write` / `edit` 只能访问它的隔离副本，绝对路径、`..`、`~` 指到外面都会被拒绝（Pi Durable 的 `beforeTool` 钩子按子对话的工作目录检查）。
+- `api.bash`：`allowlist`（默认）只放行 `api.bashAllow` 里开头的命令（测试、构建、`git status/diff/log`、`ls`、`cat`、`grep` 等），不能用 `;` `&&` `|` `>` `$()` 串接或重定向，参数里也不能有绝对路径、`~` 或 `..`；`all` 全部放行；`off` 不给 bash。被拒绝的命令会告诉模型原因。
 - 会话 = 子对话：结果带回 `session_id`，总调度续接时 DeepSeek 能看到之前的对话。子对话本身是持久的，进程崩溃后重启会接着跑。可以同步派，也可以放后台。
 - 花费按 `models[].price` 计算；项目里有 `.pi-agent/RULES.md` 时，共同规则也会写进它的工作说明。
 

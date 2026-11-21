@@ -2,12 +2,13 @@
 // 让它用内置的 read / write / edit / bash 工具在（隔离的）工作目录里干活。
 // 子对话本身是持久的：进程崩溃后重启，Pi Durable 会接着跑；会话 ID 就是子对话的编号，续接 = 往同一个子对话再发一条。
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createProvider, type Model, type MutableModels } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { AssistantEntry, configure, defineExtension, type EntryRecord, type Extension, type Harness } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, configure, defineExtension, hook, ToolTask, type EntryRecord, type Extension, type Harness } from "@earendil-works/pi-durable";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import type { ParsedResult, TokenUsage } from "./agents.ts";
 import type { AgentConfig, AgentKind, ApiMemberConfig, AppConfig } from "./config.ts";
@@ -95,11 +96,28 @@ export function bashRefusal(command: string, api: ApiMemberConfig): string | und
 	if (api.bash === "off") return "这个成员没有开放 bash。";
 	const c = command.trim();
 	if (SHELL_OPERATORS.test(c)) return "不允许用 ; && || | ` $() > < 串接命令或重定向，一次只运行一条命令。";
+	// 参数里的绝对路径、~ 和 .. 会跑出工作目录（比如 cat /etc/…、grep … ../../），一律拒绝
+	if (c.split(/\s+/).slice(1).some((arg) => /^["']?(\/|~|[a-zA-Z]:[\\/]|\\\\)/.test(arg) || /(^|[\\/])\.\.([\\/]|$)/.test(arg)))
+		return "命令参数里不能用绝对路径、~ 或 ..，只能访问工作目录里的文件（用相对路径）。";
 	if (api.bashAllow.some((p) => c === p || c.startsWith(`${p} `))) return undefined;
 	return `命令不在允许清单里。允许以这些开头的命令：${api.bashAllow.join("、")}。需要别的操作请用 read / write / edit 完成，或在汇报里说明。`;
 }
 
-/** API 成员的工具：读、写、改文件，加上按白名单放行的 bash */
+const FILE_TOOLS = new Set(["read", "write", "edit"]);
+
+/** 路径在工作目录里吗（按字面解析；Windows 不区分大小写）。返回拒绝原因，放行返回 undefined */
+export function pathRefusal(path: unknown, cwd: string): string | undefined {
+	if (typeof path !== "string" || !path.trim()) return "缺少路径。";
+	const raw = path.trim();
+	// 当成 Unix 路径写的（/mnt/d/…、/tmp/…）在 Windows 上会落到当前盘符根目录，也算越界
+	const target = resolve(cwd, raw.replace(/^~(?=[\\/]|$)/, homedir()));
+	const norm = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+	const rel = relative(norm(resolve(cwd)), norm(target));
+	if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return undefined;
+	return `路径 ${raw} 在工作目录之外。只能读写当前工作目录（你的隔离副本）里的文件，请用相对路径；临时文件也放在工作目录里，用完删掉。`;
+}
+
+/** API 成员的工具：读、写、改文件（只限工作目录内），加上按白名单放行的 bash */
 export function createMemberTools(kind: AgentKind, api: ApiMemberConfig): Extension {
 	const tools: any[] = [createReadTool(), createWriteTool(), createEditTool()];
 	if (api.bash !== "off") {
@@ -112,7 +130,22 @@ export function createMemberTools(kind: AgentKind, api: ApiMemberConfig): Extens
 			}),
 		);
 	}
-	return defineExtension({ name: `pi-agent-member-${kind}`, tools });
+	return defineExtension({
+		name: `pi-agent-member-${kind}`,
+		tools,
+		hooks: [
+			// 读写只限工作目录：工作目录从这个子对话自己的 agent 配置里读（派工时设成它的 worktree）
+			hook(ToolTask, {
+				beforeTool: async (call, hookApi, context) => {
+					if (!FILE_TOOLS.has(call.name)) return undefined;
+					const agent = (await hookApi.snapshot(AgentDoc, hookApi.conversationId, context)) as { cwd?: string } | undefined;
+					if (!agent?.cwd) return { block: "没有确定的工作目录，不能读写文件。" };
+					const refusal = pathRefusal((call.arguments as { path?: unknown }).path, agent.cwd);
+					return refusal ? { block: refusal } : undefined;
+				},
+			}),
+		],
+	});
 }
 
 /** 给 API 成员的工作说明（相当于 CLI 自带的系统提示）；项目的共同规则也带上 */
@@ -121,7 +154,7 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 	const rules = existsSync(rulesFile) ? readFileSync(rulesFile, "utf8").trim().slice(0, 6000) : "";
 	return [
 		`你是 pi-agent 团队里的成员 ${label}（${kind}），由总调度派活。你在当前工作目录里完成交给你的任务。`,
-		"- 用 read 读文件，用 edit 精确修改，用 write 新建或整体重写文件。路径相对当前工作目录。",
+		"- 用 read 读文件，用 edit 精确修改，用 write 新建或整体重写文件。路径相对当前工作目录，只能读写工作目录里的文件（工作目录外的路径会被拒绝）；临时文件也放在工作目录里，用完删掉。",
 		api.bash === "off"
 			? "- 你没有 bash，不能运行命令。"
 			: api.bash === "all"
