@@ -3826,3 +3826,7 @@ pre {
 .act-card .act-chart {
 	height: 170px;
 }
+
+.table td.nowrap {
+	white-space: nowrap;
+}

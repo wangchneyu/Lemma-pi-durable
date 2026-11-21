@@ -381,8 +381,22 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			.slice(-limit);
 		type Lane = { id: string; agent: string; session: string | null; rounds: number; first: number; last: number; running: boolean; model?: string; lastTask?: string; tasks: string[] };
 		const lanes = new Map<string, Lane>();
+		// 真的在跑：同步派工有实时槽位，后台派工的记录在跑，子调度派的工要它的子调度还在跑。
+		// 没有结果、也不在跑的（比如进程中途退出过），只是「中断」，不能画成一直在执行。
+		const slotRunning = (callId: string) => live.busy && live.tools.some((t) => t.callId === callId && t.status !== "done");
+		const leadRunning = (key: string) => {
+			const l = leads.get(key);
+			return !!l && l.status === "open" && slotRunning(l.callId);
+		};
+		const isRunning = (d: Dispatch) => {
+			if (d.status !== "open") return false;
+			if (d.job) return jobs[d.job]?.status === "running";
+			if (d.lead) return leadRunning(d.lead);
+			return slotRunning(d.callId);
+		};
 		const bars = list.map((d) => {
-			const running = d.status === "open";
+			const running = isRunning(d);
+			if (d.status === "open" && !running) d = { ...d, status: "interrupted" };
 			// 同步派工还在跑时，会话 ID 在实时槽位的 details 里
 			const slot = running && !d.job ? live.tools.find((t) => t.callId === d.callId) : undefined;
 			const session = d.resume ?? d.sessionId ?? ((slot?.details as any)?.sessionId as string | undefined) ?? null;
@@ -420,7 +434,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		const leadBars = [...leads.values()]
 			.filter((l) => l.at !== undefined && (l.at >= (list[0]?.at ?? 0) || bars.some((b) => b.lead === l.key)))
 			.map((l) => {
-				const running = l.status === "open";
+				const running = leadRunning(l.key);
 				const end = l.endAt ?? (running ? now : l.at!);
 				const laneId = `lead:${l.key}`;
 				lanes.set(laneId, { id: laneId, agent: "lead", session: l.conversationId ?? null, rounds: 1, first: l.at!, last: end, running, lastTask: l.goal.slice(0, 80), tasks: l.taskId ? [l.taskId] : [], model: l.name });
@@ -432,7 +446,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					start: l.at!,
 					end,
 					running,
-					status: l.status,
+					status: l.status === "open" && !running ? "interrupted" : l.status,
 					mode: "lead",
 					job: null,
 					task: `${l.name}：${l.goal.replace(/\s+/g, " ").trim().slice(0, 120)}`,
@@ -491,6 +505,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			storage: config.storage,
 			conversation: { ...(options.session ?? { id: "default", title: "默认会话" }), controllerId: String(root.id) },
 			autonomy: { ...config.autonomy, learning: await harness.snapshot(Learning, context) },
+			lead: config.lead,
 			entries: entryCount,
 			jobs: jobList(),
 			orchestrator: {
@@ -551,7 +566,8 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					resume: RESUME_COMMAND[s.agent as AgentKind]?.(id) ?? null,
 				}))
 				.sort((a, b) => b.updatedAt - a.updatedAt),
-			usage: Object.entries<any>(usage?.models ?? {}).map(([model, u]) => ({
+			// 只算总调度（含子调度）自己的模型；API 成员（member-*）的子对话用量已经算在成员花费里，不能再算一遍
+			usage: Object.entries<any>(usage?.models ?? {}).filter(([model]) => !model.startsWith("member-")).map(([model, u]) => ({
 				model,
 				input: u.input ?? 0,
 				output: u.output ?? 0,

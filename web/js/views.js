@@ -1158,15 +1158,38 @@ function config() {
 						["密钥来源", esc(o.keySource)],
 						["最多轮数", o.maxTurns],
 					])}</div></section>
-				<section class="card"><header class="card-head"><h2 class="card-title">成员 CLI</h2></header>
-					<div class="table-wrap"><table class="table"><thead><tr><th>成员</th><th>状态</th><th>附加参数</th><th class="num">超时</th><th class="num hide-sm">输出上限</th></tr></thead>
-					<tbody>${s.agents.map((a) => `<tr><td>${agentTag(a.kind)}</td><td>${a.available ? "可用" : `<span class="muted">${esc(a.reason)}</span>`}</td><td class="mono">${esc(a.extraArgs.join(" ") || "—")}</td><td class="num mono">${a.timeoutMinutes}m</td><td class="num mono hide-sm">${num(a.maxOutputChars)}</td></tr>`).join("")}</tbody></table></div></section>
+				<section class="card"><header class="card-head"><h2 class="card-title">成员</h2></header>
+					<div class="table-wrap"><table class="table"><thead><tr><th>成员</th><th>状态</th><th>接入方式</th><th>参数 / 工具</th><th class="num">超时</th><th class="num hide-sm">输出上限</th></tr></thead>
+					<tbody>${s.agents
+						.map((a) => {
+							const how = a.api ? `API · ${esc(a.api.type)} · ${esc(a.api.host)}<br><span class="muted">密钥：${esc(a.api.keySource)}</span>` : "本机 CLI";
+							const args = a.api
+								? `read / write / edit（只限工作副本）${a.api.bash === "off" ? "" : ` / bash（${a.api.bash === "all" ? "全部放行" : `白名单 ${a.api.bashAllow.length} 条`}）`}`
+								: esc(a.extraArgs.join(" ") || "—");
+							return `<tr><td>${agentTag(a.kind)}</td><td class="nowrap">${a.available ? "可用" : `<span class="muted">${esc(a.reason)}</span>`}</td><td>${how}</td><td class="mono">${args}</td><td class="num mono">${a.timeoutMinutes}m</td><td class="num mono hide-sm">${num(a.maxOutputChars)}</td></tr>`;
+						})
+						.join("")}</tbody></table></div></section>
 				<section class="card"><header class="card-head"><h2 class="card-title">工作区隔离与预算</h2></header>
 					<div class="card-body">${dl([
 						["工作区隔离", s.isolation?.enabled ? "开启：每次新派工在独立的 git worktree 里干活，改动在终端 /apply 后才合并" : "关闭：成员直接在工作目录里改文件"],
 						["挂进 worktree 的目录", (s.isolation?.linkDirs ?? []).map((d) => code(d)).join(" ") || "—"],
 						["单次运行花费上限", s.budget?.perRunUsd != null ? `${money(s.budget.perRunUsd)}（超过后不再派工）` : "不限"],
 						["总调度单价", s.orchestrator.price ? `输入 $${s.orchestrator.price.input} · 输出 $${s.orchestrator.price.output} / 百万 tokens` : "未配置（总调度花费显示为 —）"],
+					])}</div></section>
+				<section class="card"><header class="card-head"><h2 class="card-title">子调度与自动验收</h2></header>
+					<div class="card-body">${dl([
+						["子调度", s.lead?.enabled === false ? "关闭" : "开启：总调度可以用 delegate_to_lead 把较大的子目标整块交给子负责人（只有一层，花费算在同一轮里）"],
+						[
+							"自动验收",
+							s.autonomy?.enabled
+								? s.autonomy.checks?.length
+									? s.autonomy.checks.map((c) => `${esc(c.name)}：${code([c.command, ...(c.args ?? [])].join(" "))}${c.timeoutSeconds ? ` · ${c.timeoutSeconds}s` : ""}`).join("<br>")
+									: "开启，但没有配置验收命令"
+								: "关闭",
+						],
+						["自动修复", s.autonomy?.enabled ? `验收失败时在同一会话里最多修 ${s.autonomy.maxRepairAttempts} 次` : "关闭"],
+						["返回总调度的结果长度", s.autonomy?.enabled ? `最多 ${num(s.autonomy.resultMaxChars)} 字符` : "按成员的输出上限"],
+						["已验证的修复记录", s.autonomy?.learning?.lessons?.length ? `${s.autonomy.learning.lessons.length} 条` : "还没有"],
 					])}</div></section>
 				<section class="card"><header class="card-head"><h2 class="card-title">启动子 CLI 前去掉的环境变量</h2></header>
 					<div class="card-body chips">${s.stripEnv.map((p) => `<code>${esc(p)}</code>`).join("")}</div></section>`;

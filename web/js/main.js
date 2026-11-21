@@ -41,20 +41,23 @@ function renderChrome() {
 	const queued = inbox.length - steers;
 	const jobs = runningJobs().length;
 	const waiting = `${steers ? ` · 插话 ${steers}` : ""}${queued ? ` · 排队 ${queued}` : ""}${jobs ? ` · 后台 ${jobs}` : ""}`;
+	// 失败之后做过「重置上下文」（最后一条记录是重置分隔线）：上一轮的失败已经不相关了
+	const resetSince = store.items.at(-1)?.type === "divider" && store.items.at(-1)?.label === "新的上下文";
+	const failure = resetSince ? undefined : live.runFailure;
 	if (live.busy) {
 		status.dataset.state = "busy";
 		$("#statusText").textContent = `调度中 · 第 ${live.turns + 1} 轮${running ? ` · ${running} 名成员执行中` : ""}${live.retry ? " · 模型重试中" : ""}${waiting}`;
 	} else if (jobs) {
 		status.dataset.state = "busy";
 		$("#statusText").textContent = `后台执行中 · ${jobs} 项（总调度空闲，结果回来后自动继续）`;
-	} else if (live.runFailure && live.runFailure.reason !== "aborted") {
+	} else if (failure && failure.reason !== "aborted") {
 		status.dataset.state = "failed";
 		// 服务商内容检查拦下整段上下文时，续跑没用，提示重置上下文
-		const blocked = live.runFailure.reason === "model_error" && /violate .*(terms|usage polic)|blocked as it seems|content (policy|filter)|内容(安全|审核|政策)/i.test(live.runFailure.detail ?? "");
-		$("#statusText").textContent = blocked ? "上一轮被模型服务商拦截：点「重置上下文」恢复" : `上一轮未完成：${FAILURE_LABEL[live.runFailure.reason] ?? live.runFailure.reason}`;
+		const blocked = failure.reason === "model_error" && /violate .*(terms|usage polic)|blocked as it seems|content (policy|filter)|内容(安全|审核|政策)/i.test(failure.detail ?? "");
+		$("#statusText").textContent = blocked ? "上一轮被模型服务商拦截：点「重置上下文」恢复" : `上一轮未完成：${FAILURE_LABEL[failure.reason] ?? failure.reason}`;
 	} else {
 		status.dataset.state = "idle";
-		$("#statusText").textContent = live.runFailure ? "待命 · 上一轮已中止" : "待命";
+		$("#statusText").textContent = failure ? "待命 · 上一轮已中止" : "待命";
 	}
 	$("#stopBtn").hidden = !live.busy;
 	if (state) $("#demoBadge").hidden = !state.demo;
