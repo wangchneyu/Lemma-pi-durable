@@ -107,7 +107,9 @@ export function dispatchRows() {
 		// 同一个 callId 只把实时状态套到最近的那一次上
 		const slot = !used.has(d.callId) && d.status === "open" ? slots.get(d.callId) : undefined;
 		used.add(d.callId);
-		const status = slot && slot.status !== "done" ? (slot.status === "running" ? "running" : "open") : d.status;
+		// 后台派工没有实时槽位：按后台记录判断是否在执行
+		const job = d.job ? jobById(d.job) : undefined;
+		const status = slot && slot.status !== "done" ? (slot.status === "running" ? "running" : "open") : job?.status === "running" ? "running" : d.status;
 		return { ...d, status, slot };
 	});
 	// 刚派出、汇总还没刷新到的

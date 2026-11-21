@@ -135,10 +135,10 @@ function overview() {
 	const tickets = new Map();
 	return {
 		title: "总览",
-		sub: "调度状态、任务流向和最近活动",
+		sub: "",
 		mount(r) {
 			root = r;
-			root.innerHTML = `<div class="kpis" data-n="kpis"></div>`;
+			root.innerHTML = "";
 			const prefs = loadPrefs();
 			const routes = el("section", "card routes-card");
 			routes.innerHTML = `<header class="card-head">
@@ -161,6 +161,7 @@ function overview() {
 				}
 				sankey.render(true);
 				this.routeSummary();
+				this.activity();
 			};
 			routes.querySelector(".route-controls").addEventListener("click", (e) => {
 				const b = e.target instanceof Element ? e.target.closest(".seg button") : null;
@@ -171,259 +172,98 @@ function overview() {
 				sankey[which] = b.dataset.k;
 				apply();
 			});
+			// 正在执行：只在有派工（同步或后台）在跑时出现，一行一个
+			const strip = el("div", "ov-strip");
+			strip.dataset.n = "strip";
+			strip.hidden = true;
+			root.prepend(strip);
 			root.append(routes);
-
-			const grid = el("div", "ov-grid");
-			grid.innerHTML = `<div class="ov-main">
-					<section class="card"><header class="card-head"><h2 class="card-title">正在执行</h2><span class="card-note" data-n="runningNote"></span></header><div class="card-body" data-n="running"></div></section>
-					<section class="card"><header class="card-head"><h2 class="card-title">最近运行</h2><a class="card-link" href="#/runs">全部运行 →</a></header><div class="card-body flush" data-n="recent"></div></section>
-				</div>
-				<div class="ov-main">
-					<section class="card"><header class="card-head"><h2 class="card-title">待合并改动</h2><a class="card-link" href="#/changes">全部改动 →</a></header><div class="card-body flush" data-n="changes"></div></section>
-					<section class="card ov-side"><header class="card-head"><h2 class="card-title">成员</h2><a class="card-link" href="#/agents">详情 →</a></header><div class="card-body" data-n="members"></div></section>
-				</div>`;
-			root.append(grid);
+			const act = el("section", "card act-card");
+			act.innerHTML = `<header class="card-head"><div class="card-heading"><h2 class="card-title">派工活动</h2><div class="card-sub" data-n="actSum"></div></div><div class="act-legend" data-n="actLegend"></div></header><div class="card-body" data-n="act"></div>`;
+			root.append(act);
+			// 路由图占满窗口剩下的高度（给下面的活动图留出位置）
+			const fit = () => {
+				const top = body.getBoundingClientRect().top + (root.closest(".content")?.scrollTop ?? 0);
+				sankey.height = Math.round(window.innerHeight - top - 64 - act.offsetHeight - 18);
+			};
+			this.fit = () => {
+				fit();
+				sankey.render(true);
+			};
+			addEventListener("resize", this.fit);
+			requestAnimationFrame(() => this.fit());
 			apply();
 			this.update("all");
 		},
 		unmount() {
 			sankey?.destroy();
 			tickets.clear();
+			if (this.fit) removeEventListener("resize", this.fit);
 		},
 		update(kind) {
 			const q = (n) => root.querySelector(`[data-n="${n}"]`);
-			if (kind === "job-output") return this.running(q("running"), q("runningNote"));
+			const strip = q("strip");
+			const wasHidden = strip?.hidden;
+			this.strip(strip);
+			// 执行条出现 / 消失会改变路由图可用的高度
+			if (strip && wasHidden !== strip.hidden) this.fit?.();
+			if (kind === "job-output") return;
 			// 按次数看时，计时刷新不改变流向，跳过；按耗时看时每秒更新带子宽度
 			if (kind !== "tick" || sankey.metric === "time") sankey.render();
 			this.routeSummary();
-			if (kind !== "tick") this.kpis(q("kpis"));
-			this.running(q("running"), q("runningNote"));
-			if (kind !== "tick" && kind !== "live") {
-				this.recent(q("recent"));
-				this.members(q("members"));
-				this.pending(q("changes"));
-			}
+			if (kind !== "tick" && kind !== "live") this.activity();
 		},
-		pending(box) {
-			const list = pendingChanges();
-			box.innerHTML = list.length
-				? `<div class="recent-list">${list
-						.slice(0, 5)
-						.map(
-							(c) => `<a class="recent-row change-mini" href="#/changes/${c.id}">
-						<span class="state-dot" data-s="${c.status === "conflict" ? "error" : "pending"}"></span>
-						<span class="recent-text"><span class="mono muted">#${esc(c.id)}</span> ${esc(short(c.task, 40))}</span>
-						<span class="mono"><b class="ok-t">+${c.add}</b> <b class="err-t">−${c.del}</b></span>
-					</a>`,
-						)
-						.join("")}</div>${list.length > 5 ? `<p class="footnote">还有 ${list.length - 5} 个…</p>` : ""}`
-				: `<div class="empty-inline"><span class="dot"></span>${store.changes.length ? "没有待合并的改动" : "成员的改动会出现在这里，等你在终端确认合并"}</div>`;
+		/** 派工活动：和路由图同一个时间范围；按成员着色的堆叠柱 */
+		activity() {
+			const box = root.querySelector('[data-n="act"]');
+			if (!box) return;
+			const mode = sankey.range === "hour" ? "hour" : sankey.range === "day" ? "day" : "week";
+			const rows = dispatchRows();
+			const chart = activityChart(rows, mode);
+			box.innerHTML = chart.html;
+			const span = { hour: "最近 1 小时 · 每 5 分钟", day: "最近 24 小时 · 每小时", week: "最近 14 天 · 每天" }[mode];
+			root.querySelector('[data-n="actSum"]').innerHTML = `<span><b>${chart.total}</b> 次派工</span><span>${span}</span>`;
+			const from = Date.now() - ({ hour: 3_600_000, day: 86_400_000, week: 14 * 86_400_000 }[mode]);
+			const used = KINDS.filter((k) => rows.some((d) => d.agent === k && (d.at ?? 0) >= from));
+			root.querySelector('[data-n="actLegend"]').innerHTML = used.map((k) => `<span><i style="background:${agentColor(k)}"></i>${esc(AGENT_LABEL[k] ?? k)}</span>`).join("");
+		},
+		/** 正在执行的派工：成员、任务、计时、最近一行输出；点开看详情 */
+		strip(box) {
+			if (!box) return;
+			const sync = store.live.tools
+				.filter((t) => t.status !== "done" && isDispatch(t.name))
+				.map((t) => ({ key: t.callId, agent: kindOf(t.name), task: callInfo(t.callId)?.task ?? "", since: slotStart.get(t.callId), last: String(t.output ?? "").trim().split("\n").at(-1) ?? "", tag: "" }));
+			const jobs = runningJobs().map((j) => ({ key: j.callId, agent: j.agent, task: j.task, since: j.startedAt, last: (j.output ?? []).at(-1) ?? "", tag: j.id }));
+			const rows = [...sync, ...jobs];
+			box.hidden = !rows.length;
+			if (!rows.length) return;
+			box.innerHTML = `<span class="strip-head"><span class="pulse-dot"></span>正在执行 ${rows.length}</span>${rows
+				.map(
+					(r) => `<button type="button" class="strip-item" data-call="${esc(r.key)}" style="--c:${agentColor(r.agent)}">
+						<b>${esc(AGENT_LABEL[r.agent] ?? r.agent)}${r.tag ? ` · ${esc(r.tag)}` : ""}</b>
+						<span class="strip-task">${esc(short(r.task, 40))}</span>
+						<span class="strip-last">${esc(short(r.last, 50))}</span>
+						<time>${r.since ? duration(Date.now() - r.since) : ""}</time>
+					</button>`,
+				)
+				.join("")}`;
+			if (!box.dataset.bound) {
+				box.dataset.bound = "1";
+				box.addEventListener("click", (e) => {
+					const b = e.target instanceof Element ? e.target.closest("[data-call]") : null;
+					if (b) openDispatch(b.dataset.call);
+				});
+			}
 		},
 		routeSummary() {
 			const box = root.querySelector('[data-n="routeSum"]');
 			if (!box) return;
 			const s = sankey.summary();
-			box.innerHTML = s?.total
-				? `<span><b>${s.total}</b> 次派工</span>${s.rate !== null ? `<span><b>${s.rate}%</b> 成功</span>` : ""}${s.running ? `<span class="live"><b>${s.running}</b> 执行中</span>` : ""}`
-				: `<span>${RANGES[sankey.range].label === "全部" ? "还没有派工" : `最近 ${RANGES[sankey.range].label} 没有派工`}</span>`;
-		},
-		kpis(box) {
-			const { live, state } = store;
 			const t = totals();
-			const finished = t.done + t.error + t.aborted;
-			const running = live.tools.filter((x) => x.status === "running").length;
-			const rows = dispatchRows();
-			const day = hourly(rows);
-			const dayTotal = day.reduce((s, v) => s + v, 0);
-			let status = "待命";
-			let statusSub = "等待终端下发任务";
-			let tone = "idle";
-			if (live.busy) {
-				status = running ? `${running} 路执行中` : "规划中";
-				statusSub = `调度中 · 第 ${live.turns + 1} 轮`;
-				tone = "busy";
-			} else if (live.runFailure && live.runFailure.reason !== "aborted") {
-				status = "上一轮未完成";
-				statusSub = FAILURE_LABEL[live.runFailure.reason] ?? live.runFailure.reason;
-				tone = "failed";
-			} else if (live.runFailure) {
-				statusSub = "上一轮已中止";
-			}
-			const tokens = (state?.usage ?? []).reduce((n, u) => n + u.input + u.output, 0);
-			const stats = state?.agentStats ?? {};
-			const costParts = KINDS.map((k) => ({ value: stats[k]?.cost ?? 0, color: agentColor(k), label: AGENT_LABEL[k], text: money(stats[k]?.cost ?? 0) }));
-			const lastAt = Math.max(0, ...rows.map((d) => d.endAt ?? d.at ?? 0));
-			box.innerHTML = `
-				<div class="kpi kpi-status" data-tone="${tone}">
-					<div class="kpi-top"><span class="kpi-label">调度状态</span><span class="pulse"></span></div>
-					<strong>${esc(status)}</strong>
-					<span class="kpi-sub">${esc(statusSub)}${lastAt && !live.busy ? ` · 上次活动 ${ago(lastAt)}` : ""}</span>
-				</div>
-				<div class="kpi">
-					<div class="kpi-top"><span class="kpi-label">累计派工</span><span class="kpi-trend">近 24h ${dayTotal}</span></div>
-					<strong>${num(t.total)}</strong>
-					${sparkBars(day)}
-				</div>
-				<div class="kpi">
-					<div class="kpi-top"><span class="kpi-label">成功率</span><span class="kpi-trend">${finished} 次已结束</span></div>
-					<strong>${finished ? `${Math.round((t.done / finished) * 100)}%` : "—"}</strong>
-					${segBar([
-						{ value: t.done, color: "var(--ok)", label: "完成" },
-						{ value: t.error, color: "var(--danger)", label: "失败" },
-						{ value: t.aborted, color: "var(--muted)", label: "中止" },
-					])}
-					<span class="kpi-legend"><i style="background:var(--ok)"></i>完成 ${t.done}<i style="background:var(--danger)"></i>失败 ${t.error}<i style="background:var(--muted)"></i>中止 ${t.aborted}</span>
-				</div>
-				<div class="kpi">
-					<div class="kpi-top"><span class="kpi-label">成员花费</span><span class="kpi-trend">${
-						state?.budget?.perRunUsd != null && state.budget.runKey
-							? `本轮 ${money(state.budget.spent)} / ${money(state.budget.perRunUsd)}`
-							: `总调度 ${num(tokens)} tokens`
-					}</span></div>
-					<strong>${money(t.cost)}</strong>
-					${segBar(costParts)}
-					<span class="kpi-legend">${
-						KINDS.filter((k) => (stats[k]?.cost ?? 0) > 0)
-							.map((k) => `<i style="background:${agentColor(k)}"></i>${AGENT_LABEL[k]} ${money(stats[k].cost)}`)
-							.join("") || "成员还没有报告花费"
-					}</span>
-				</div>`;
-		},
-		running(box, note) {
-			const active = store.live.tools.filter((t) => t.status !== "done" && isDispatch(t.name));
-			const jobs = runningJobs();
-			note.textContent = active.length || jobs.length ? `${active.length + jobs.length} 项${jobs.length ? `（后台 ${jobs.length}）` : ""}` : "";
-			this.jobs(box, jobs);
-			// 还没放进对话的插话 / 排队（来自终端）
-			const inbox = store.live.inbox ?? [];
-			let waitBox = box.querySelector(".inbox-list");
-			if (inbox.length) {
-				if (!waitBox) {
-					waitBox = el("div", "inbox-list");
-					box.append(waitBox);
-				}
-				const html = inbox
-					.map((i) => `<div class="inbox-row" data-mode="${i.mode}"><span class="inbox-tag">${i.mode === "steer" ? "插话" : "排队"}</span><span class="inbox-text">${esc(short(i.text, 120))}</span><span class="muted">${i.mode === "steer" ? "这一轮工具做完后放入" : "这一轮结束后处理"}</span></div>`)
-					.join("");
-				if (waitBox.innerHTML !== html) waitBox.innerHTML = html;
-			} else waitBox?.remove();
-			if (!active.length) {
-				tickets.clear();
-				box.querySelector(".tickets")?.remove();
-				let line = box.querySelector(".empty-inline");
-				if (!line) {
-					line = el("div", "empty-inline");
-					box.prepend(line);
-				}
-				const text = jobs.length ? "总调度这边没有同步派工；后台派工见下方" : store.live.busy ? "总调度正在规划，还没有派工" : "没有正在执行的派工";
-				if (line.dataset.t !== text) {
-					line.dataset.t = text;
-					line.innerHTML = `<span class="dot"></span>${esc(text)}`;
-				}
-				return;
-			}
-			box.querySelector(".empty-inline")?.remove();
-			let wrap = box.querySelector(".tickets");
-			if (!wrap) {
-				wrap = el("div", "tickets multi");
-				box.prepend(wrap);
-			}
-			for (const slot of active) {
-				let t = tickets.get(slot.callId);
-				if (!t) {
-					const info = callInfo(slot.callId);
-					t = new Ticket({ id: slot.callId, name: slot.name, args: { task: info?.task ?? "", session_id: info?.resume } });
-					t.node.classList.add("clickable");
-					t.node.addEventListener("click", (e) => {
-						if (!(e.target instanceof Element && e.target.closest("button"))) openDispatch(slot.callId);
-					});
-					tickets.set(slot.callId, t);
-					wrap.append(t.node);
-				}
-				t.update(slot);
-			}
-			for (const [id, t] of tickets) {
-				if (!active.some((s) => s.callId === id)) {
-					t.node.remove();
-					tickets.delete(id);
-				}
-			}
-		},
-		/** 后台派工：编号、成员、任务、最近一行输出、计时，可以取消 */
-		jobs(box, jobs) {
-			let wrap = box.querySelector(".bg-jobs");
-			if (!jobs.length) return wrap?.remove();
-			if (!wrap) {
-				wrap = el("div", "bg-jobs");
-				wrap.addEventListener("click", async (e) => {
-					const b = e.target instanceof Element ? e.target.closest("[data-cancel]") : null;
-					if (b) {
-						if (!confirm(`取消后台派工 ${b.dataset.cancel}？`)) return;
-						b.disabled = true;
-						try {
-							await post(`/api/jobs/${encodeURIComponent(b.dataset.cancel)}/cancel`);
-							toast(`已取消 ${b.dataset.cancel}`);
-						} catch (err) {
-							toast(`取消失败：${err.message}`);
-						}
-						return;
-					}
-					const row = e.target instanceof Element ? e.target.closest("[data-call]") : null;
-					if (row) openDispatch(row.dataset.call);
-				});
-				box.append(wrap);
-			}
-			wrap.innerHTML = `<div class="bg-jobs-head">后台派工 · 总调度不用等它们，做完后结果自动发回</div>${jobs
-				.map((j) => {
-					const last = (j.output ?? []).at(-1) ?? "等待输出…";
-					return `<div class="job-row" data-s="running" data-call="${esc(j.callId)}" style="--c:${agentColor(j.agent)}">
-						<span class="job-id">${esc(j.id)}</span>
-						<span class="agent-chip">${esc(AGENT_LABEL[j.agent] ?? j.agent)}</span>
-						<span class="job-task">${j.taskId ? `<b>${esc(j.taskId)}</b> ` : ""}${esc(short(j.task, 60))}<span class="job-last">${esc(short(last, 90))}</span></span>
-						<span class="job-time mono">${duration(Date.now() - j.startedAt)}</span>
-						<span class="pill" data-s="running">执行中</span>
-						<button type="button" class="ghost-btn tiny" data-cancel="${esc(j.id)}">取消</button>
-					</div>`;
-				})
-				.join("")}`;
-		},
-		recent(box) {
-			const runs = buildRuns().filter((r) => !r.divider).slice(-5).reverse();
-			box.innerHTML = runs.length
-				? `<div class="recent-list">${runs
-						.map(
-							(run) => `<a class="recent-row" href="#/runs/${run.id}">
-						<span class="state-dot" data-s="${PILL[run.status]}"></span>
-						<span class="recent-text">${esc(run.user ? short(run.user.text, 80) : "（输入在更早的历史里）")}</span>
-						<span class="recent-agents">${run.agents.map((k) => `<i style="background:${agentColor(k)}" title="${esc(AGENT_LABEL[k] ?? k)}"></i>`).join("")}</span>
-						<span class="recent-meta">${run.endAt && run.at ? duration(run.endAt - run.at) : "—"}</span>
-						<time>${ago(run.at)}</time>
-					</a>`,
-						)
-						.join("")}</div>`
-				: `<div class="empty-inline"><span class="dot"></span>还没有运行记录，在终端里输入任务开始。</div>`;
-		},
-		members(box) {
-			const agents = store.state?.agents ?? [];
-			const stats = store.state?.agentStats ?? {};
-			const busy = new Set(store.live.tools.filter((t) => t.status === "running").map((t) => kindOf(t.name)));
-			box.innerHTML = `<div class="member-list">${agents
-				.map((a) => {
-					const s = stats[a.kind] ?? { total: 0, done: 0, error: 0, aborted: 0, durationMs: 0, timed: 0, cost: 0 };
-					const state = !a.available ? "off" : busy.has(a.kind) ? "busy" : "idle";
-					const finished = s.done + s.error + s.aborted;
-					return `<a class="member-row" href="#/dispatches/${a.kind}" data-state="${state}" style="--c:${agentColor(a.kind)}">
-						<span class="lamp"></span>
-						<span class="member-main"><span class="member-name">${esc(AGENT_LABEL[a.kind] ?? a.label)}</span><span class="member-state">${state === "busy" ? "执行中" : state === "off" ? "不可用" : "待命"}</span></span>
-						<span class="member-figs"><b>${s.total}</b> 次 · ${finished ? `${Math.round((s.done / finished) * 100)}%` : "—"} · ${s.timed ? duration(s.durationMs / s.timed) : "—"}</span>
-						${segBar([
-							{ value: s.done, color: "var(--ok)", label: "完成" },
-							{ value: s.error, color: "var(--danger)", label: "失败" },
-							{ value: s.aborted, color: "var(--muted)", label: "中止" },
-						])}
-					</a>`;
-				})
-				.join("")}</div>`;
+			const budget = store.state?.budget;
+			box.innerHTML = s?.total
+				? `<span><b>${s.total}</b> 次派工</span>${s.rate !== null ? `<span><b>${s.rate}%</b> 成功</span>` : ""}${s.running ? `<span class="live"><b>${s.running}</b> 执行中</span>` : ""}<span><b>${money(t.cost)}</b> 花费</span>${budget?.perRunUsd != null && budget.runKey ? `<span>本轮 ${money(budget.spent)} / ${money(budget.perRunUsd)}</span>` : ""}`
+				: `<span>${RANGES[sankey.range].label === "全部" ? "还没有派工" : `最近 ${RANGES[sankey.range].label} 没有派工`}</span>`;
 		},
 	};
 }
@@ -467,7 +307,7 @@ function project() {
 	let root;
 	return {
 		title: "项目",
-		sub: "共同目标（GOAL.md）、分工表（ASSIGN.md，由总调度维护）和角色分工",
+		sub: "",
 		mount(r) {
 			root = r;
 			this.update("all");
@@ -539,7 +379,7 @@ function runs() {
 	let shownId = null;
 	return {
 		title: "运行记录",
-		sub: "每次在终端里的输入，以及总调度如何派工、各成员返回了什么",
+		sub: "",
 		mount(r, params) {
 			root = r;
 			selected = params[0] ?? null;
@@ -633,7 +473,7 @@ function dispatches() {
 	const filter = { agent: "all", status: "all", q: "" };
 	return {
 		title: "派工明细",
-		sub: "总调度每一次把任务交给成员 CLI 的记录，点一行查看完整任务和结果",
+		sub: "",
 		mount(r, params) {
 			root = r;
 			filter.agent = KINDS.includes(params[0]) ? params[0] : "all";
@@ -757,7 +597,7 @@ function changes() {
 	const diffs = new Map(); // id@head -> 差异文本
 	return {
 		title: "改动",
-		sub: "每次派工都在独立的 git worktree 里干活；改动要你在终端确认后才合并到主目录",
+		sub: "",
 		mount(r, params) {
 			root = r;
 			selected = params[0] ?? null;
@@ -890,7 +730,7 @@ function conventions() {
 	const cache = new Map();
 	return {
 		title: "Agent 规范",
-		sub: "各成员实际读到的规范和配置文件（CLAUDE.md、AGENTS.md、GEMINI.md、.claude/、.codex/、.gemini/ ……），只读；共同规则在终端用 /rules sync 同步",
+		sub: "",
 		async mount(r, params) {
 			root = r;
 			selected = params.length ? decodeURIComponent(params.join("/")) : null;
@@ -1017,7 +857,7 @@ function agents() {
 	let root;
 	return {
 		title: "成员",
-		sub: "本机 CLI 的可用性、实际生效的参数和工作统计（配置只读，修改请编辑配置文件后重启终端）",
+		sub: "",
 		mount(r) {
 			root = r;
 			this.update("all");
@@ -1096,7 +936,7 @@ function sessions() {
 	let agent = "all";
 	return {
 		title: "CLI 会话",
-		sub: "各成员 CLI 的会话登记表。总调度续接时会自动回到会话建立时的目录",
+		sub: "",
 		mount(r) {
 			root = r;
 			root.innerHTML = `<section class="card"><div class="toolbar"><div class="seg" data-n="agents"></div><span class="card-note" data-n="count"></span></div>
@@ -1141,11 +981,16 @@ function sessions() {
 /** 活动柱状图：按小时（24 根）或按天（14 根），每根按成员堆叠 */
 function activityChart(rows, mode) {
 	const hours = mode === "day";
-	const n = hours ? 24 : 14;
-	const span = hours ? 3_600_000 : 86_400_000;
+	const minutes = mode === "hour";
+	const n = minutes ? 12 : hours ? 24 : 14;
+	const span = minutes ? 300_000 : hours ? 3_600_000 : 86_400_000;
 	const now = new Date();
-	// 对齐到整点 / 当天零点，最后一根是"当前这一小时/今天"
-	const end = hours ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1).getTime() : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+	// 对齐到 5 分钟 / 整点 / 当天零点，最后一根是"当前这一段"
+	const end = minutes
+		? Math.ceil((now.getTime() + 1) / 300_000) * 300_000
+		: hours
+			? new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1).getTime()
+			: new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
 	const buckets = Array.from({ length: n }, (_, i) => ({ start: end - (n - i) * span, by: Object.fromEntries(KINDS.map((k) => [k, 0])), total: 0 }));
 	for (const d of rows) {
 		if (!d.at) continue;
@@ -1156,8 +1001,10 @@ function activityChart(rows, mode) {
 	}
 	const max = Math.max(1, ...buckets.map((b) => b.total));
 	const W = 100 / n;
+	const hm = (t) => `${String(new Date(t).getHours()).padStart(2, "0")}:${String(new Date(t).getMinutes()).padStart(2, "0")}`;
 	const label = (b, i) => {
 		const d = new Date(b.start);
+		if (minutes) return i % 3 === 0 ? hm(b.start) : "";
 		if (hours) return i % 3 === 0 ? `${String(d.getHours()).padStart(2, "0")}:00` : "";
 		return i % 2 === 0 || n <= 7 ? `${d.getMonth() + 1}/${d.getDate()}` : "";
 	};
@@ -1166,7 +1013,7 @@ function activityChart(rows, mode) {
 			const segs = KINDS.filter((k) => b.by[k] > 0)
 				.map((k) => `<i style="flex:${b.by[k]};background:${agentColor(k)}"></i>`)
 				.join("");
-			const tip = `${hours ? `${String(new Date(b.start).getHours()).padStart(2, "0")}:00–${String(new Date(b.start + span).getHours()).padStart(2, "0")}:00` : `${new Date(b.start).getMonth() + 1} 月 ${new Date(b.start).getDate()} 日`}：${b.total} 次${b.total ? `（${KINDS.filter((k) => b.by[k]).map((k) => `${AGENT_LABEL[k]} ${b.by[k]}`).join("、")}）` : ""}`;
+			const tip = `${minutes ? `${hm(b.start)}–${hm(b.start + span)}` : hours ? `${String(new Date(b.start).getHours()).padStart(2, "0")}:00–${String(new Date(b.start + span).getHours()).padStart(2, "0")}:00` : `${new Date(b.start).getMonth() + 1} 月 ${new Date(b.start).getDate()} 日`}：${b.total} 次${b.total ? `（${KINDS.filter((k) => b.by[k]).map((k) => `${AGENT_LABEL[k]} ${b.by[k]}`).join("、")}）` : ""}`;
 			return `<div class="act-col" style="width:${W}%" title="${esc(tip)}">
 				<div class="act-bar" style="height:${(b.total / max) * 100}%">${segs}</div>
 				<span class="act-label">${label(b, i)}</span>
@@ -1174,7 +1021,7 @@ function activityChart(rows, mode) {
 		})
 		.join("");
 	const total = buckets.reduce((s, b) => s + b.total, 0);
-	return { html: `<div class="act-chart"><div class="act-grid"><span>${max}</span><span>${Math.round(max / 2)}</span><span>0</span></div><div class="act-cols">${cols}</div></div>`, total };
+	return { html: `<div class="act-chart"><div class="act-grid"><span>${max}</span><span>${max >= 2 ? Math.round(max / 2) : ""}</span><span>0</span></div><div class="act-cols">${cols}</div></div>`, total };
 }
 
 function usage() {
@@ -1182,7 +1029,7 @@ function usage() {
 	let mode = "day";
 	return {
 		title: "用量",
-		sub: "总调度模型的 token，以及成员 CLI 的派工量、耗时和花费",
+		sub: "",
 		mount(r) {
 			root = r;
 			root.addEventListener("click", (e) => {
@@ -1279,7 +1126,7 @@ function config() {
 	let root;
 	return {
 		title: "配置",
-		sub: "当前进程实际生效的配置（只读）。修改请编辑配置文件，然后重启终端",
+		sub: "",
 		mount(r) {
 			root = r;
 			this.update("all");

@@ -25,6 +25,7 @@ import { Learning } from "./learning.ts";
 import { AgentTerminal } from "./terminal.ts";
 import { toViewLive } from "./view.ts";
 import { SessionCatalog } from "./sessions.ts";
+import { liveDigest, storedDigest } from "./digest.ts";
 
 const context = BACKGROUND_CONTEXT;
 const argv = process.argv.slice(2);
@@ -81,7 +82,8 @@ async function conversationList() {
 		const runtime = sessions.get(info.id);
 		const live = runtime ? await runtime.app.harness.snapshot(LiveDoc, runtime.app.root.id, context) : undefined;
 		const jobs = runtime ? await runtime.app.harness.snapshot(Jobs, context) : undefined;
-		return { id: info.id, title: info.title, createdAt: info.createdAt, workdir: info.workdir,
+		const digest = runtime ? await liveDigest(runtime.app.harness, runtime.app.root, info.storage) : await storedDigest(info.id, info.storage);
+		return { id: info.id, title: info.title, named: info.title !== info.id, digest, createdAt: info.createdAt, workdir: info.workdir,
 			current: info.id === sessionId, opened: !!runtime, controllerId: runtime ? String(runtime.app.root.id) : null,
 			busy: live?.run !== undefined, runningJobs: Object.values(jobs?.jobs ?? {}).filter((j) => j.status === "running").length };
 	}));

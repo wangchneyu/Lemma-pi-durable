@@ -353,7 +353,7 @@ export function topology() {
 
 	return {
 		title: "协作拓扑",
-		sub: "谁在哪个会话里干活、什么时候、和谁并行；同步 / 后台派工和改动之间的依赖",
+		sub: "",
 		mount(r) {
 			root = r;
 			root.innerHTML = `<div class="topo-stats" data-n="stats"></div>

@@ -33,7 +33,7 @@ addEventListener("hashchange", route);
 // ---------- 顶栏 / 导航 ----------
 function renderChrome() {
 	const { live, state } = store;
-	if (state?.conversation) $("#pageSub").textContent = `会话：${state.conversation.title} (${state.conversation.id}) · 总控 CID:${state.conversation.controllerId} · ${view?.sub ?? ""}`;
+	$("#pageSub").textContent = view?.sub ?? "";
 	const status = $("#status");
 	const running = live.tools.filter((t) => t.status === "running" && t.name.startsWith("ask_")).length;
 	const inbox = live.inbox ?? [];

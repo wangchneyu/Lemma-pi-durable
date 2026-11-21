@@ -134,7 +134,7 @@ export class Sankey {
 	layout(model, width) {
 		const narrow = width < 620;
 		const barW = narrow ? 8 : 10;
-		const H = narrow ? 300 : 340;
+		const H = this.height ? Math.max(narrow ? 300 : 340, this.height) : narrow ? 300 : 340;
 		const padT = 4;
 		const padB = 30; // 底部列名
 		const gap = narrow ? 14 : 18;
@@ -216,7 +216,7 @@ export class Sankey {
 		const g = this.layout(model, width);
 		const fmt = METRICS[this.metric].fmt;
 		// 执行中的线路才有流光，所以"哪些线路在执行"也是结构的一部分
-		const signature = `${width}|${g.nodes.map((n) => n.id).join(",")}|${g.links.map((l) => `${l.id}${l.hot ? "*" : ""}`).join(",")}`;
+		const signature = `${width}x${g.H}|${g.nodes.map((n) => n.id).join(",")}|${g.links.map((l) => `${l.id}${l.hot ? "*" : ""}`).join(",")}`;
 		this.svg.setAttribute("aria-label", `派工流向：${g.nodes.map((n) => `${n.label} ${fmt(n.value)}`).join("，")}`);
 		const streakW = (l) => Math.max(1.2, Math.min(l.h * 0.3, 3.5));
 
