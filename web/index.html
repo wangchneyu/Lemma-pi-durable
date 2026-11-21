@@ -59,9 +59,21 @@
 				</div>
 				<div class="topbar-actions">
 					<span class="conn" id="conn" data-state="connecting">连接中</span>
+					<button class="ghost-btn" id="routesBtn" aria-pressed="false" aria-controls="routes" title="显示或隐藏路由分配图">路由图</button>
 					<button class="ghost-btn" id="resetBtn" title="开始新的上下文，历史仍保留在存储里">新上下文</button>
 				</div>
 			</div>
+
+			<section class="routes" id="routes" aria-label="路由分配图" hidden>
+				<div class="routes-inner">
+					<div class="routes-head">
+						<h2 class="eyebrow">路由分配</h2>
+						<span class="routes-sum" id="routesSum"></span>
+					</div>
+					<svg class="route-map" id="routeMap" aria-hidden="true"></svg>
+					<div class="route-lines" id="routeLines" aria-live="polite"></div>
+				</div>
+			</section>
 
 			<div class="stream" id="stream">
 				<div class="timeline" id="timeline"></div>

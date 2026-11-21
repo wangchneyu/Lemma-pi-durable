@@ -178,6 +178,8 @@ function createTicket(call) {
 		lastOutput: "",
 	};
 	tickets.set(call.id, ticket);
+	callTask.set(call.id, task);
+	statOf(kind).total++;
 	return ticket;
 }
 
@@ -254,6 +256,10 @@ function settleTicket(ticket, item) {
 	}
 	const took = details.durationMs ? ` · ${duration(details.durationMs)}` : meta["耗时"] ? ` · ${meta["耗时"]}` : "";
 	ticket.pill.textContent = `${label}${took}`;
+	const stat = statOf(ticket.kind);
+	if (item.isError && !note?.aborted) stat.failed++;
+	else if (!note) stat.done++;
+	stat.last = `上次${label}${took}`;
 
 	ticket.result.hidden = false;
 	ticket.result.classList.toggle("err", item.isError && !note?.aborted);
@@ -339,9 +345,11 @@ function appendItems(items, { animate = true } = {}) {
 		if (!animate) node.classList.add("still"); // 历史记录不播放进场动画
 		timeline.append(node);
 	}
+	if (animate) items.forEach(animateRoute);
 	if (ghost) timeline.append(ghost); // 流式草稿始终在最后
 	$("#welcome").hidden = timeline.children.length > 0;
 	stickToBottom(stick);
+	renderRoutes();
 }
 
 // ---------------- 实时状态 ----------------
@@ -386,6 +394,7 @@ function renderLive() {
 	$("#stopBtn").hidden = !live.busy;
 	$("#hint").classList.toggle("show", live.busy);
 	renderRoster();
+	renderRoutes();
 	if (wasBusy && !live.busy) refreshState();
 	wasBusy = live.busy;
 	stickToBottom(stick);
@@ -411,7 +420,252 @@ setInterval(() => {
 		const ticket = tickets.get(slot.callId);
 		if (ticket && slot.status === "running") updateTicketFromSlot(ticket, slot);
 	}
+	renderRoutes();
 }, 1000);
+
+// ---------------- 路由分配图 ----------------
+// 你 → 总调度 → 各成员 的拓扑。执行中的线路有流动光点，派工 / 回报 / 回答时有一次性的数据包飞过。
+const KINDS = ["claude", "codex", "gemini"];
+const SVG_NS = "http://www.w3.org/2000/svg";
+const routesEl = $("#routes");
+const routeMap = $("#routeMap");
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const routeStats = new Map(); // kind -> { total, done, failed, last }
+const callTask = new Map(); // callId -> 任务文字
+let routeLayout = null;
+
+function statOf(kind) {
+	let s = routeStats.get(kind);
+	if (!s) routeStats.set(kind, (s = { total: 0, done: 0, failed: 0, last: null }));
+	return s;
+}
+function resetRoutes() {
+	routeStats.clear();
+	callTask.clear();
+}
+
+function routeGeometry(narrow) {
+	if (!narrow) {
+		// 横向：你 ── 总调度 ──┬─ 三个成员
+		const agents = {};
+		[34, 88, 142].forEach((y, i) => (agents[KINDS[i]] = { x: 600, y, w: 190, h: 46 }));
+		return {
+			narrow,
+			vb: "0 0 760 176",
+			user: { x: 46, y: 88, r: 19 },
+			orch: { x: 262, y: 88, w: 160, h: 64 },
+			userEdge: [69, 88, 178, 88],
+			agentEdge: (a) => `M342 88 C424 88 424 ${a.y} ${a.x - a.w / 2} ${a.y}`,
+			agentEnds: (a) => [342, 88, a.x - a.w / 2, a.y],
+			agents,
+		};
+	}
+	// 纵向（窄屏）：你 / 总调度 / 三个成员并排
+	const agents = {};
+	[62, 180, 298].forEach((x, i) => (agents[KINDS[i]] = { x, y: 206, w: 108, h: 52 }));
+	return {
+		narrow,
+		vb: "0 0 360 236",
+		user: { x: 180, y: 22, r: 17 },
+		orch: { x: 180, y: 96, w: 170, h: 54 },
+		userEdge: [180, 41, 180, 69],
+		agentEdge: (a) => `M180 123 C180 152 ${a.x} 152 ${a.x} ${a.y - a.h / 2}`,
+		agentEnds: (a) => [180, 123, a.x, a.y - a.h / 2],
+		agents,
+	};
+}
+
+function flowDot(pathId) {
+	if (reduceMotion) return "";
+	return `<circle class="rt-flow" r="3.2"><animateMotion dur="1.3s" repeatCount="indefinite"><mpath href="#${pathId}"/></animateMotion></circle>`;
+}
+
+/** 按容器宽度选横向或纵向布局，布局变化时重建 SVG 骨架 */
+function buildRouteMap() {
+	const width = routesEl.clientWidth;
+	if (!width) return false;
+	const narrow = width < 600;
+	if (routeLayout?.narrow === narrow) return true;
+	const g = routeGeometry(narrow);
+	routeLayout = g;
+	routeMap.setAttribute("viewBox", g.vb);
+	const port = (x, y) => `<circle class="rt-port" cx="${x}" cy="${y}" r="3"/>`;
+	const [ux1, uy1, ux2, uy2] = g.userEdge;
+	let edges = `<g class="rt-edge-g" id="rt-edge-user" style="--c:var(--orch)">
+		<path class="rt-edge" id="rt-path-user" d="M${ux1} ${uy1} L${ux2} ${uy2}"/>${port(ux2, uy2)}${flowDot("rt-path-user")}</g>`;
+	let nodes = "";
+	for (const kind of KINDS) {
+		const a = g.agents[kind];
+		const [x1, y1, x2, y2] = g.agentEnds(a);
+		edges += `<g class="rt-edge-g" id="rt-edge-${kind}" style="--c:var(--${kind})">
+			<path class="rt-edge" id="rt-path-${kind}" d="${g.agentEdge(a)}"/>${port(x1, y1)}${port(x2, y2)}${flowDot(`rt-path-${kind}`)}</g>`;
+		const left = a.x - a.w / 2;
+		const top = a.y - a.h / 2;
+		const nameY = g.narrow ? 21 : 19;
+		const stateY = g.narrow ? 39 : 35;
+		nodes += `<g class="rt-node rt-agent" id="rt-node-${kind}" style="--c:var(--${kind})" transform="translate(${left} ${top})">
+			<rect class="rt-box" width="${a.w}" height="${a.h}" rx="8"/>
+			<rect class="rt-accent" x="0.5" y="8" width="3" height="${a.h - 16}" rx="1.5"/>
+			<circle class="rt-lamp" cx="14" cy="${nameY - 4.5}" r="3.5"/>
+			<text class="rt-name" x="24" y="${nameY}">${esc(AGENT_LABEL[kind])}</text>
+			<text class="rt-count" x="${a.w - 10}" y="${nameY}" text-anchor="end"></text>
+			<text class="rt-state" x="${g.narrow ? 10 : 24}" y="${stateY}"></text>
+		</g>`;
+	}
+	const o = g.orch;
+	nodes += `<g class="rt-node rt-orch" id="rt-node-orch" transform="translate(${o.x - o.w / 2} ${o.y - o.h / 2})">
+		<rect class="rt-box" width="${o.w}" height="${o.h}" rx="10"/>
+		<rect class="rt-lamp" x="${o.w / 2 - 40}" y="${o.h / 2 - 12}" width="7" height="7" transform="rotate(45 ${o.w / 2 - 36.5} ${o.h / 2 - 8.5})"/>
+		<text class="rt-name" x="${o.w / 2 + 6}" y="${o.h / 2 - 3}" text-anchor="middle">总调度</text>
+		<text class="rt-state" x="${o.w / 2}" y="${o.h / 2 + 15}" text-anchor="middle"></text>
+	</g>`;
+	const u = g.user;
+	nodes += `<g class="rt-node rt-user" id="rt-node-user">
+		<circle cx="${u.x}" cy="${u.y}" r="${u.r}"/>
+		<text x="${u.x}" y="${u.y + 5}" text-anchor="middle">你</text>
+	</g>`;
+	routeMap.innerHTML = `<g>${edges}</g><g>${nodes}</g><g id="rt-packets"></g>`;
+	return true;
+}
+
+function setText(node, sel, text) {
+	const t = node.querySelector(sel);
+	if (t && t.textContent !== text) t.textContent = text;
+}
+
+function renderRoutes() {
+	if (routesEl.hidden || !buildRouteMap()) return;
+	const narrow = routeLayout.narrow;
+	const active = live.tools.filter((t) => t.status === "running" || t.status === "pending" || t.status === "waiting" || t.status === "sleeping");
+	const running = active.filter((t) => t.status === "running");
+
+	for (const kind of KINDS) {
+		const node = $(`#rt-node-${kind}`);
+		const edge = $(`#rt-edge-${kind}`);
+		const mine = active.filter((t) => kindOf(t.name) === kind);
+		const mineRunning = mine.filter((t) => t.status === "running");
+		const agent = appState?.agents.find((a) => a.kind === kind);
+		const s = statOf(kind);
+		let state = "idle";
+		let text = s.last ? s.last : "待命";
+		if (agent && !agent.available) {
+			state = "off";
+			text = "不可用";
+		} else if (mineRunning.length) {
+			state = "running";
+			const since = Math.min(...mineRunning.map((t) => slotStart.get(t.callId) ?? Date.now()));
+			text = `执行中${mineRunning.length > 1 ? ` ×${mineRunning.length}` : ""} ${duration(Date.now() - since)}`;
+		} else if (mine.length) {
+			state = "pending";
+			text = "排队中";
+		}
+		node.dataset.state = state;
+		edge.dataset.state = state === "running" ? "active" : state === "pending" ? "queued" : "idle";
+		setText(node, ".rt-state", text);
+		setText(node, ".rt-count", s.total ? (narrow ? `${s.total}次` : `派工 ${s.total}`) : "");
+	}
+
+	const orch = $("#rt-node-orch");
+	let orchState = "idle";
+	let orchText = "待命";
+	if (live.busy && running.length) {
+		orchState = "dispatching";
+		orchText = running.length > 1 ? `派工中 · ${running.length} 路并行` : "派工中 · 等待回报";
+	} else if (live.busy) {
+		orchState = "thinking";
+		orchText = live.retry ? "模型重试中" : live.partial.trim() ? "输出中" : "规划中";
+	} else if (live.runFailure?.reason === "aborted") {
+		orchText = "上一轮已中止";
+	} else if (live.runFailure) {
+		orchState = "failed";
+		orchText = FAILURE_LABEL[live.runFailure.reason] ?? live.runFailure.reason;
+	}
+	orch.dataset.state = orchState;
+	setText(orch, ".rt-state", orchText);
+	$("#rt-edge-user").dataset.state = live.busy ? "active" : "idle";
+
+	// 下方：当前每条线路在做什么
+	const lines = $("#routeLines");
+	if (active.length) {
+		lines.replaceChildren(
+			...active.map((t) => {
+				const kind = kindOf(t.name);
+				const row = el("div", "route-line");
+				row.dataset.s = t.status === "running" ? "running" : "pending";
+				row.style.setProperty("--c", KINDS.includes(kind) ? `var(--${kind})` : "var(--muted)");
+				const started = slotStart.get(t.callId);
+				const task = callTask.get(t.callId) ?? "";
+				row.innerHTML = `<b>→ ${esc(AGENT_LABEL[kind] ?? t.name)}</b><span class="task"></span><time>${t.status === "running" && started ? duration(Date.now() - started) : "排队"}</time>`;
+				row.querySelector(".task").textContent = task.replace(/\s+/g, " ");
+				row.title = task;
+				return row;
+			}),
+		);
+	} else {
+		const hint = live.busy ? "总调度正在规划，还没有派工" : "空闲 · 发送任务后，这里显示每条线路正在处理什么";
+		if (lines.textContent !== hint) lines.innerHTML = `<span class="idle">${esc(hint)}</span>`;
+	}
+
+	const totals = KINDS.map((k) => [k, statOf(k).total]).filter(([, n]) => n > 0);
+	const sum = totals.reduce((acc, [, n]) => acc + n, 0);
+	$("#routesSum").textContent = sum ? `近期派工 ${sum} 次 · ${totals.map(([k, n]) => `${AGENT_LABEL[k]} ${n}`).join(" · ")}` : "近期还没有派工";
+}
+
+/** 一次性的数据包：沿某条线路飞过（reverse 表示从末端飞回起点） */
+function packet(route, color, reverse = false) {
+	if (reduceMotion || routesEl.hidden || !routeLayout) return;
+	const path = document.getElementById(`rt-path-${route}`);
+	const layer = document.getElementById("rt-packets");
+	if (!path || !layer) return;
+	const dot = document.createElementNS(SVG_NS, "circle");
+	dot.setAttribute("class", "rt-packet");
+	dot.setAttribute("r", "4.5");
+	dot.setAttribute("cx", "-99");
+	dot.style.setProperty("--c", color);
+	const motion = document.createElementNS(SVG_NS, "animateMotion");
+	for (const [k, v] of Object.entries({ dur: "0.9s", begin: "indefinite", fill: "freeze", keyPoints: reverse ? "1;0" : "0;1", keyTimes: "0;1", calcMode: "linear" })) motion.setAttribute(k, v);
+	const mpath = document.createElementNS(SVG_NS, "mpath");
+	mpath.setAttribute("href", `#rt-path-${route}`);
+	motion.append(mpath);
+	dot.append(motion);
+	layer.append(dot);
+	dot.setAttribute("cx", "0");
+	motion.beginElement();
+	setTimeout(() => dot.remove(), 950);
+}
+
+/** 新条目到达时，在图上播放对应的转发动画 */
+function animateRoute(item) {
+	if (item.type === "user") packet("user", "var(--ink)");
+	else if (item.type === "assistant") {
+		if (item.toolCalls.length) for (const call of item.toolCalls) packet(kindOf(call.name), `var(--${kindOf(call.name)})`);
+		else if (item.text.trim()) packet("user", "var(--orch)", true);
+	} else if (item.type === "tool") packet(kindOf(item.name), `var(--${kindOf(item.name)})`, true);
+}
+
+function setRoutesOpen(open, persist) {
+	routesEl.hidden = !open;
+	$("#routesBtn").setAttribute("aria-pressed", String(open));
+	if (persist) {
+		try {
+			localStorage.setItem("pi-agent-routes", open ? "1" : "0");
+		} catch {
+			/* 忽略 */
+		}
+	}
+	if (open) renderRoutes();
+}
+$("#routesBtn").addEventListener("click", () => setRoutesOpen(routesEl.hidden, true));
+new ResizeObserver(() => renderRoutes()).observe(routesEl);
+{
+	let saved = null;
+	try {
+		saved = localStorage.getItem("pi-agent-routes");
+	} catch {
+		/* 忽略 */
+	}
+	setRoutesOpen(saved ? saved === "1" : innerWidth > 860 && innerHeight >= 700, false);
+}
 
 // ---------------- 侧栏 ----------------
 function renderRoster() {
@@ -441,6 +695,7 @@ function renderSidebar() {
 	$("#workdir").title = appState.storage;
 	$("#demoBadge").hidden = !appState.demo;
 	renderRoster();
+	renderRoutes();
 
 	const sessions = $("#sessions");
 	if (!appState.sessions.length) sessions.innerHTML = '<li class="empty">还没有会话</li>';
@@ -495,6 +750,7 @@ function connect() {
 		const { items, live: l } = JSON.parse(e.data);
 		timeline.replaceChildren();
 		tickets.clear();
+		resetRoutes();
 		ghost = null;
 		failureBanner = null;
 		appendItems(items, { animate: false });
