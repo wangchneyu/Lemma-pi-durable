@@ -73,9 +73,10 @@ export async function linkIgnoredDirs(root: string, path: string, subdir: string
 	return linked;
 }
 
-/** 提交 worktree 里的全部改动；没有改动返回 undefined */
-export async function commitAll(path: string, message: string): Promise<string | undefined> {
+/** 提交 worktree 里的全部改动；exclude 里的文件（从主目录带进来的规范文件）不提交。没有改动返回 undefined */
+export async function commitAll(path: string, message: string, exclude: string[] = []): Promise<string | undefined> {
 	await must(path, ["add", "-A"]);
+	if (exclude.length) await git(path, ["reset", "-q", "--", ...exclude]);
 	const staged = await git(path, ["diff", "--cached", "--quiet"]);
 	if (staged.code === 0) return undefined;
 	await must(path, [...AUTHOR, "commit", "-q", "--no-verify", "-m", message]);

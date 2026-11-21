@@ -10,6 +10,7 @@ import { LiveDoc } from "@earendil-works/pi-durable";
 import { startAdmin, type AdminServer } from "./admin.ts";
 import { Board, boardTasks, STATUS_LABEL, type BoardState } from "./board.ts";
 import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-ops.ts";
+import { initRules, scanConventions, syncRules } from "./conventions.ts";
 import { openApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { demoConfig, demoOrchestrator } from "./demo.ts";
@@ -220,6 +221,39 @@ async function command(line: string): Promise<boolean> {
 		console.log(c.dim(`  完整分工表：${app.project.assignPath}${admin ? `　后台：${admin.url}/#/project` : ""}`));
 		return true;
 	}
+	if (head === "/rules") {
+		if (arg === "init") {
+			const r = initRules(config.workdir);
+			console.log(r.ok ? c.green(r.message) : c.yellow(r.message));
+			return true;
+		}
+		if (arg === "sync") {
+			const r = syncRules(config.workdir);
+			if (!r.ok) console.log(c.yellow(r.message));
+			else {
+				console.log(c.green(r.message));
+				const word = { created: "新建", updated: "更新", unchanged: "未变" } as const;
+				for (const x of r.results) console.log(`  ${x.action === "unchanged" ? c.dim(word[x.action]) : c.green(word[x.action])} ${x.file}`);
+				console.log(c.dim("  记得把这些文件提交进 git（还没提交时，新派工的 worktree 也会带上它们）"));
+			}
+			return true;
+		}
+		const scan = scanConventions(config.workdir);
+		const label = { claude: "Claude", codex: "Codex", gemini: "Gemini" } as const;
+		for (const k of ["claude", "codex", "gemini"] as const) {
+			const m = scan.members[k];
+			const instr = m.instructions.map((f) => `${f.scope === "user" ? "~/" : ""}${f.rel}${f.size === 0 ? c.dim("(空)") : ""}${f.rules === "synced" ? c.green("✓规则") : f.rules ? c.yellow("✗规则") : ""}`);
+			console.log(
+				`  ${c.cyan(label[k].padEnd(7))} 说明：${instr.join("、") || c.red("无")}${c.dim(`  设置 ${m.settings.length} · 技能 ${m.skills} · 命令 ${m.commands} · 子 agent ${m.subagents}`)}`,
+			);
+		}
+		for (const ch of scan.checks) {
+			const mark = ch.level === "warn" ? c.yellow("!") : ch.level === "ok" ? c.green("✓") : c.dim("i");
+			console.log(`  ${mark} ${ch.title}${ch.detail ? c.dim(`　${ch.detail}`) : ""}`);
+		}
+		console.log(c.dim(`  /rules init 生成共同规则模板、/rules sync 同步到各家说明文件${admin ? `；完整视图：${admin.url}/#/conventions` : ""}`));
+		return true;
+	}
 	if (head === "/continue") {
 		await continueRun();
 		return true;
@@ -263,7 +297,7 @@ function startRepl() {
 	printBanner();
 	console.log(c.dim("\n输入任务开始协作。命令：/agents /web /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。"));
 	console.log(c.dim("运行中：直接输入 = 插话（当前这一轮就能看到），/queue <任务> 排到下一轮；/continue 续跑中断的一轮，/compact 压缩上下文"));
-	console.log(c.dim("项目：/goal 最终目标、/tasks 分工表"));
+	console.log(c.dim("项目：/goal 最终目标、/tasks 分工表、/rules 各成员的规范文件（/rules init、/rules sync）"));
 	console.log(c.dim("改动：/changes 待合并的改动、/diff <编号>、/apply <编号>、/drop <编号>、/clean\n"));
 	if (pendingChanges(app.changes).length) {
 		console.log(c.yellow(`有 ${pendingChanges(app.changes).length} 个改动等你确认合并：`));

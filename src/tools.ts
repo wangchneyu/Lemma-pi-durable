@@ -2,13 +2,14 @@
 // 每次派工可以：由总调度选模型；在独立的 git worktree 里干活（改动等用户在终端确认后才合并）；
 // 受单次运行的花费上限约束。
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { defineDoc, defineExtension, defineTool, LiveDoc, section, type Extension } from "@earendil-works/pi-durable";
 import { arr, bool, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { ADAPTERS, type TokenUsage } from "./agents.ts";
 import { Board, boardSummary, STATUS_LABEL, taskBrief, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeRecord, ChangeStore } from "./changes.ts";
+import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
 import { cleanEnv, runCli } from "./cli-runner.ts";
 import { resolveCommand, type AgentKind, type AppConfig, type ModelOption } from "./config.ts";
 import { addWorktree, commitAll, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
@@ -201,7 +202,20 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 						} else {
 							base = await snapshot(root);
 						}
-						if (!existsSync(plan.path)) await addWorktree(root, plan.path, plan.branch, base);
+						const copied: string[] = [];
+						if (!existsSync(plan.path)) {
+							await addWorktree(root, plan.path, plan.branch, base);
+							// 快照不含未跟踪的文件：新写的规范文件（CLAUDE.md / AGENTS.md / GEMINI.md / RULES.md）还没提交时也带过去，成员才读得到
+							for (const rel of WORKTREE_CONVENTION_FILES) {
+								const from = join(root, rel);
+								const to = join(plan.path, rel);
+								if (existsSync(from) && !existsSync(to)) {
+									mkdirSync(dirname(to), { recursive: true });
+									copyFileSync(from, to);
+									copied.push(rel);
+								}
+							}
+						}
 						const linked = await linkIgnoredDirs(root, plan.path, plan.subdir, config.isolation.linkDirs);
 						change = changes.upsert({
 							id: plan.id,
@@ -221,6 +235,7 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 							del: 0,
 							status: "running",
 							linked,
+							...(copied.length ? { copied } : {}),
 							createdAt: Date.now(),
 							updatedAt: Date.now(),
 						});
@@ -312,7 +327,7 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			const finishChange = async (): Promise<ChangeRecord | undefined> => {
 				if (!change) return undefined;
 				try {
-					const head = (await commitAll(change.path, commitMessage(kind, reportedModel ?? model, args.task))) ?? change.head;
+					const head = (await commitAll(change.path, commitMessage(kind, reportedModel ?? model, args.task), change.copied)) ?? change.head;
 					const [from] = changes.range({ ...change, head });
 					const files = head === from ? [] : await numstat(change.root, from, head);
 					return changes.upsert({

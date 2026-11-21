@@ -35,6 +35,8 @@ export interface ChangeRecord {
 	message?: string;
 	sessionId?: string;
 	linked?: string[];
+	/** 从主目录带进 worktree、但不属于这次改动的文件（未提交的规范文件），提交时排除 */
+	copied?: string[];
 	createdAt: number;
 	updatedAt: number;
 }

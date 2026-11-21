@@ -2432,6 +2432,241 @@ pre {
 	border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
 }
 
+/* ---------- Agent 规范 ---------- */
+.conv-members {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 14px;
+}
+.conv-member {
+	--c: var(--muted);
+	padding: 16px 18px;
+	display: grid;
+	gap: 10px;
+	border-top: 3px solid var(--c);
+	align-content: start;
+}
+.conv-member .lamp {
+	opacity: 1;
+}
+.conv-label {
+	font: 600 11px var(--font-mono);
+	color: var(--muted);
+	letter-spacing: 0.06em;
+}
+.conv-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+.conv-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 4px 8px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: var(--panel-2);
+	font: 12px var(--font-mono);
+	color: var(--ink);
+	text-decoration: none;
+}
+.conv-chip:hover {
+	border-color: var(--c);
+}
+.conv-chip em {
+	font: 600 10.5px var(--font-body);
+	font-style: normal;
+}
+.scope-tag {
+	font: 600 10px var(--font-body);
+	color: var(--muted);
+	padding: 1px 4px;
+	border: 1px solid var(--line-strong);
+	border-radius: 3px;
+}
+.conv-figs {
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.conv-checks {
+	display: grid;
+	gap: 8px;
+}
+.conv-check {
+	--t: var(--muted);
+	display: grid;
+	grid-template-columns: 22px minmax(0, 1fr);
+	gap: 10px;
+	padding: 10px 12px;
+	border: 1px solid color-mix(in srgb, var(--t) 35%, var(--line));
+	border-radius: 9px;
+	font-size: 13px;
+}
+.conv-check[data-level="warn"] {
+	--t: var(--signal);
+}
+.conv-check[data-level="ok"] {
+	--t: var(--ok);
+}
+.conv-icon {
+	display: grid;
+	place-items: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
+	background: color-mix(in srgb, var(--t) 18%, transparent);
+	color: var(--t);
+	font: 700 12px var(--font-mono);
+}
+.conv-check strong {
+	color: var(--ink);
+	font-weight: 600;
+}
+.conv-check p {
+	margin: 3px 0 0;
+	color: var(--muted);
+	font-size: 12.5px;
+}
+.conv-files {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 12px;
+}
+.conv-files a {
+	font: 12px var(--font-mono);
+	color: var(--ink-2);
+}
+.conv-browser {
+	display: grid;
+	grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+	border-top: 1px solid var(--line);
+	min-height: 420px;
+}
+.conv-tree {
+	border-right: 1px solid var(--line);
+	padding: 10px 8px;
+	max-height: 640px;
+	overflow-y: auto;
+}
+.conv-group + .conv-group {
+	margin-top: 10px;
+}
+.conv-group-head {
+	display: flex;
+	justify-content: space-between;
+	padding: 4px 8px;
+	font: 600 11.5px var(--font-body);
+	color: var(--muted);
+}
+.conv-group-head em {
+	font: 11px var(--font-mono);
+	font-style: normal;
+}
+.conv-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 8px;
+	border-radius: 7px;
+	text-decoration: none;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	min-width: 0;
+}
+.conv-item:hover {
+	background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+.conv-item.active {
+	background: color-mix(in srgb, var(--signal) 12%, transparent);
+	color: var(--ink);
+}
+.conv-name {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-family: var(--font-mono);
+	font-size: 12px;
+}
+.conv-item em {
+	font-style: normal;
+	font-size: 11px;
+}
+.conv-kind {
+	flex: none;
+	font: 600 10px var(--font-body);
+	padding: 1px 5px;
+	border-radius: 4px;
+	color: var(--muted);
+	border: 1px solid var(--line-strong);
+}
+.conv-kind[data-kind="instructions"],
+.conv-kind[data-kind="project"] {
+	color: var(--signal);
+	border-color: color-mix(in srgb, var(--signal) 45%, transparent);
+}
+.conv-kind[data-kind="settings"],
+.conv-kind[data-kind="mcp"] {
+	color: var(--run);
+	border-color: color-mix(in srgb, var(--run) 45%, transparent);
+}
+.conv-kind[data-kind="skill"],
+.conv-kind[data-kind="subagent"],
+.conv-kind[data-kind="command"] {
+	color: var(--ok);
+	border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.conv-preview {
+	padding: 14px 18px 18px;
+	min-width: 0;
+	max-height: 640px;
+	overflow-y: auto;
+}
+.conv-preview-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding-bottom: 10px;
+	margin-bottom: 12px;
+	border-bottom: 1px solid var(--line);
+	font-size: 13px;
+}
+.conv-desc {
+	margin: 0 0 12px;
+	color: var(--ink-2);
+	font-size: 13px;
+}
+.conv-md {
+	font-size: 13.5px;
+}
+.conv-code {
+	margin: 0;
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--bg);
+	font: 12px/1.6 var(--font-mono);
+	color: var(--ink-2);
+	overflow-x: auto;
+	white-space: pre;
+}
+@media (max-width: 1000px) {
+	.conv-members {
+		grid-template-columns: minmax(0, 1fr);
+	}
+	.conv-browser {
+		grid-template-columns: minmax(0, 1fr);
+	}
+	.conv-tree {
+		border-right: none;
+		border-bottom: 1px solid var(--line);
+		max-height: 320px;
+	}
+}
+
 /* ---------- 抽屉 ---------- */
 .drawer {
 	position: fixed;

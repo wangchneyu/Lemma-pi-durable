@@ -833,6 +833,141 @@ function changes() {
 }
 
 // =====================================================================
+// Agent 规范：各家 CLI 的规范 / 配置文件
+// =====================================================================
+const OWNER_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", shared: "通用", "pi-agent": "pi-agent" };
+const KIND_LABEL = { instructions: "说明", settings: "设置", subagent: "子 agent", command: "命令", skill: "技能", mcp: "MCP", project: "项目" };
+const KIND_ORDER = ["project", "instructions", "settings", "mcp", "subagent", "command", "skill"];
+
+function conventions() {
+	let root;
+	let data = null;
+	let selected = null;
+	let query = "";
+	const cache = new Map();
+	return {
+		title: "Agent 规范",
+		sub: "各成员实际读到的规范和配置文件（CLAUDE.md、AGENTS.md、GEMINI.md、.claude/、.codex/、.gemini/ ……），只读；共同规则在终端用 /rules sync 同步",
+		async mount(r, params) {
+			root = r;
+			selected = params.length ? decodeURIComponent(params.join("/")) : null;
+			root.innerHTML = empty("扫描中…");
+			await this.load();
+		},
+		async load() {
+			try {
+				data = await getJson("/api/conventions");
+			} catch (err) {
+				root.innerHTML = empty(`扫描失败：${err.message}`);
+				return;
+			}
+			this.render();
+		},
+		update() {},
+		render() {
+			const d = data;
+			const label = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
+			const fileChip = (f) =>
+				`<a class="conv-chip" href="#/conventions/${encodeURIComponent(f.id)}" title="${esc(f.id)}"><span class="scope-tag">${f.scope === "user" ? "用户" : "项目"}</span>${esc(f.rel)}${f.size === 0 ? `<em class="muted">空</em>` : ""}${f.rules === "synced" ? `<em class="ok-t">规则 ✓</em>` : f.rules ? `<em class="err-t">规则${f.rules === "stale" ? "过期" : "缺失"}</em>` : ""}</a>`;
+			const members = ["claude", "codex", "gemini"]
+				.map((k) => {
+					const m = d.members[k];
+					const hasProject = m.instructions.some((f) => f.scope === "project" && f.size > 0);
+					return `<section class="card conv-member" style="--c:${agentColor(k)}">
+						<header class="agent-head"><span class="lamp"></span><h2>${label[k]}</h2><span class="pill" data-s="${hasProject ? "done" : "error"}">${hasProject ? "有项目说明" : "缺项目说明"}</span></header>
+						<div class="conv-label">会读到的说明</div>
+						<div class="conv-chips">${m.instructions.map(fileChip).join("") || `<span class="muted">没有</span>`}</div>
+						<div class="figures conv-figs">
+							<div><span>设置</span><strong>${m.settings.length}</strong></div>
+							<div><span>技能</span><strong>${m.skills}</strong></div>
+							<div><span>命令</span><strong>${m.commands}</strong></div>
+							<div><span>子 agent</span><strong>${m.subagents}</strong></div>
+						</div>
+					</section>`;
+				})
+				.join("");
+			const checks = d.checks
+				.map(
+					(c) => `<div class="conv-check" data-level="${c.level}"><span class="conv-icon">${c.level === "warn" ? "!" : c.level === "ok" ? "✓" : "i"}</span>
+					<div><strong>${esc(c.title)}</strong>${c.detail ? `<p>${esc(c.detail)}</p>` : ""}${c.files?.length ? `<p class="conv-files">${c.files.map((id) => `<a href="#/conventions/${encodeURIComponent(id)}">${esc(id.replace(/^user:/, "~/").replace(/^project:/, ""))}</a>`).join("")}</p>` : ""}</div></div>`,
+				)
+				.join("");
+			root.innerHTML = `
+				<div class="conv-members">${members}</div>
+				<section class="card">
+					<header class="card-head"><div class="card-heading"><h2 class="card-title">检查</h2><div class="card-sub">共同规则：${d.rules.exists ? `<span class="mono">.pi-agent/RULES.md</span>（${esc(d.rules.hash ?? "")}）` : "还没有，终端 /rules init 生成模板"}</div></div>
+						<button type="button" class="ghost-btn" data-n="rescan">重新扫描</button></header>
+					<div class="card-body conv-checks">${checks}</div>
+				</section>
+				<section class="card">
+					<header class="card-head"><div class="card-heading"><h2 class="card-title">文件</h2><div class="card-sub">项目：<span class="mono">${esc(d.project)}</span>　用户：<span class="mono">${esc(d.home)}</span></div></div>
+						<input class="search" data-n="q" type="search" placeholder="搜索文件、技能…" value="${esc(query)}" /></header>
+					<div class="conv-browser">
+						<div class="conv-tree" data-n="tree"></div>
+						<div class="conv-preview" data-n="preview"></div>
+					</div>
+				</section>`;
+			root.querySelector('[data-n="rescan"]').addEventListener("click", () => {
+				cache.clear();
+				this.load();
+			});
+			root.querySelector('[data-n="q"]').addEventListener("input", (e) => {
+				query = e.target.value.trim().toLowerCase();
+				this.tree();
+			});
+			this.tree();
+			this.preview();
+		},
+		tree() {
+			const box = root.querySelector('[data-n="tree"]');
+			const files = data.files.filter((f) => !query || `${f.rel} ${f.name ?? ""} ${f.description ?? ""}`.toLowerCase().includes(query));
+			const groups = [];
+			for (const scope of ["project", "user"]) {
+				for (const owner of ["pi-agent", "claude", "codex", "gemini", "shared"]) {
+					const list = files.filter((f) => f.scope === scope && f.owner === owner).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.rel.localeCompare(b.rel));
+					if (!list.length) continue;
+					groups.push(`<div class="conv-group"><div class="conv-group-head">${scope === "user" ? "用户" : "项目"} · ${OWNER_LABEL[owner]}<em>${list.length}</em></div>${list
+						.map(
+							(f) => `<a class="conv-item${f.id === selected ? " active" : ""}" href="#/conventions/${encodeURIComponent(f.id)}" title="${esc(f.description ?? f.rel)}">
+							<span class="conv-kind" data-kind="${f.kind}">${KIND_LABEL[f.kind]}</span><span class="conv-name">${esc(f.kind === "skill" || f.kind === "subagent" || f.kind === "command" ? (f.name ?? f.rel) : f.rel)}</span>${f.size === 0 ? `<em class="muted">空</em>` : ""}</a>`,
+						)
+						.join("")}</div>`);
+				}
+			}
+			box.innerHTML = groups.join("") || `<div class="empty-inline"><span class="dot"></span>没有匹配的文件</div>`;
+		},
+		async preview() {
+			const box = root.querySelector('[data-n="preview"]');
+			const f = data.files.find((x) => x.id === selected) ?? data.files.find((x) => x.kind === "instructions" && x.size > 0) ?? data.files[0];
+			if (!f) {
+				box.innerHTML = empty("没有找到任何规范文件");
+				return;
+			}
+			box.innerHTML = `<div class="conv-preview-head"><div><span class="conv-kind" data-kind="${f.kind}">${KIND_LABEL[f.kind]}</span> <strong class="mono">${esc(f.scope === "user" ? `~/${f.rel}` : f.rel)}</strong></div>
+				<span class="muted mono">${(f.size / 1024).toFixed(1)} KB · ${ago(f.mtime)}</span></div>
+				${f.description ? `<p class="conv-desc">${esc(f.description)}</p>` : ""}
+				<div data-n="body"><div class="empty-inline"><span class="dot"></span>读取中…</div></div>`;
+			let res = cache.get(f.id);
+			if (!res) {
+				try {
+					res = await getJson(`/api/conventions/file?id=${encodeURIComponent(f.id)}`);
+					cache.set(f.id, res);
+				} catch (err) {
+					res = { text: "", error: err.message };
+				}
+			}
+			const body = box.querySelector('[data-n="body"]');
+			if (!body) return;
+			if (res.error) body.innerHTML = `<div class="change-msg err">${esc(res.error)}</div>`;
+			else if (!res.text.trim()) body.innerHTML = `<div class="empty-inline"><span class="dot"></span>空文件</div>`;
+			else if (/\.(md|mdc)$/i.test(f.rel)) body.innerHTML = `<div class="md conv-md">${markdown(res.text.replace(/<!--[\s\S]*?-->/g, ""))}</div>`;
+			else body.innerHTML = `<pre class="conv-code"><code>${esc(res.text)}</code></pre>`;
+			if (res.truncated) body.insertAdjacentHTML("beforeend", `<p class="footnote">文件太大，只显示了前一部分。</p>`);
+		},
+	};
+}
+
+// =====================================================================
 // 成员
 // =====================================================================
 function agents() {
@@ -1140,4 +1275,4 @@ function config() {
 	};
 }
 
-export const VIEWS = { overview, project, runs, dispatches, changes, agents, sessions, usage, config };
+export const VIEWS = { overview, project, runs, dispatches, changes, agents, conventions, sessions, usage, config };

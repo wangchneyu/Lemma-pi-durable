@@ -123,6 +123,10 @@ try {
 	for (let i = 0; i < 50 && !/清理了 \d+ 个 worktree|没有需要清理/.test(terminalOutput); i++) await sleep(100);
 	check(terminalOutput.includes(`清理了 ${pendingCount} 个 worktree`), "多行命令按顺序执行：/clean 清掉了刚合并的改动");
 
+	const conv = await json("/api/conventions");
+	check(Array.isArray(conv.files) && conv.members?.claude && conv.files.every((f: any) => f.path === undefined), "规范文件接口返回扫描结果，不暴露绝对路径");
+	check((await raw("/api/conventions/file?id=project%3A..%2F..%2Fpackage.json")).status === 404, "规范文件接口不能读任意路径");
+
 	const abort = await raw("/api/abort", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
 	await sleep(200);
 	check(abort.status === 200 && terminalOutput.includes("后台网页：已中止本轮"), "网页上的中止会通知终端");

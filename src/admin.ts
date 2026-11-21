@@ -12,6 +12,7 @@ import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
 import type { OrchestratorModel } from "./models.ts";
 import { Board, boardTasks, type BoardState } from "./board.ts";
+import { readConvention, scanConventions } from "./conventions.ts";
 import { diffText } from "./git.ts";
 import { AgentSessions, RunBudget } from "./tools.ts";
 import { parseToolResult, toViewItem, toViewLive, type Dispatch, type ViewItem, type ViewLive } from "./view.ts";
@@ -370,6 +371,18 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			if (detail && req.method === "GET") {
 				const d = await dispatchDetail(decodeURIComponent(detail[1]!));
 				return d ? sendJson(res, 200, d) : sendJson(res, 404, { error: "没有这次派工" });
+			}
+			// Agent 规范文件：扫描结果（不含内容）；按编号读单个文件（打码）
+			if (url.pathname === "/api/conventions" && req.method === "GET") {
+				const scan = scanConventions(config.workdir);
+				return sendJson(res, 200, { ...scan, files: scan.files.map(({ path: _p, ...f }) => f) });
+			}
+			if (url.pathname === "/api/conventions/file" && req.method === "GET") {
+				const scan = scanConventions(config.workdir);
+				const file = readConvention(scan, url.searchParams.get("id") ?? "");
+				if (!file) return sendJson(res, 404, { error: "没有这个文件" });
+				const { path: _p, ...meta } = file.file;
+				return sendJson(res, 200, { file: meta, text: file.text, truncated: file.truncated });
 			}
 			if (url.pathname === "/api/changes" && req.method === "GET") return sendJson(res, 200, { changes: changes.list() });
 			const changeDiff = url.pathname.match(/^\/api\/changes\/([^/]+)\/diff$/);
