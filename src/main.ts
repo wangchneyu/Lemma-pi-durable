@@ -1,31 +1,44 @@
-// 入口：
-//   npm start                 交互模式（会话持久化在 data/session.sqlite，重启后接着跑）
-//   npm start -- "你的问题"    单次提问，答完退出
+// 入口（终端是主体，后台网页随终端一起启动）：
+//   npm start                 交互模式 + 后台网页 http://127.0.0.1:8787
+//   npm start -- "你的问题"    单次提问，答完退出（不开后台）
+//   npm run demo              演示模式：假模型 + 模拟 CLI，不花钱（后台 8788）
+//   --no-web                  不开后台网页
+import { resolve } from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { startAdmin, type AdminServer } from "./admin.ts";
 import { openApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
+import { demoConfig, demoOrchestrator } from "./demo.ts";
 import { createOrchestratorModel } from "./models.ts";
 import { colors as c, follow } from "./printer.ts";
 
 const context = BACKGROUND_CONTEXT;
-const config = loadConfig(process.env.PI_AGENT_CONFIG ?? "pi-agent.config.json");
-const orchestrator = createOrchestratorModel(config.orchestrator);
-const { harness, root, agents } = await openApp(config, orchestrator, context).catch((error: Error) => {
+const argv = process.argv.slice(2);
+const flags = new Set(argv.filter((a) => a.startsWith("--")));
+const demo = flags.has("--demo") || process.env.PI_AGENT_DEMO === "1";
+const configPath = resolve(process.env.PI_AGENT_CONFIG ?? "pi-agent.config.json");
+const baseConfig = loadConfig(configPath);
+const config = demo ? demoConfig(baseConfig) : baseConfig;
+const orchestrator = demo ? demoOrchestrator() : createOrchestratorModel(config.orchestrator);
+const app = await openApp(config, orchestrator, context).catch((error: Error) => {
 	console.error(`启动失败：${error.message}`);
 	process.exit(1);
 });
+const { harness, root, agents } = app;
 const stopFollowing = await follow(root, context);
 harness.resume(); // 上次进程中断时没跑完的任务，从断点继续
 
 let rl: Interface | undefined;
+let admin: AdminServer | undefined;
 let closing = false;
 
 function printBanner() {
-	console.log(c.green("pi-agent · 本机多 agent 协作（Pi Durable）"));
+	console.log(c.green(`pi-agent · 本机多 agent 协作（Pi Durable）${demo ? c.yellow("  [演示模式]") : ""}`));
 	console.log(c.dim(`总调度模型：${orchestrator.describe}`));
 	console.log(c.dim(`工作目录：${config.workdir}`));
 	console.log(c.dim(`会话存储：${config.storage}`));
+	if (admin) console.log(`${c.dim("后台网页：")}${c.cyan(admin.url)}`);
 	for (const a of agents) {
 		console.log(`  ${a.available ? c.green("●") : c.red("○")} ${a.kind}${a.available ? "" : c.dim(` — ${a.reason}`)}`);
 	}
@@ -37,6 +50,7 @@ async function shutdown(code = 0): Promise<void> {
 	process.exitCode = code;
 	// readline 可能正在同步分发同一批粘贴进来的多行，推迟到分发完再关
 	setImmediate(() => rl?.close());
+	await admin?.close().catch(() => {});
 	await stopFollowing();
 	await harness.close(context);
 	// 不直接 process.exit()：Windows 上句柄未关完就退出会触发 libuv 断言。
@@ -63,6 +77,9 @@ async function command(line: string): Promise<boolean> {
 		case "/agents":
 			printBanner();
 			return true;
+		case "/web":
+			console.log(admin ? `后台网页：${c.cyan(admin.url)}` : c.dim("后台网页没有开启（--no-web 或配置 web.enabled=false）"));
+			return true;
 		case "/usage": {
 			const usage = (await harness.usage(context)) as any;
 			for (const [name, u] of Object.entries<any>(usage.models ?? {})) {
@@ -85,7 +102,7 @@ async function command(line: string): Promise<boolean> {
 
 function startRepl() {
 	printBanner();
-	console.log(c.dim("\n输入任务开始协作。命令：/agents /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。\n"));
+	console.log(c.dim("\n输入任务开始协作。命令：/agents /web /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。\n"));
 	const repl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${c.cyan("你 ›")} ` });
 	rl = repl;
 	let busy = 0;
@@ -123,12 +140,34 @@ function startRepl() {
 	repl.prompt();
 }
 
-const oneShot = process.argv.slice(2).join(" ").trim();
+const oneShot = argv
+	.filter((a) => !a.startsWith("--"))
+	.join(" ")
+	.trim();
 if (oneShot) {
 	printBanner();
 	console.log(`\n${c.cyan("你 ›")} ${oneShot}`);
 	const settled = await ask(oneShot);
 	await shutdown(settled.status === "done" ? 0 : 1);
 } else {
+	if (config.web.enabled && !flags.has("--no-web")) {
+		const port = Number(process.env.PI_AGENT_PORT ?? (demo ? config.web.port + 1 : config.web.port));
+		admin = await startAdmin({
+			app,
+			config,
+			configPath,
+			orchestrator,
+			demo,
+			port,
+			context,
+			notify: (line) => {
+				console.log(c.yellow(`\n[${line}]`));
+				rl?.prompt(true);
+			},
+		}).catch((error: Error) => {
+			console.log(c.red(`后台网页没能启动：${error.message}（终端照常可用）`));
+			return undefined;
+		});
+	}
 	startRepl();
 }

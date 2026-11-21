@@ -4,8 +4,7 @@
   "description": "Local multi-agent orchestration (Claude Code / Codex / Gemini CLI) on Pi Durable",
   "scripts": {
     "start": "node --no-warnings src/main.ts",
-    "web": "node --no-warnings src/server.ts",
-    "web:demo": "node --no-warnings src/server.ts --demo",
+    "demo": "node --no-warnings src/main.ts --demo",
     "check": "node --no-warnings scripts/check-agents.ts",
     "typecheck": "tsc -p .",
     "test": "node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/web.ts"

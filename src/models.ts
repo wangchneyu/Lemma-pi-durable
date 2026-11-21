@@ -9,6 +9,8 @@ export interface OrchestratorModel {
 	models: MutableModels;
 	ref: { provider: string; modelId: string };
 	describe: string;
+	/** 后台展示用：协议、地址、密钥来源（只说来源，不含密钥本身） */
+	info?: { type: string; modelId: string; host?: string; keySource: string };
 }
 
 function resolveKey(config: OrchestratorConfig): string | undefined {
@@ -20,11 +22,24 @@ function resolveKey(config: OrchestratorConfig): string | undefined {
 	return undefined;
 }
 
+/** 密钥从哪里来（不返回密钥） */
+function keySource(config: OrchestratorConfig): string {
+	if (config.type === "builtin") return `${config.provider ?? "?"} 的标准环境变量`;
+	for (const name of config.apiKeyEnv ?? []) if (process.env[name]) return `环境变量 ${name}`;
+	if (config.apiKeyFromClaudeSettings && claudeSettingsEnv().token) return "~/.claude/settings.json（与 Claude CLI 共用）";
+	return "未找到密钥";
+}
+
 export function createOrchestratorModel(config: OrchestratorConfig): OrchestratorModel {
 	if (config.type === "builtin") {
 		if (!config.provider) throw new Error("orchestrator.type=builtin 时必须填写 orchestrator.provider（例如 anthropic、openai、google）");
 		const models = builtinModels();
-		return { models, ref: { provider: config.provider, modelId: config.modelId }, describe: `${config.provider}/${config.modelId}` };
+		return {
+			models,
+			ref: { provider: config.provider, modelId: config.modelId },
+			describe: `${config.provider}/${config.modelId}`,
+			info: { type: config.type, modelId: config.modelId, keySource: keySource(config) },
+		};
 	}
 
 	const id = "orchestrator";
@@ -64,5 +79,11 @@ export function createOrchestratorModel(config: OrchestratorConfig): Orchestrato
 	});
 	const models = createModels();
 	models.setProvider(provider);
-	return { models, ref: { provider: id, modelId: config.modelId }, describe: `${config.type} ${new URL(baseUrl).host} / ${config.modelId}` };
+	const host = new URL(baseUrl).host;
+	return {
+		models,
+		ref: { provider: id, modelId: config.modelId },
+		describe: `${config.type} ${host} / ${config.modelId}`,
+		info: { type: config.type, modelId: config.modelId, host, keySource: keySource(config) },
+	};
 }

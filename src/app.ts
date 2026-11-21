@@ -16,7 +16,7 @@ export interface App {
 
 /**
  * Pi Durable 要求一个存储同一时间只有一个进程写入（没有跨进程锁）。
- * 终端模式和网页服务共用同一个存储，这里用 pid 锁文件防止两边同时打开。
+ * 同一个存储只能开一个终端进程，这里用 pid 锁文件防止两边同时打开。
  */
 function acquireLock(storagePath: string): () => void {
 	const lock = `${storagePath}.lock`;
@@ -32,7 +32,7 @@ function acquireLock(storagePath: string): () => void {
 			}
 		}
 		if (alive) {
-			throw new Error(`会话存储 ${storagePath} 正被进程 ${pid} 使用（终端模式或网页服务只能同时开一个）。`);
+			throw new Error(`会话存储 ${storagePath} 正被进程 ${pid} 使用（同一个存储只能开一个 pi-agent 终端）。`);
 		}
 	}
 	writeFileSync(lock, String(process.pid));

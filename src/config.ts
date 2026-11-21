@@ -45,6 +45,8 @@ export interface AppConfig {
 	/** 启动子 CLI 前要去掉的环境变量（正则） */
 	stripEnv: string[];
 	agents: Record<AgentKind, AgentConfig>;
+	/** 终端进程内嵌的后台网页（只监听 127.0.0.1） */
+	web: { enabled: boolean; port: number };
 }
 
 const DEFAULTS: AppConfig = {
@@ -82,6 +84,7 @@ const DEFAULTS: AppConfig = {
 			maxOutputChars: 20000,
 		},
 	},
+	web: { enabled: true, port: 8787 },
 };
 
 export function loadConfig(path = "pi-agent.config.json"): AppConfig {
@@ -97,6 +100,7 @@ export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 		...raw,
 		orchestrator: { ...DEFAULTS.orchestrator, ...(raw.orchestrator ?? {}) },
 		agents,
+		web: { ...DEFAULTS.web, ...(raw.web ?? {}) },
 	};
 	config.workdir = isAbsolute(config.workdir) ? config.workdir : resolve(base, config.workdir);
 	config.storage = isAbsolute(config.storage) ? config.storage : resolve(base, config.storage);

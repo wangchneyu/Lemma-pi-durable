@@ -74,6 +74,67 @@ export function toViewItem(entry: EntryRecord): ViewItem | undefined {
 	}
 }
 
+/** 一次派工（一个 ask_* 工具调用）从发出到结束的汇总 */
+export interface Dispatch {
+	/** 唯一键：发出派工的消息 id + callId（callId 本身不保证跨运行唯一） */
+	key: string;
+	callId: string;
+	agent: string;
+	task: string;
+	/** 调用时传入的 session_id（续接） */
+	resume: string | null;
+	at?: number;
+	/** 发出派工的那条总调度消息 */
+	entryId?: number;
+	/** open：还没有结果（正在执行，或进程中断后还没续上） */
+	status: "open" | "done" | "error" | "aborted" | "interrupted";
+	endAt?: number;
+	resultEntryId?: number;
+	durationMs?: number;
+	cost?: number;
+	sessionId?: string;
+	cwd?: string;
+	exitCode?: number | null;
+	preview?: string;
+}
+
+/** 解析工具结果：去掉末尾的 [agent: … | 耗时: … | 花费: …]，识别 Pi Durable 写入的 <harness> 说明 */
+export function parseToolResult(text: string, isError: boolean, details: any) {
+	let body = text;
+	const meta: Record<string, string> = {};
+	const footer = text.match(/\n*\[(agent: [^\]]+)\]\s*$/);
+	if (footer) {
+		body = text.slice(0, footer.index);
+		for (const part of footer[1]!.split("|")) {
+			const [k, ...v] = part.split(":");
+			meta[k!.trim()] = v.join(":").trim();
+		}
+	}
+	let status: Dispatch["status"] = isError ? "error" : "done";
+	const harness = text.match(/<harness>([\s\S]*?)<\/harness>\s*$/);
+	if (harness) {
+		const note = harness[1]!;
+		if (/aborted/i.test(note)) status = "aborted";
+		else if (/interrupted/i.test(note)) status = "interrupted";
+		body = note
+			.split("\n")
+			.map((l) => l.trim().replace(/^\[(error|info|warning)\]\s*/, ""))
+			.filter(Boolean)
+			.join("\n");
+	}
+	const seconds = meta["耗时"] ? Number.parseFloat(meta["耗时"]) : undefined;
+	const cost = meta["花费"] ? Number.parseFloat(meta["花费"].replace("$", "")) : undefined;
+	return {
+		status,
+		body: body.trim(),
+		sessionId: (details?.sessionId as string | undefined) ?? meta["session_id"],
+		durationMs: (details?.durationMs as number | undefined) ?? (seconds !== undefined ? seconds * 1000 : undefined),
+		cost: Number.isFinite(cost) ? cost : undefined,
+		cwd: details?.cwd as string | undefined,
+		exitCode: details?.exitCode as number | null | undefined,
+	};
+}
+
 export function toViewLive(live: any): ViewLive {
 	const partialBlocks = live?.generation?.message?.content;
 	return {

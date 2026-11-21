@@ -32,6 +32,7 @@ export function demoOrchestrator(): OrchestratorModel {
 	const models = createModels();
 	models.setProvider(faux.provider);
 	let round = 0;
+	const run = Date.now().toString(36); // 让每次启动的工具调用 ID 都不重复
 	const step = (ctx: { messages: readonly any[] }) => {
 		const last = ctx.messages.at(-1);
 		if (last?.role === "toolResult") {
@@ -51,13 +52,18 @@ export function demoOrchestrator(): OrchestratorModel {
 		return fauxAssistantMessage(
 			[
 				fauxText("我把这个任务拆成两部分，并行交给 Claude 和 Codex。"),
-				fauxToolCall("ask_claude", { task: `阅读代码并设计方案：${task}` }, { id: `demo-c-${round}` }),
-				fauxToolCall("ask_codex", { task: `实现并跑测试：${task}` }, { id: `demo-x-${round}` }),
+				fauxToolCall("ask_claude", { task: `阅读代码并设计方案：${task}` }, { id: `demo-c-${run}-${round}` }),
+				fauxToolCall("ask_codex", { task: `实现并跑测试：${task}` }, { id: `demo-x-${run}-${round}` }),
 			],
 			{ stopReason: "toolUse" },
 		);
 	};
 	// faux 的每个响应只用一次，排足够多的同一个剧本
 	faux.setResponses(Array.from({ length: 500 }, () => step));
-	return { models, ref: { provider: "demo", modelId: "scripted-orchestrator" }, describe: "演示模式（脚本化假模型，不花钱）" };
+	return {
+		models,
+		ref: { provider: "demo", modelId: "scripted-orchestrator" },
+		describe: "演示模式（脚本化假模型，不花钱）",
+		info: { type: "demo", modelId: "scripted-orchestrator", keySource: "不需要密钥" },
+	};
 }

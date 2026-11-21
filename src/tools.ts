@@ -153,7 +153,14 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig) 
 			return {
 				output: [{ type: "text", text: `${text}\n\n[${meta.join(" | ")}]` }],
 				isError: parsed.isError,
-				details: { agent: kind, cwd, sessionId: sessionId ?? null, exitCode: result.exitCode, durationMs: result.durationMs },
+				details: {
+					agent: kind,
+					cwd,
+					sessionId: sessionId ?? null,
+					exitCode: result.exitCode,
+					durationMs: result.durationMs,
+					costUsd: parsed.costUsd ?? null,
+				},
 			};
 		},
 	});
