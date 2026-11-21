@@ -11,6 +11,7 @@ import { ADAPTERS } from "./agents.ts";
 import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
 import type { OrchestratorModel } from "./models.ts";
+import { Board, boardTasks, type BoardState } from "./board.ts";
 import { diffText } from "./git.ts";
 import { AgentSessions, RunBudget } from "./tools.ts";
 import { parseToolResult, toViewItem, toViewLive, type Dispatch, type ViewItem, type ViewLive } from "./view.ts";
@@ -50,7 +51,7 @@ const MIME: Record<string, string> = {
 
 export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	const { app, config, orchestrator, demo, context } = options;
-	const { harness, root, agents, changes } = app;
+	const { harness, root, agents, changes, project } = app;
 	const startedAt = Date.now();
 
 	// ---------- 派工汇总：启动时扫一遍全部历史，之后随新条目增量更新 ----------
@@ -63,6 +64,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		if (!item) return;
 		if (item.type === "assistant") {
 			for (const call of item.toolCalls) {
+				if (!call.name.startsWith("ask_")) continue; // 只有派给成员的才算派工（分工表工具不算）
 				const key = `${item.id}:${call.id}`;
 				if (dispatches.has(key)) continue;
 				latestByCall.set(call.id, key);
@@ -80,6 +82,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				});
 			}
 		} else if (item.type === "tool") {
+			if (!item.name.startsWith("ask_")) return;
 			const known = latestByCall.get(item.callId);
 			let d = known ? dispatches.get(known) : undefined;
 			if (!d) {
@@ -185,21 +188,37 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	// 改动记录变了（派工收尾、终端里 /apply /drop）：通知页面刷新
 	const onChange = (record: unknown) => broadcast("change", record);
 	changes.on("change", onChange);
+	// 目标或分工表变了：通知页面刷新「项目」
+	const onProject = () => broadcast("project", null);
+	project.on("change", onProject);
 	const ping = setInterval(() => {
 		for (const res of clients) res.write(": ping\n\n");
 	}, 20_000);
 	ping.unref();
 
 	// ---------- 数据 ----------
+	/** 往前取 limit 条能显示的条目（系统提示更新等不显示的条目不占名额） */
 	async function history(limit: number, before?: number) {
 		const query = before ? { maxEntryId: (before - 1) as any } : {};
-		const page = await root.entries(query, limit, undefined, context);
-		const items = page.items
-			.slice()
-			.sort((a, b) => Number(a.id) - Number(b.id))
-			.map(toViewItem)
-			.filter((x): x is ViewItem => x !== undefined);
-		return { items, hasMore: page.next !== undefined };
+		const items: ViewItem[] = [];
+		let cursor: any;
+		let hasMore = false;
+		do {
+			const page = await root.entries(query, limit, cursor, context);
+			for (const entry of page.items) {
+				const item = toViewItem(entry);
+				if (!item) continue;
+				if (items.length === limit) {
+					hasMore = true;
+					break;
+				}
+				items.push(item);
+			}
+			cursor = page.next;
+			if (!hasMore && items.length === limit && cursor) hasMore = true;
+		} while (cursor && items.length < limit);
+		items.sort((a, b) => a.id - b.id);
+		return { items, hasMore };
 	}
 
 	async function state() {
@@ -229,6 +248,13 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			isolation: config.isolation,
 			budget: { ...config.budget, ...((await harness.snapshot(RunBudget, context)) as any) },
 			modelStats: modelStats(),
+			project: {
+				goal: project.goal() ?? null,
+				goalPath: project.goalPath,
+				assignPath: project.assignPath,
+				tasks: boardTasks((await harness.snapshot(Board, context)) as BoardState | undefined),
+				roles: config.roles,
+			},
 			changeCounts: changes.list().reduce<Record<string, number>>((m, ch) => ((m[ch.status] = (m[ch.status] ?? 0) + 1), m), {}),
 			agents: agents.map((a) => {
 				const c = config.agents[a.kind];
@@ -402,6 +428,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		async close() {
 			clearInterval(ping);
 			changes.off("change", onChange);
+			project.off("change", onProject);
 			for (const res of clients) res.end();
 			clients.clear();
 			const closed = new Promise<void>((resolve) => server.close(() => resolve()));

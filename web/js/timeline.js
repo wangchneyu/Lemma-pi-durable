@@ -2,6 +2,22 @@
 import { Ticket } from "./ticket.js";
 import { clock, el, esc, markdown } from "./util.js";
 
+const STATUS_TEXT = { todo: "待办", doing: "进行中", review: "待验收", done: "完成", blocked: "受阻", dropped: "取消" };
+
+/** 分工表操作的一行摘要 */
+function boardOpText(call) {
+	const a = call.args ?? {};
+	if (call.name === "plan_tasks") {
+		const tasks = Array.isArray(a.tasks) ? a.tasks : [];
+		return `<span class="op-icon">📋</span><b>拆解任务</b><span>${tasks.length} 项：${esc(tasks.map((t) => t.title).join("；").slice(0, 140))}</span>`;
+	}
+	if (call.name === "update_task") {
+		return `<span class="op-icon">✔</span><b>${esc(a.id ?? "")}${a.status ? ` → ${esc(STATUS_TEXT[a.status] ?? a.status)}` : ""}</b><span>${esc(String(a.note ?? "").slice(0, 120))}</span>`;
+	}
+	if (call.name === "set_goal") return `<span class="op-icon">🎯</span><b>起草项目目标</b><span>GOAL.md，待你确认</span>`;
+	return `<span class="op-icon">⚙</span><b>${esc(call.name)}</b>`;
+}
+
 function whoLine(label, at) {
 	return `<div class="who"><span>${label}</span>${at ? `<time>${clock(at)}</time>` : ""}</div>`;
 }
@@ -10,6 +26,7 @@ export class Timeline {
 	constructor() {
 		this.node = el("div", "timeline");
 		this.tickets = new Map();
+		this.ops = new Map();
 		this.ids = new Set();
 		this.ghost = null;
 	}
@@ -38,9 +55,21 @@ export class Timeline {
 			const node = el("div", "item orch", whoLine("总调度", item.at));
 			if (item.text.trim()) node.append(el("div", "md", markdown(item.text)));
 			if (item.error) node.append(el("div", "error", esc(item.error)));
-			if (item.toolCalls.length) {
-				const wrap = el("div", `tickets${item.toolCalls.length > 1 ? " multi" : ""}`);
-				for (const call of item.toolCalls) {
+			// 分工表操作（plan_tasks / update_task / set_goal）：一行摘要；派给成员的：派工单
+			const ops = item.toolCalls.filter((c) => !c.name.startsWith("ask_"));
+			const calls = item.toolCalls.filter((c) => c.name.startsWith("ask_"));
+			if (ops.length) {
+				const list = el("div", "board-ops");
+				for (const call of ops) {
+					const op = el("div", "board-op", boardOpText(call));
+					this.ops.set(call.id, op);
+					list.append(op);
+				}
+				node.append(list);
+			}
+			if (calls.length) {
+				const wrap = el("div", `tickets${calls.length > 1 ? " multi" : ""}`);
+				for (const call of calls) {
 					const t = new Ticket(call);
 					this.tickets.set(call.id, t);
 					wrap.append(t.node);
@@ -50,6 +79,13 @@ export class Timeline {
 			return node;
 		}
 		if (item.type === "tool") {
+			const op = this.ops.get(item.callId);
+			if (op) {
+				op.dataset.s = item.isError ? "error" : "done";
+				op.title = item.text;
+				return null;
+			}
+			if (!item.name.startsWith("ask_")) return null;
 			const ticket = this.tickets.get(item.callId);
 			if (ticket) {
 				ticket.settle(item);

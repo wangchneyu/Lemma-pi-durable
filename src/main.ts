@@ -8,6 +8,7 @@ import { createInterface, type Interface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { startAdmin, type AdminServer } from "./admin.ts";
+import { Board, boardTasks, STATUS_LABEL, type BoardState } from "./board.ts";
 import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-ops.ts";
 import { openApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
@@ -196,6 +197,29 @@ async function command(line: string): Promise<boolean> {
 		void ask(arg, "followUp").catch((error) => console.log(c.red(`出错：${error instanceof Error ? error.message : String(error)}`)));
 		return true;
 	}
+	if (head === "/goal") {
+		const goal = app.project.goal();
+		if (!goal) console.log(c.dim(`还没有项目目标。可以自己写 ${app.project.goalPath}，或者把项目目标告诉总调度，让它起草（会标明待你确认）。`));
+		else console.log(`${c.dim(app.project.goalPath)}\n${goal}`);
+		return true;
+	}
+	if (head === "/tasks") {
+		const board = (await harness.snapshot(Board, context)) as BoardState | undefined;
+		const tasks = boardTasks(board);
+		if (!tasks.length) {
+			console.log(c.dim("还没有分工表。项目级、多步骤的任务，总调度会先拆成任务（plan_tasks）。"));
+			return true;
+		}
+		const color: Record<string, (s: string) => string> = { done: c.green, doing: c.cyan, review: c.yellow, blocked: c.red, dropped: c.dim, todo: (s) => s };
+		for (const t of tasks) {
+			const tint = color[t.status] ?? ((s: string) => s);
+			console.log(
+				`  ${tint(`${t.id} ${STATUS_LABEL[t.status]}`.padEnd(8))} ${t.title}${c.dim(`${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.map((x) => `#${x}`).join(",")}` : ""}`)}`,
+			);
+		}
+		console.log(c.dim(`  完整分工表：${app.project.assignPath}${admin ? `　后台：${admin.url}/#/project` : ""}`));
+		return true;
+	}
 	if (head === "/continue") {
 		await continueRun();
 		return true;
@@ -239,6 +263,7 @@ function startRepl() {
 	printBanner();
 	console.log(c.dim("\n输入任务开始协作。命令：/agents /web /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。"));
 	console.log(c.dim("运行中：直接输入 = 插话（当前这一轮就能看到），/queue <任务> 排到下一轮；/continue 续跑中断的一轮，/compact 压缩上下文"));
+	console.log(c.dim("项目：/goal 最终目标、/tasks 分工表"));
 	console.log(c.dim("改动：/changes 待合并的改动、/diff <编号>、/apply <编号>、/drop <编号>、/clean\n"));
 	if (pendingChanges(app.changes).length) {
 		console.log(c.yellow(`有 ${pendingChanges(app.changes).length} 个改动等你确认合并：`));

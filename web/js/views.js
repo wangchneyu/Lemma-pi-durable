@@ -1,7 +1,7 @@
 // 后台各页面。每个页面：mount(root, params) 渲染，update(kind, payload) 响应数据变化，unmount() 清理。
 import { openDispatch } from "./drawer.js";
 import { METRICS, RANGES, Sankey } from "./sankey.js";
-import { buildRuns, callInfo, dispatchRows, loadEarlier, pendingChanges, store } from "./store.js";
+import { buildRuns, callInfo, dispatchRows, isDispatch, loadEarlier, pendingChanges, store } from "./store.js";
 import { Ticket, slotStart } from "./ticket.js";
 import { Timeline } from "./timeline.js";
 import {
@@ -15,6 +15,7 @@ import {
 	el,
 	esc,
 	kindOf,
+	markdown,
 	money,
 	num,
 	short,
@@ -286,7 +287,7 @@ function overview() {
 				</div>`;
 		},
 		running(box, note) {
-			const active = store.live.tools.filter((t) => t.status !== "done");
+			const active = store.live.tools.filter((t) => t.status !== "done" && isDispatch(t.name));
 			note.textContent = active.length ? `${active.length} 项` : "";
 			// 还没放进对话的插话 / 排队（来自终端）
 			const inbox = store.live.inbox ?? [];
@@ -391,6 +392,98 @@ function runRow(run) {
 		<span class="run-input">${esc(text)}</span>
 		<span class="run-foot">${run.agents.map(agentTag).join("")}<span class="run-meta">${run.dispatchCount ? `派工 ${run.dispatchCount}` : "直接回答"}${run.endAt && run.at ? ` · ${duration(run.endAt - run.at)}` : ""}</span></span>
 	</a>`;
+}
+
+// =====================================================================
+// 项目：共同目标 + 分工表 + 角色
+// =====================================================================
+const COLUMNS = [
+	{ s: "todo", label: "待办" },
+	{ s: "doing", label: "进行中" },
+	{ s: "review", label: "待验收" },
+	{ s: "blocked", label: "受阻" },
+	{ s: "done", label: "完成" },
+];
+
+function taskCard(t, all) {
+	const deps = t.deps.map((d) => all.find((x) => x.id === d)).filter(Boolean);
+	return `<article class="task-card" data-s="${t.status}">
+		<header><span class="mono task-id">${esc(t.id)}</span>${t.role ? `<span class="role-chip">${esc(t.role)}</span>` : ""}${t.owner ? agentTag(t.owner) : ""}</header>
+		<h3>${esc(t.title)}</h3>
+		${t.acceptance ? `<p class="task-accept" title="${esc(t.acceptance)}"><span>验收</span>${esc(short(t.acceptance, 90))}</p>` : ""}
+		${
+			deps.length || t.changes.length
+				? `<footer>${deps.map((d) => `<span class="dep" data-s="${d.status}" title="${esc(d.title)}">← ${esc(d.id)}</span>`).join("")}${t.changes.map((c) => changeLink(c)).join("")}</footer>`
+				: ""
+		}
+		${t.notes.length ? `<p class="task-note" title="${esc(t.notes.join("\n"))}">${esc(short(t.notes.at(-1).replace(/^\S+ \S+ /, ""), 70))}</p>` : ""}
+	</article>`;
+}
+
+function project() {
+	let root;
+	return {
+		title: "项目",
+		sub: "共同目标（GOAL.md）、分工表（ASSIGN.md，由总调度维护）和角色分工",
+		mount(r) {
+			root = r;
+			this.update("all");
+		},
+		update(kind) {
+			if (kind === "tick" || kind === "live" || kind === "items") return;
+			const p = store.state?.project;
+			if (!p) {
+				root.innerHTML = empty("加载中…");
+				return;
+			}
+			const tasks = p.tasks.filter((t) => t.status !== "dropped");
+			const count = (s) => tasks.filter((t) => t.status === s).length;
+			const done = count("done");
+			const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
+			const available = new Set((store.state.agents ?? []).filter((a) => a.available).map((a) => a.kind));
+			root.innerHTML = `
+				<section class="card goal-card">
+					<header class="card-head"><div class="card-heading"><h2 class="card-title">最终目标</h2><div class="card-sub"><span class="mono">${esc(p.goalPath)}</span></div></div>
+						${p.goal && /待你确认/.test(p.goal) ? `<span class="pill" data-s="pending">总调度起草 · 待你确认</span>` : ""}</header>
+					<div class="card-body">${
+						p.goal
+							? `<div class="md goal-md">${markdown(p.goal.replace(/^<!--[\s\S]*?-->\s*/, ""))}</div>`
+							: `<div class="empty-inline"><span class="dot"></span>还没有 GOAL.md。可以自己写，或者把项目目标告诉总调度，让它起草（会标明待你确认）。成员每次派工都会拿到这份目标。</div>`
+					}</div>
+				</section>
+				<section class="card">
+					<header class="card-head"><div class="card-heading"><h2 class="card-title">分工表</h2>
+						<div class="card-sub">${tasks.length ? `<span><b>${done}</b>/${tasks.length} 完成</span><span><b>${count("doing")}</b> 进行中</span><span><b>${count("review")}</b> 待验收</span>${count("blocked") ? `<span class="err-t"><b>${count("blocked")}</b> 受阻</span>` : ""}` : "<span>还没有任务</span>"}</div></div>
+						<span class="card-note mono">${esc(p.assignPath)}</span></header>
+					<div class="card-body">
+						${tasks.length ? `<div class="board-progress"><i style="width:${pct}%"></i></div>` : ""}
+						${
+							tasks.length
+								? `<div class="kanban">${COLUMNS.map((col) => {
+										const list = tasks.filter((t) => t.status === col.s);
+										return `<div class="kanban-col" data-s="${col.s}"><div class="kanban-head"><span>${col.label}</span><em>${list.length}</em></div>${list.map((t) => taskCard(t, p.tasks)).join("") || `<div class="kanban-empty">—</div>`}</div>`;
+									}).join("")}</div>`
+								: `<div class="empty-inline"><span class="dot"></span>项目级、多步骤的任务，总调度会先拆成任务写进分工表（每项有角色、负责人、依赖和验收标准），再按依赖顺序派工。</div>`
+						}
+					</div>
+				</section>
+				<section class="card">
+					<header class="card-head"><div class="card-heading"><h2 class="card-title">角色分工</h2><div class="card-sub">规划任务时给每项定角色，派工时按角色找成员；首选不可用时依次用后面的（在 pi-agent.config.json 的 roles 里改）</div></div></header>
+					<div class="table-wrap"><table class="table"><thead><tr><th>角色</th><th>成员（首选 → 备选）</th><th class="hide-sm">模型</th><th>负责</th><th class="num">任务</th></tr></thead>
+					<tbody>${(p.roles ?? [])
+						.map((r) => {
+							const chain = [r.agent, ...(r.fallback ?? [])];
+							const pick = chain.find((k) => available.has(k));
+							return `<tr><td><span class="role-chip">${esc(r.name)}</span></td>
+								<td>${chain.map((k) => `<span class="${k === pick ? "" : "dim-agent"}">${agentTag(k)}</span>`).join('<span class="muted"> → </span>')}</td>
+								<td class="hide-sm">${r.model ? `<span class="model-chip">${esc(r.model)}</span>` : `<span class="muted">成员默认</span>`}</td>
+								<td class="muted">${esc(r.note ?? "")}</td>
+								<td class="num mono">${tasks.filter((t) => t.role === r.name).length}</td></tr>`;
+						})
+						.join("")}</tbody></table></div>
+				</section>`;
+		},
+	};
 }
 
 // =====================================================================
@@ -1047,4 +1140,4 @@ function config() {
 	};
 }
 
-export const VIEWS = { overview, runs, dispatches, changes, agents, sessions, usage, config };
+export const VIEWS = { overview, project, runs, dispatches, changes, agents, sessions, usage, config };

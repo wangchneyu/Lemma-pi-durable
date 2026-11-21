@@ -5,8 +5,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { defineDoc, defineExtension, defineTool, LiveDoc, section, type Extension } from "@earendil-works/pi-durable";
-import { obj, opt, str } from "@earendil-works/pi-schema";
+import { arr, bool, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { ADAPTERS, type TokenUsage } from "./agents.ts";
+import { Board, boardSummary, STATUS_LABEL, taskBrief, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeRecord, ChangeStore } from "./changes.ts";
 import { cleanEnv, runCli } from "./cli-runner.ts";
 import { resolveCommand, type AgentKind, type AppConfig, type ModelOption } from "./config.ts";
@@ -73,7 +74,30 @@ function text(message: string) {
 	return { output: [{ type: "text" as const, text: message }], isError: true };
 }
 
-function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, changes: ChangeStore) {
+/** 在一个事务里改分工表，提交后写出 ASSIGN.md；返回改完后的分工表快照 */
+async function commitBoard<R>(
+	project: ProjectFiles,
+	api: { commit: (change: (tx: any) => any, context: any) => Promise<any>; now(): number; output(chunk: string): void },
+	context: any,
+	mutate: (board: BoardState) => R,
+): Promise<{ result: R; board: BoardState }> {
+	const out = await api.commit(async (tx: any) => {
+		const board = (await tx.doc(Board)) as BoardState;
+		const result = mutate(board);
+		board.updatedAt = api.now();
+		return { result, board: JSON.parse(JSON.stringify(board)) as BoardState };
+	}, context);
+	const { savedManualEdit } = project.writeAssign(out.board);
+	if (savedManualEdit) api.output(`ℹ ASSIGN.md 被手动改过，已另存为 ${savedManualEdit}，再按分工表重新写出\n`);
+	return out;
+}
+
+/** 只保留有值的字段（持久化文档只接受严格 JSON，不能有 undefined） */
+function defined<T extends Record<string, unknown>>(o: T): T {
+	return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
+}
+
+function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, changes: ChangeStore, project: ProjectFiles) {
 	const adapter = ADAPTERS[kind];
 	const agent = config.agents[kind];
 	const models = agent.models;
@@ -97,11 +121,12 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			cwd: opt(str({ description: "工作目录，默认是项目的 workdir" })),
 			...(models.length ? { model: opt(str({ description: `用哪个模型：${models.map((m) => m.id).join(" / ")}` })) } : {}),
 			based_on: opt(str({ description: "在某次改动（改动编号）的基础上开工，比如审查或接着修改另一个成员刚做的改动" })),
+			task_id: opt(str({ description: "这次派工对应分工表里的哪项任务（如 T3）；会把目标和任务上下文一起交给成员，并更新任务状态" })),
 			...(adapter.canResume ? { session_id: opt(str({ description: "续接之前的会话（之前返回的 session_id）" })) } : {}),
 		}),
 		// 崩溃重启后允许重新执行：靠记下来的会话 ID 和 worktree 续接，而不是从头再跑
 		replay: "safe",
-		execute: async (args: { task: string; cwd?: string; model?: string; based_on?: string; session_id?: string }, api, context) => {
+		execute: async (args: { task: string; cwd?: string; model?: string; based_on?: string; session_id?: string; task_id?: string }, api, context) => {
 			// ---- 模型：只能从清单里选 ----
 			const model = args.model ?? agent.defaultModel;
 			if (args.model && models.length && !models.some((m) => m.id === args.model)) {
@@ -207,20 +232,48 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			}
 			if (change && change.status !== "running") changes.upsert({ ...change, status: "running" });
 
+			// ---- 分工表：标记任务进行中；把共同目标 + 这项任务 + 分工全貌交给成员 ----
+			const goal = project.goal();
+			let brief = "";
+			if (args.task_id || goal) {
+				const { board } = await commitBoard(project, api, context, (b) => {
+					const t = args.task_id ? b.tasks[args.task_id] : undefined;
+					if (!t) return;
+					if (t.status !== "done") t.status = "doing";
+					t.owner = kind;
+					if (!t.dispatches.includes(api.callId)) t.dispatches.push(api.callId);
+					t.updatedAt = api.now();
+				});
+				if (args.task_id && !board.tasks[args.task_id]) return text(`分工表里没有任务 ${args.task_id}。先用 plan_tasks 建任务，或者不传 task_id。`);
+				brief = taskBrief(goal, board, args.task_id);
+			}
+
 			// ---- 这次调用之前是否已经启动过（即：这是崩溃后的重放） ----
 			const startedBefore = await api.memo<boolean>("started", context);
 			const presetSession = adapter.presetSession ? await api.memo<string>("session", args.session_id ?? randomUUID(), context) : undefined;
 			const seenSession = await api.memo<string>("seen-session", context);
 
 			let resumeId: string | undefined = args.session_id;
-			let prompt = args.task;
+			let prompt = `${brief}${args.task}`;
 			if (startedBefore && adapter.canResume) {
 				const crashed = seenSession ?? presetSession;
 				if (crashed) {
 					resumeId = crashed;
-					prompt = `${RESUME_AFTER_CRASH}\n\n原始任务：\n${args.task}`;
+					prompt = `${RESUME_AFTER_CRASH}\n\n原始任务：\n${brief}${args.task}`;
 				}
 			}
+			/** 派工结束后更新任务：关联改动，按结果改状态（成功 → 待验收，由总调度核对后标完成） */
+			const settleTask = async (status: TaskStatus, changeId: string | undefined, note: string) => {
+				if (!args.task_id) return;
+				await commitBoard(project, api, context, (b) => {
+					const t = b.tasks[args.task_id!];
+					if (!t) return;
+					if (t.status !== "done") t.status = status;
+					if (changeId && !t.changes.includes(changeId)) t.changes.push(changeId);
+					t.notes.push(`${new Date(api.now()).toLocaleString("zh-CN", { hour12: false })} ${kind}：${note}`);
+					t.updatedAt = api.now();
+				});
+			};
 			await api.memo("started", true, context);
 
 			const argv = [
@@ -277,11 +330,13 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			};
 
 			if (result.aborted) {
-				await finishChange();
+				const c = await finishChange();
+				await settleTask("todo", c?.files.length ? c.id : undefined, "被中止");
 				return text(`${adapter.label} 已被中止。`);
 			}
 			if (result.timedOut) {
-				await finishChange();
+				const c = await finishChange();
+				await settleTask("blocked", c?.files.length ? c.id : undefined, `超时（${agent.timeoutMinutes} 分钟）`);
 				return text(`${adapter.label} 超时（${agent.timeoutMinutes} 分钟）被终止。`);
 			}
 
@@ -297,6 +352,11 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			const sessionId = parsed.sessionId ?? seenSession ?? presetSession;
 			const finished = await finishChange();
 			if (finished && sessionId) changes.upsert({ ...finished, sessionId });
+			await settleTask(
+				parsed.isError ? "blocked" : "review",
+				finished?.files.length ? finished.id : undefined,
+				parsed.isError ? `失败：${parsed.text.trim().split("\n")[0]!.slice(0, 80)}` : `完成${finished?.files.length ? `，改动 #${finished.id}` : ""}，待验收`,
+			);
 			if (sessionId && adapter.canResume) {
 				await api.commit(async (tx) => {
 					// 持久化文档只接受严格 JSON：没有改动编号时不写这个字段
@@ -312,6 +372,11 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 					? `\n\n[改动 #${finished.id}：${finished.files.length} 个文件 +${finished.add} −${finished.del}，在分支 ${finished.branch}，还没有合并到主目录，等用户在终端确认（/apply ${finished.id}）]`
 					: `\n\n[改动 #${finished.id}：没有修改文件]`
 				: "";
+			const taskLine = args.task_id
+				? parsed.isError
+					? `\n\n[任务 ${args.task_id} 标为受阻；可以换成员 / 换模型重派，或用 update_task 调整]`
+					: `\n\n[任务 ${args.task_id} 标为待验收：请对照验收标准核对，用 update_task 标完成（done）或打回（todo 并写明原因）]`
+				: "";
 			const meta = [
 				`agent: ${kind}`,
 				usedModel ? `模型: ${usedModel}` : undefined,
@@ -321,7 +386,7 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			].filter(Boolean);
 
 			return {
-				output: [{ type: "text", text: `${body}${changeLine}\n\n[${meta.join(" | ")}]` }],
+				output: [{ type: "text", text: `${body}${changeLine}${taskLine}\n\n[${meta.join(" | ")}]` }],
 				isError: parsed.isError,
 				details: {
 					agent: kind,
@@ -340,9 +405,130 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 	});
 }
 
-export function createLocalAgentsExtension(config: AppConfig, changes: ChangeStore): { extension: Extension; agents: AgentAvailability[] } {
+const TASK_STATUSES = ["todo", "doing", "review", "done", "blocked", "dropped"] as const;
+
+/** 总调度维护分工表的工具：拆任务、改状态、起草目标 */
+function createBoardTools(config: AppConfig, project: ProjectFiles) {
+	const roleNames = config.roles.map((r) => r.name);
+	const planTasks = defineTool({
+		name: "plan_tasks",
+		description:
+			"把项目拆成任务，写进分工表（.pi-agent/ASSIGN.md 会自动更新）。每项写清楚标题、验收标准、角色和依赖。" +
+			"deps 写已有任务编号（如 T2），或写 +序号 指本次新增的第几项（+1 是第一项）。" +
+			(roleNames.length ? `角色可选：${roleNames.join("、")}。` : ""),
+		parameters: obj({
+			tasks: arr(
+				obj({
+					title: str({ description: "任务标题，一句话" }),
+					acceptance: opt(str({ description: "验收标准：做到什么程度算完成，尽量可检验（比如测试通过、接口可调用）" })),
+					role: opt(str({ description: "角色" })),
+					owner: opt(str({ description: "指定成员：claude / codex / gemini；不填按角色" })),
+					deps: opt(arr(str(), { description: "依赖的任务" })),
+					detail: opt(str({ description: "补充说明" })),
+				}),
+			),
+		}),
+		replay: "safe",
+		execute: async (args: { tasks: { title: string; acceptance?: string; role?: string; owner?: string; deps?: string[]; detail?: string }[] }, api, context) => {
+			const { result } = await commitBoard(project, api, context, (b) => {
+				// 同一次调用重放时不重复建任务
+				const done = (b as any).calls?.[api.callId] as string[] | undefined;
+				if (done) return done;
+				const ids: string[] = [];
+				for (const t of args.tasks) {
+					const id = `T${b.nextId++}`;
+					ids.push(id);
+					const deps = (t.deps ?? []).map((d) => (/^\+\d+$/.test(d) ? ids[Number(d.slice(1)) - 1] ?? "" : d)).filter((d) => d && d !== id);
+					b.tasks[id] = defined({
+						id,
+						title: t.title,
+						detail: t.detail,
+						role: t.role,
+						owner: t.owner,
+						status: "todo" as TaskStatus,
+						deps,
+						acceptance: t.acceptance,
+						notes: [],
+						dispatches: [],
+						changes: [],
+						createdAt: api.now(),
+						updatedAt: api.now(),
+					}) as BoardTask;
+					b.order.push(id);
+				}
+				((b as any).calls ??= {})[api.callId] = ids;
+				return ids;
+			});
+			const board = await api.commit(async (tx) => JSON.parse(JSON.stringify(await tx.doc(Board))) as BoardState, context);
+			const unknownRoles = args.tasks.map((t) => t.role).filter((r) => r && roleNames.length && !roleNames.includes(r));
+			return {
+				output: [
+					{
+						type: "text",
+						text:
+							`已写入分工表：${result.map((id) => `${id} ${board.tasks[id]?.title ?? ""}`).join("；")}。\n` +
+							(unknownRoles.length ? `注意：角色 ${[...new Set(unknownRoles)].join("、")} 不在配置里。\n` : "") +
+							`当前分工：\n${boardSummary(board)}\n派工时传 task_id。`,
+					},
+				],
+			};
+		},
+	});
+
+	const updateTask = defineTool({
+		name: "update_task",
+		description: "更新分工表里的一项任务：标完成（done）、打回（todo，写明原因）、受阻（blocked）、取消（dropped），改负责人或补充记录。",
+		parameters: obj({
+			id: str({ description: "任务编号，如 T3" }),
+			status: opt(oneOf([...TASK_STATUSES])),
+			owner: opt(str()),
+			role: opt(str()),
+			title: opt(str()),
+			acceptance: opt(str()),
+			note: opt(str({ description: "记录：验收结论、打回原因、决定等" })),
+		}),
+		replay: "safe",
+		execute: async (args: { id: string; status?: TaskStatus; owner?: string; role?: string; title?: string; acceptance?: string; note?: string }, api, context) => {
+			const { result, board } = await commitBoard(project, api, context, (b) => {
+				const t = b.tasks[args.id];
+				if (!t) return false;
+				Object.assign(t, defined({ status: args.status, owner: args.owner, role: args.role, title: args.title, acceptance: args.acceptance }));
+				const note = args.note ? `${new Date(api.now()).toLocaleString("zh-CN", { hour12: false })} 总调度：${args.status ? `[${STATUS_LABEL[args.status]}] ` : ""}${args.note}` : undefined;
+				if (note && t.notes.at(-1) !== note) t.notes.push(note);
+				t.updatedAt = api.now();
+				return true;
+			});
+			if (!result) return { output: [{ type: "text", text: `分工表里没有任务 ${args.id}。` }], isError: true };
+			return { output: [{ type: "text", text: `已更新 ${args.id}。当前分工：\n${boardSummary(board)}` }] };
+		},
+	});
+
+	const setGoal = defineTool({
+		name: "set_goal",
+		description:
+			"起草项目的最终目标（.pi-agent/GOAL.md）：要做成什么、验收标准、约束和不做什么。只在还没有 GOAL.md、用户给出项目级目标时使用；" +
+			"GOAL.md 以用户写的为准，已经存在时不要改，除非用户明确要求（overwrite: true）。",
+		parameters: obj({
+			content: str({ description: "GOAL.md 的 Markdown 内容" }),
+			overwrite: opt(bool()),
+		}),
+		replay: "safe",
+		execute: async (args: { content: string; overwrite?: boolean }) => {
+			const r = project.writeGoal(args.content, args.overwrite === true);
+			return { output: [{ type: "text", text: r.ok ? `${r.message}。告诉用户：目标是你起草的，请他确认或修改。` : r.message }], isError: !r.ok };
+		},
+	});
+	return [planTasks, updateTask, setGoal];
+}
+
+export function createLocalAgentsExtension(
+	config: AppConfig,
+	changes: ChangeStore,
+	project: ProjectFiles,
+): { extension: Extension; agents: AgentAvailability[] } {
 	const agents = detectAgents(config);
-	const tools = agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, config, changes));
+	const tools = [...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, config, changes, project)), ...createBoardTools(config, project)];
+	const available = new Set(agents.filter((a) => a.available).map((a) => a.kind));
 	const roster = agents
 		.map((a) => {
 			if (!a.available) return `- ${a.kind}: 不可用（${a.reason}）`;
@@ -351,6 +537,13 @@ export function createLocalAgentsExtension(config: AppConfig, changes: ChangeSto
 				? `\n  模型：${c.models.map((m) => `${m.id}［${TIER_LABEL[m.tier]}］${m.note ? ` ${m.note}` : ""}`).join("；")}；默认 ${c.defaultModel ?? "CLI 默认"}`
 				: "";
 			return `- ${a.kind}: 可用，工具 ask_${a.kind}。${c.description}${models}`;
+		})
+		.join("\n");
+	const roles = config.roles
+		.map((r) => {
+			const chain = [r.agent, ...(r.fallback ?? [])];
+			const pick = chain.find((k) => available.has(k));
+			return `- ${r.name}：${chain.join(" → ")}${r.model ? `（${r.agent} 用 ${r.model}）` : ""}${r.note ? `，${r.note}` : ""}${pick && pick !== r.agent ? `　※${r.agent} 不可用，现在由 ${pick} 顶上` : ""}${pick ? "" : "　※都不可用"}`;
 		})
 		.join("\n");
 	const limit = config.budget.perRunUsd;
@@ -363,18 +556,20 @@ export function createLocalAgentsExtension(config: AppConfig, changes: ChangeSto
 				"team",
 				() =>
 					[
-						"你是本机多 agent 协作的总调度。你自己不直接改代码，而是把工作拆成清晰的子任务，交给下面这些本机 AI 去做，然后核对、汇总它们的结果。",
+						"你是本机多 agent 协作的总调度，相当于团队的项目负责人。你自己不直接改代码，而是把工作拆成清晰的任务，按角色分给下面这些本机 AI，再核对、汇总它们的结果。",
 						"",
 						"团队成员：",
 						roster,
 						"",
+						...(roles ? ["角色分工（规划任务时给每项定角色，派工时按角色找成员；首选不可用时用后面的）：", roles, ""] : []),
 						"工作方式：",
-						"1. 先理解用户目标，必要时拆分任务；简单问题可以直接回答，不必派活。",
-						"2. 按各自擅长的方向分配；互不依赖的子任务可以在同一轮里并行调用多个工具。",
-						"3. 选模型：按任务难度传 model。简单、机械的活用［经济］，日常开发用［标准］，复杂设计、跨模块改动、疑难问题才用［强力］。不确定就不传，用默认。",
-						"4. 重要的产出可以让另一个 agent 交叉审查（例如 Codex 写、Claude 审）。",
-						"5. 需要在之前的上下文里继续时，传入上次返回的 session_id。",
-						"6. 最后用中文向用户汇报：谁做了什么、用了什么模型、结果、改动编号、还有什么没完成或有风险。",
+						"1. 先理解用户目标。简单问题直接回答，不必派活，也不必建分工表。",
+						"2. 项目级、多步骤的任务：先用 plan_tasks 拆解，每项写清楚验收标准、角色、依赖；然后按依赖顺序派工，互不依赖的任务在同一轮里并行派。",
+						"3. 派工时传 task_id：成员会同时拿到项目目标、这项任务和分工全貌，知道自己在全局里的位置。",
+						"4. 选模型：按任务难度传 model。简单、机械的活用［经济］，日常开发用［标准］，复杂设计、跨模块改动、疑难问题才用［强力］。不确定就不传，用默认（角色配置里写了模型的优先用它）。",
+						"5. 成员完成后任务会变成「待验收」：对照验收标准核对（必要时派审查角色），用 update_task 标完成或打回并写明原因。",
+						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。",
+						"7. 最后用中文向用户汇报：按任务编号说明谁做了什么、用了什么模型、结果、改动编号、还有什么没完成或有风险。",
 						"",
 						...(config.isolation.enabled
 							? [
@@ -392,6 +587,20 @@ export function createLocalAgentsExtension(config: AppConfig, changes: ChangeSto
 						.filter((l) => l !== undefined)
 						.join("\n"),
 				{ tag: false },
+			),
+			// 项目目标 + 分工表：每次请求都按最新状态渲染（分工表变了这一段才重发，其余部分的提示缓存不受影响）
+			section(
+				"project",
+				async (input, context) => {
+					const goal = project.goal();
+					const board = (await input.read.snapshot(Board, context)) as BoardState | undefined;
+					return [
+						goal ? `项目最终目标（.pi-agent/GOAL.md，以用户写的为准）：\n${goal}` : "还没有 .pi-agent/GOAL.md。用户给出项目级目标时，用 set_goal 起草一份，并请用户确认。",
+						"",
+						"当前分工表（.pi-agent/ASSIGN.md 由你通过 plan_tasks / update_task 维护）：",
+						boardSummary(board),
+					].join("\n");
+				},
 			),
 		],
 	});

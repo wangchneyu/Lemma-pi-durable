@@ -14,7 +14,8 @@ const out = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 let prompt = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) prompt += chunk;
-const task = prompt.trim().slice(0, 60);
+// 带了项目上下文时，只复述「本次要做的事」那部分
+const task = (prompt.split("【本次要做的事】").at(-1) ?? prompt).trim().slice(0, 60);
 
 const flag = (name) => {
 	const i = args.indexOf(name);

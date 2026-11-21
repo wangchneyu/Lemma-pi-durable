@@ -5,6 +5,7 @@ import type { Context } from "@earendil-works/chord/context";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, MemoryStorage, type Conversation } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { ProjectFiles } from "./board.ts";
 import { ChangeStore } from "./changes.ts";
 import type { AppConfig } from "./config.ts";
 import { createLocalAgentsExtension, type AgentAvailability } from "./tools.ts";
@@ -15,6 +16,8 @@ export interface App {
 	agents: AgentAvailability[];
 	/** 隔离派工的改动记录（worktree、分支、是否已合并） */
 	changes: ChangeStore;
+	/** 项目目标（GOAL.md）和分工表文件（ASSIGN.md） */
+	project: ProjectFiles;
 }
 
 /**
@@ -61,7 +64,8 @@ export async function openApp(
 ): Promise<App> {
 	if (!options.memory) mkdirSync(dirname(config.storage), { recursive: true });
 	const changes = new ChangeStore(`${config.storage}.changes.json`);
-	const { extension, agents } = createLocalAgentsExtension(config, changes);
+	const project = new ProjectFiles(config.workdir);
+	const { extension, agents } = createLocalAgentsExtension(config, changes, project);
 	const registry = createRegistry();
 	registry.install(extension);
 
@@ -96,5 +100,5 @@ export async function openApp(
 		// 配置文件改了模型时，让已存在的会话跟着更新
 		await root.configure({ model: orchestrator.ref, maxTurns: config.orchestrator.maxTurns ?? 40, cwd: config.workdir }, context);
 	}
-	return { harness, root, agents, changes };
+	return { harness, root, agents, changes, project };
 }

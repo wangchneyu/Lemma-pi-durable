@@ -97,7 +97,7 @@ try {
 	const lives = events.filter((e) => e.event === "live").map((e) => e.data);
 	check(all.some((i: any) => i.type === "user" && i.text === "加一个导出按钮"), "终端输入的任务实时推送到后台");
 	check(all.some((i: any) => i.type === "assistant" && i.toolCalls.length === 2), "推送了总调度的派工（两个工具调用）");
-	check(all.filter((i: any) => i.type === "tool" && !i.isError).length === 2, "推送了两个成员的结果");
+	check(all.filter((i: any) => i.type === "tool" && i.name.startsWith("ask_") && !i.isError).length === 2, "推送了两个成员的结果");
 	check(lives.some((l) => l.tools.filter((t: any) => t.status === "running").length === 2), "实时状态里两个成员同时处于执行中（并行）");
 	check(lives.some((l) => l.tools.some((t: any) => t.output.includes("🔧"))), "实时状态里有成员的进度日志");
 	check(lives.some((l) => l.partial.length > 0), "实时状态里有总调度的流式草稿");

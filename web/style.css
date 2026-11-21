@@ -2253,6 +2253,185 @@ pre {
 	border-color: color-mix(in srgb, var(--run) 50%, var(--line));
 }
 
+/* ---------- 项目：目标 + 分工表 ---------- */
+.goal-md {
+	font-size: 14px;
+	max-height: 360px;
+	overflow-y: auto;
+}
+.board-progress {
+	height: 6px;
+	border-radius: 3px;
+	background: color-mix(in srgb, var(--ink) 7%, transparent);
+	overflow: hidden;
+	margin-bottom: 16px;
+}
+.board-progress i {
+	display: block;
+	height: 100%;
+	background: var(--ok);
+	border-radius: 3px;
+	transition: width 0.4s ease;
+}
+.kanban {
+	display: grid;
+	grid-template-columns: repeat(5, minmax(0, 1fr));
+	gap: 12px;
+	align-items: start;
+}
+.kanban-col {
+	--c: var(--muted);
+	display: grid;
+	gap: 8px;
+	min-width: 0;
+}
+.kanban-col[data-s="doing"] {
+	--c: var(--run);
+}
+.kanban-col[data-s="review"] {
+	--c: var(--signal);
+}
+.kanban-col[data-s="blocked"] {
+	--c: var(--danger);
+}
+.kanban-col[data-s="done"] {
+	--c: var(--ok);
+}
+.kanban-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0 2px 6px;
+	border-bottom: 2px solid var(--c);
+	font: 600 12.5px var(--font-body);
+	color: var(--ink-2);
+}
+.kanban-head em {
+	font: 500 11px var(--font-mono);
+	font-style: normal;
+	color: var(--muted);
+}
+.kanban-empty {
+	color: var(--muted);
+	font-size: 12px;
+	text-align: center;
+	padding: 10px 0;
+}
+.task-card {
+	display: grid;
+	gap: 6px;
+	padding: 10px 11px;
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--c);
+	border-radius: 9px;
+	background: var(--panel-2);
+	min-width: 0;
+}
+.task-card header,
+.task-card footer {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 8px;
+}
+.task-id {
+	font-size: 11.5px;
+	color: var(--muted);
+}
+.task-card h3 {
+	margin: 0;
+	font: 600 13.5px/1.4 var(--font-body);
+	color: var(--ink);
+	word-break: break-word;
+}
+.task-accept {
+	margin: 0;
+	font-size: 12px;
+	color: var(--ink-2);
+	line-height: 1.45;
+}
+.task-accept span {
+	margin-right: 6px;
+	font: 600 10.5px var(--font-mono);
+	color: var(--muted);
+}
+.task-note {
+	margin: 0;
+	font-size: 11.5px;
+	color: var(--muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.dep {
+	font: 11px var(--font-mono);
+	color: var(--muted);
+}
+.dep[data-s="done"] {
+	color: var(--ok);
+}
+.role-chip {
+	display: inline-block;
+	padding: 1px 7px;
+	border-radius: 10px;
+	background: color-mix(in srgb, var(--signal) 13%, transparent);
+	color: var(--signal);
+	font: 600 11px/1.6 var(--font-body);
+	white-space: nowrap;
+}
+.dim-agent {
+	opacity: 0.45;
+}
+@media (max-width: 1180px) {
+	.kanban {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+}
+@media (max-width: 760px) {
+	.kanban {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* 时间线里的分工表操作 */
+.board-ops {
+	display: grid;
+	gap: 4px;
+	margin-top: 10px;
+}
+.board-op {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 6px 10px;
+	border: 1px dashed var(--line-strong);
+	border-radius: 8px;
+	font-size: 13px;
+	color: var(--ink-2);
+	min-width: 0;
+}
+.board-op b {
+	flex: none;
+	color: var(--ink);
+	font-weight: 600;
+}
+.board-op span:last-child {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.board-op .op-icon {
+	flex: none;
+}
+.board-op[data-s="done"] {
+	border-style: solid;
+	border-color: color-mix(in srgb, var(--ok) 35%, var(--line));
+}
+.board-op[data-s="error"] {
+	border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
+}
+
 /* ---------- 抽屉 ---------- */
 .drawer {
 	position: fixed;

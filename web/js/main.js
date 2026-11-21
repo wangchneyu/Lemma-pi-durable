@@ -33,7 +33,7 @@ addEventListener("hashchange", route);
 function renderChrome() {
 	const { live, state } = store;
 	const status = $("#status");
-	const running = live.tools.filter((t) => t.status === "running").length;
+	const running = live.tools.filter((t) => t.status === "running" && t.name.startsWith("ask_")).length;
 	const inbox = live.inbox ?? [];
 	const steers = inbox.filter((i) => i.mode === "steer").length;
 	const queued = inbox.length - steers;
@@ -54,6 +54,10 @@ function renderChrome() {
 		runs: buildRuns().filter((r) => !r.divider).length + (store.hasMore ? "+" : ""),
 		dispatches: store.dispatches.length || "",
 		changes: pendingChanges().length || "",
+		project: (() => {
+			const tasks = (state?.project?.tasks ?? []).filter((t) => t.status !== "dropped");
+			return tasks.length ? `${tasks.filter((t) => t.status === "done").length}/${tasks.length}` : "";
+		})(),
 		sessions: state?.sessions.length || "",
 	};
 	for (const [k, v] of Object.entries(counts)) $(`[data-count="${k}"]`).textContent = v ? String(v) : "";

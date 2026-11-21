@@ -68,6 +68,19 @@ export interface IsolationConfig {
 	linkDirs: string[];
 }
 
+/** 角色：总调度拆任务时给每项任务定角色，派工时按角色找成员（像真人团队按岗位分工） */
+export interface RoleConfig {
+	name: string;
+	/** 首选成员 */
+	agent: AgentKind;
+	/** 首选成员用的模型（不填用成员的默认） */
+	model?: string;
+	/** 首选成员不可用时依次尝试 */
+	fallback?: AgentKind[];
+	/** 这个角色负责什么 */
+	note?: string;
+}
+
 export interface BudgetConfig {
 	/** 一次运行（你的一次输入）里成员花费的上限，美元；超过后不再派工。null 表示不限 */
 	perRunUsd: number | null;
@@ -82,6 +95,7 @@ export interface AppConfig {
 	agents: Record<AgentKind, AgentConfig>;
 	isolation: IsolationConfig;
 	budget: BudgetConfig;
+	roles: RoleConfig[];
 	/** 终端进程内嵌的后台网页（只监听 127.0.0.1） */
 	web: { enabled: boolean; port: number };
 }
@@ -127,6 +141,12 @@ const DEFAULTS: AppConfig = {
 	},
 	isolation: { enabled: true, linkDirs: ["node_modules", ".venv", "venv"] },
 	budget: { perRunUsd: 3 },
+	roles: [
+		{ name: "架构", agent: "claude", model: "claude-opus-5-5", note: "整体方案、模块划分、跨模块的复杂改动" },
+		{ name: "设计", agent: "codex", note: "接口和实现方案设计" },
+		{ name: "编码", agent: "gemini", fallback: ["codex"], note: "按设计实现功能、写测试" },
+		{ name: "审查", agent: "claude", model: "claude-sonnet-5-5", note: "代码审查、找问题、核对验收标准" },
+	],
 	web: { enabled: true, port: 8787 },
 };
 
@@ -175,6 +195,7 @@ export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 		agents,
 		isolation: { ...DEFAULTS.isolation, ...(raw.isolation ?? {}) },
 		budget: { ...DEFAULTS.budget, ...(raw.budget ?? {}) },
+		roles: raw.roles ?? DEFAULTS.roles,
 		web: { ...DEFAULTS.web, ...(raw.web ?? {}) },
 	};
 	config.workdir = isAbsolute(config.workdir) ? config.workdir : resolve(base, config.workdir);

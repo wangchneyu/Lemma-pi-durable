@@ -109,12 +109,15 @@ export function dispatchRows() {
 	});
 	// 刚派出、汇总还没刷新到的
 	for (const slot of store.live.tools) {
-		if (slot.status === "done" || rows.some((r) => r.slot === slot)) continue;
+		if (!isDispatch(slot.name) || slot.status === "done" || rows.some((r) => r.slot === slot)) continue;
 		const info = callInfo(slot.callId);
 		rows.unshift({ callId: slot.callId, agent: kindOf(slot.name), task: info?.task ?? "", status: slot.status === "running" ? "running" : "open", slot });
 	}
 	return rows;
 }
+
+/** 派给成员的工具（ask_*）才算派工；plan_tasks / update_task / set_goal 是总调度维护分工表的操作 */
+export const isDispatch = (name) => String(name ?? "").startsWith("ask_");
 
 // ---------- 运行记录：按"你的一次输入"分组 ----------
 export function buildRuns() {
@@ -143,8 +146,8 @@ export function buildRuns() {
 	for (const run of real) {
 		const assistants = run.items.filter((i) => i.type === "assistant");
 		const lastAssistant = assistants.at(-1);
-		run.agents = [...new Set(assistants.flatMap((a) => a.toolCalls.map((c) => kindOf(c.name))))];
-		run.dispatchCount = assistants.reduce((n, a) => n + a.toolCalls.length, 0);
+		run.agents = [...new Set(assistants.flatMap((a) => a.toolCalls.filter((c) => isDispatch(c.name)).map((c) => kindOf(c.name))))];
+		run.dispatchCount = assistants.reduce((n, a) => n + a.toolCalls.filter((c) => isDispatch(c.name)).length, 0);
 		const times = run.items.map((i) => i.at).filter(Boolean);
 		run.endAt = times.length ? Math.max(...times) : undefined;
 		run.answer = lastAssistant && !lastAssistant.toolCalls.length ? lastAssistant.text : "";
@@ -185,6 +188,8 @@ export function connect() {
 		refreshChanges();
 		emit("snapshot");
 	});
+	// 目标或分工表变了
+	es.addEventListener("project", () => refreshState(100));
 	// 改动记录变了：派工收尾、终端里 /apply /drop /clean
 	es.addEventListener("change", () => {
 		refreshChanges(150);
