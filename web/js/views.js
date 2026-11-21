@@ -687,7 +687,14 @@ function changes() {
 					<h3 class="eyebrow">差异</h3>
 					<div data-n="diff"><div class="empty-inline"><span class="dot"></span>加载中…</div></div>
 				</div>`;
-			box.querySelector(".detail-title").textContent = c.task;
+			const title = box.querySelector(".detail-title");
+			title.textContent = c.task;
+			// 真实总调度写的任务说明常常很长：默认两行，点击展开
+			if (c.task.length > 90) {
+				title.classList.add("clamp");
+				title.title = "点击展开 / 收起";
+				title.addEventListener("click", () => title.classList.toggle("clamp"));
+			}
 			box.querySelector("[data-open-dispatch]")?.addEventListener("click", (e) => openDispatch(e.currentTarget.dataset.openDispatch));
 			if (!c.files.length) {
 				box.querySelector('[data-n="diff"]').innerHTML = "";

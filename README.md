@@ -32,6 +32,12 @@ npm install
 npm run check
 ```
 
+`npm run check` 用各成员的默认模型；想确认配置清单里的每个模型在你的中转站上都能用：
+
+```bash
+npm run check -- --models
+```
+
 ```bash
 npm start
 ```
@@ -110,7 +116,8 @@ npm run demo
 **成员**（`agents.<claude|codex|gemini>`）：
 
 - `enabled`：开关
-- `extraArgs`：追加的 CLI 参数（权限 / 沙箱模式等，**不要在这里写模型**）。默认值：Claude `--permission-mode acceptEdits`；Codex `sandbox_mode="workspace-write"`；Gemini `--approval-mode auto_edit --skip-trust`
+- `extraArgs`：追加的 CLI 参数（权限 / 沙箱模式等，**不要在这里写模型**）。默认值：Claude `--permission-mode acceptEdits --allowedTools "Bash(npm test:*)" "Bash(npm run test:*)" "Bash(node --test:*)"`；Codex `sandbox_mode="workspace-write"`；Gemini `--approval-mode auto_edit --skip-trust`
+  - Claude 的 `acceptEdits` 只放行改文件，其他命令要审批，无头模式下会被直接拒绝。`--allowedTools` 单独放开了跑测试的命令，`git push`、带 `;` 拼接的命令等仍然会被拒绝。被拒绝的操作会附在结果末尾告诉总调度。需要放开别的命令时照这个格式加，比如 `"Bash(pytest:*)"`。
   - Gemini 的 `--skip-trust`：无头模式下 Gemini 拒绝在未信任的目录运行，这个参数只对本次调用信任当前目录。
 - `models`：总调度可以选的模型清单，每项 `{ "id", "tier": "economy" | "standard" | "premium", "note", "price" }`。`note` 写给总调度看（适合什么活）；`price` 是每百万 tokens 的美元单价 `{ "input", "output", "cacheRead" }`，CLI 不自报花费时（Codex、Gemini）用它估算。
 - `defaultModel`：总调度没指定时用的模型；不填就用 CLI 自己的默认。旧配置里 `extraArgs` 写死的 `-m` 会自动当成默认模型。

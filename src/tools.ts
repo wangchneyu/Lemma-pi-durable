@@ -61,6 +61,14 @@ export function estimateCost(option: ModelOption | undefined, usage: TokenUsage 
 
 const TIER_LABEL = { economy: "经济", standard: "标准", premium: "强力" } as const;
 
+/** worktree 提交的信息：标题是任务的第一句（不截断在半个词上），正文是完整任务和模型 */
+function commitMessage(kind: string, model: string | undefined, task: string): string {
+	const flat = task.replace(/\s+/g, " ").trim();
+	const first = flat.split(/(?<=[。！？!?；;])\s*|[:：]\s*(?=\d[)）.、])/)[0] ?? flat;
+	const subject = first.length > 60 ? `${first.slice(0, 60).replace(/[，,、\s][^，,、\s]*$/, "")}…` : first;
+	return `pi-agent(${kind}): ${subject}\n\n${task.trim()}\n\n成员：${kind}${model ? `\n模型：${model}` : ""}`;
+}
+
 function text(message: string) {
 	return { output: [{ type: "text" as const, text: message }], isError: true };
 }
@@ -251,7 +259,7 @@ function createAgentTool(kind: AgentKind, command: string[], config: AppConfig, 
 			const finishChange = async (): Promise<ChangeRecord | undefined> => {
 				if (!change) return undefined;
 				try {
-					const head = (await commitAll(change.path, `pi-agent: ${kind} — ${args.task.replace(/\s+/g, " ").slice(0, 72)}`)) ?? change.head;
+					const head = (await commitAll(change.path, commitMessage(kind, reportedModel ?? model, args.task))) ?? change.head;
 					const [from] = changes.range({ ...change, head });
 					const files = head === from ? [] : await numstat(change.root, from, head);
 					return changes.upsert({

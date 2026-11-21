@@ -103,8 +103,13 @@ const claude: AgentAdapter = {
 			return { text: `Claude 没有返回结果（退出码 ${exitCode}）。\n${lastLines(stderr || stdout, 20)}`, sessionId, isError: true, model };
 		}
 		const isError = result.is_error === true || result.subtype !== "success";
+		// 被权限系统拦下的命令：告诉总调度，免得它只看到"没跑成"却不知道原因
+		const denied: string[] = Array.isArray(result.permission_denials)
+			? result.permission_denials.map((d: any) => short(d?.tool_input?.command ?? d?.tool_input?.file_path ?? d?.tool_name ?? "", 80)).filter(Boolean)
+			: [];
+		const deniedNote = denied.length ? `\n\n（被权限拒绝、没有执行的操作：${[...new Set(denied)].join("；")}）` : "";
 		return {
-			text: String(result.result ?? (isError ? `出错：${result.subtype ?? "unknown"}` : "")),
+			text: String(result.result ?? (isError ? `出错：${result.subtype ?? "unknown"}` : "")) + deniedNote,
 			sessionId,
 			isError,
 			costUsd: typeof result.total_cost_usd === "number" ? result.total_cost_usd : undefined,

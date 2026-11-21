@@ -101,7 +101,8 @@ const DEFAULTS: AppConfig = {
 		claude: {
 			enabled: true,
 			description: "Claude Code：擅长读懂代码库、重构、写代码和文档、细致的代码审查。",
-			extraArgs: ["--permission-mode", "acceptEdits"],
+			// acceptEdits 只放行改文件；跑测试是 Bash 命令，单独放开这几类（其他命令仍会被拒绝）
+			extraArgs: ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(node --test:*)"],
 			models: [],
 			timeoutMinutes: 30,
 			maxOutputChars: 20000,

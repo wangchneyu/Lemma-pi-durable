@@ -115,6 +115,14 @@ try {
 	const older = await json(`/api/history?before=${all.at(-1).id}&limit=2`);
 	check(older.items.length === 2 && older.items.every((i: any) => i.id < all.at(-1).id) && older.hasMore === true && firstId > 0, "历史分页接口按 id 往前翻");
 
+	// 一次写入多行命令：必须按顺序执行（/clean 要等 /apply all 做完，才能清掉刚合并的改动）
+	const { changes: before } = await json("/api/changes");
+	const pendingCount = before.filter((c: any) => c.status === "pending").length;
+	check(pendingCount === 2, "演示派工在沙盒仓库里产生了两个待合并的改动");
+	terminal.stdin!.write("/apply all\n/clean\n");
+	for (let i = 0; i < 50 && !/清理了 \d+ 个 worktree|没有需要清理/.test(terminalOutput); i++) await sleep(100);
+	check(terminalOutput.includes(`清理了 ${pendingCount} 个 worktree`), "多行命令按顺序执行：/clean 清掉了刚合并的改动");
+
 	const abort = await raw("/api/abort", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
 	await sleep(200);
 	check(abort.status === 200 && terminalOutput.includes("后台网页：已中止本轮"), "网页上的中止会通知终端");

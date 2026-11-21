@@ -187,12 +187,24 @@ function startRepl() {
 		repl.prompt();
 	});
 
+	// 命令按输入顺序一个一个执行（一次粘贴多行时，/apply 之后的 /clean 要等 /apply 做完）；
+	// /abort 和 /exit 不排队，随时生效。任务不排在这里：总调度自己有输入队列。
+	let commands = Promise.resolve();
+	const immediate = new Set(["/abort", "/exit", "/quit"]);
 	repl.on("line", async (raw) => {
 		const line = raw.trim();
 		if (!line) return repl.prompt();
 		if (line.startsWith("/")) {
-			if (!(await command(line))) console.log(c.red(`未知命令：${line}`));
-			if (!closing) repl.prompt();
+			const run = async () => {
+				try {
+					if (!(await command(line))) console.log(c.red(`未知命令：${line}`));
+				} catch (error) {
+					console.log(c.red(`出错：${error instanceof Error ? error.message : String(error)}`));
+				}
+				if (!closing) repl.prompt();
+			};
+			if (immediate.has(line)) await run();
+			else commands = commands.then(run);
 			return;
 		}
 		busy++;

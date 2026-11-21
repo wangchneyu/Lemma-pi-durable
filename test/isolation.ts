@@ -70,6 +70,7 @@ check(readFileSync(join(first.path, "app.ts"), "utf8").includes("未提交的改
 check(existsSync(join(first.path, "node_modules", "dep", "index.js")), "被忽略的依赖目录挂进了 worktree");
 check(git("branch", "--list", first.branch).includes(first.branch), `分支 ${first.branch} 已创建`);
 check(ok!.text.includes(`改动 #${first.id}`), "结果里告诉总调度改动编号和合并方式");
+check(git("log", "-1", "--format=%s", first.branch) === "pi-agent(claude): 写设计", "worktree 的提交标题是「成员 + 任务首句」");
 
 // ---- 2. based_on：Codex 在 Claude 的改动基础上开工；估算花费计入预算 ----
 orch.faux.setResponses([
