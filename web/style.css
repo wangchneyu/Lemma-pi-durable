@@ -2207,6 +2207,52 @@ pre {
 	white-space: nowrap;
 }
 
+/* ---------- 插话 / 排队 ---------- */
+.inbox-list {
+	display: grid;
+	gap: 6px;
+	margin-top: 12px;
+}
+.inbox-row {
+	--t: var(--run);
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 12px;
+	border: 1px dashed color-mix(in srgb, var(--t) 45%, var(--line));
+	border-radius: 9px;
+	font-size: 13px;
+}
+.inbox-row[data-mode="followUp"] {
+	--t: var(--muted);
+}
+.inbox-tag {
+	font: 600 11px/1 var(--font-mono);
+	color: var(--t);
+	padding: 3px 6px;
+	border: 1px solid color-mix(in srgb, var(--t) 45%, transparent);
+	border-radius: 4px;
+}
+.inbox-text {
+	color: var(--ink);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.inbox-row .muted {
+	font-size: 11.5px;
+	white-space: nowrap;
+}
+.item.user.steer::before {
+	background: var(--run);
+	border-color: var(--run);
+}
+.item.user.steer .bubble {
+	border-style: dashed;
+	border-color: color-mix(in srgb, var(--run) 50%, var(--line));
+}
+
 /* ---------- 抽屉 ---------- */
 .drawer {
 	position: fixed;

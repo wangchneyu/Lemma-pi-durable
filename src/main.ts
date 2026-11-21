@@ -6,6 +6,7 @@
 import { resolve } from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { LiveDoc } from "@earendil-works/pi-durable";
 import { startAdmin, type AdminServer } from "./admin.ts";
 import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-ops.ts";
 import { openApp } from "./app.ts";
@@ -59,14 +60,61 @@ async function shutdown(code = 0): Promise<void> {
 	setTimeout(() => process.exit(code), 2000).unref();
 }
 
-async function ask(text: string) {
-	const submission = await root.submit({ type: "input", content: text }, context);
+/**
+ * 提交一条输入。whenBusy：
+ *   steer    总调度正忙时插进当前这一轮（在这一轮工具做完后、下一次思考前看到）；空闲时就是新的一轮
+ *   followUp 正忙时排队，这一轮结束后作为新的一轮处理
+ */
+async function ask(text: string, whenBusy: "steer" | "followUp" = "followUp") {
+	const submission = await root.submit({ type: "input", content: text, whenBusy }, context);
 	const settled = await submission.wait(context);
 	if (settled.status !== "done") {
 		const { reason, detail } = settled as { reason?: string; detail?: string };
 		console.log(c.red(`\n本轮没有完成：${reason ?? settled.status}${detail ? ` — ${detail}` : ""}`));
+		if (reason === "model_error" || reason === "interrupted" || reason === "turn_limit") console.log(c.dim("（输入 /continue 可以在原来的上下文里续跑）"));
 	}
 	return settled;
+}
+
+async function liveState(): Promise<any> {
+	return harness.snapshot(LiveDoc, root.id, context);
+}
+
+/** 上一轮出错 / 中断后，不重新输入，直接在原来的上下文里续跑 */
+async function continueRun() {
+	const live = await liveState();
+	if (live?.run) return console.log(c.dim("总调度正在运行，不需要续跑。"));
+	if (!live?.runFailure) return console.log(c.dim("上一轮已经正常结束，没有可以续跑的。"));
+	if (live.runFailure.reason === "aborted" || live.runFailure.reason === "reset") {
+		console.log(c.dim(`上一轮是被${live.runFailure.reason === "aborted" ? "中止" : "重置"}的，仍然尝试续跑。`));
+	}
+	console.log(c.yellow("续跑上一轮…"));
+	const submission = await root.submit({ type: "continue" }, context);
+	const settled = await submission.wait(context);
+	if (settled.status !== "done") {
+		const { reason, detail } = settled as { reason?: string; detail?: string };
+		console.log(c.red(reason === "nothing_to_answer" ? "没有需要续跑的内容：上一轮停在已经回答完的地方。" : `续跑没有完成：${reason ?? settled.status}${detail ? ` — ${detail}` : ""}`));
+	}
+}
+
+/** 手动压缩：把较早的对话总结成摘要，总调度之后只看摘要 + 最近的内容（原始记录仍在存储里） */
+async function compactNow(instructions: string | undefined) {
+	console.log(c.yellow("正在压缩上下文…"));
+	const taskId = await root.compact(instructions, context);
+	const outcome = ((await harness.waitForTask(taskId, context)) as any).state?.outcome;
+	if (outcome?.status === "completed") {
+		// entryId：空闲时摘要已直接放入；submissionId：正忙，摘要在这一轮的下一个间隙放入；都没有：对话还短，不需要压缩
+		const r = outcome.result ?? {};
+		console.log(
+			r.entryId !== undefined
+				? c.green("已压缩：较早的对话换成了摘要（原始记录仍在存储里）。")
+				: r.submissionId !== undefined
+					? c.green("摘要已生成，会在这一轮的下一个间隙放入。")
+					: c.dim("对话还不长，没有需要压缩的内容。"),
+		);
+	} else {
+		console.log(c.red(`压缩没有完成：${outcome?.status ?? "未知"}${outcome?.error ? ` — ${outcome.error}` : ""}`));
+	}
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -136,6 +184,26 @@ async function changeCommand(line: string): Promise<boolean> {
 
 async function command(line: string): Promise<boolean> {
 	if (await changeCommand(line)) return true;
+	const [head, ...rest] = line.split(/\s+/);
+	const arg = rest.join(" ").trim();
+	if (head === "/queue") {
+		if (!arg) {
+			console.log(c.red("用法：/queue <任务>（排到当前这一轮之后）"));
+			return true;
+		}
+		const busy = (await liveState())?.run !== undefined;
+		console.log(c.dim(busy ? "已排队：这一轮结束后处理。" : "总调度空闲，直接开始。"));
+		void ask(arg, "followUp").catch((error) => console.log(c.red(`出错：${error instanceof Error ? error.message : String(error)}`)));
+		return true;
+	}
+	if (head === "/continue") {
+		await continueRun();
+		return true;
+	}
+	if (head === "/compact") {
+		await compactNow(arg || undefined);
+		return true;
+	}
 	switch (line) {
 		case "/exit":
 		case "/quit":
@@ -170,6 +238,7 @@ async function command(line: string): Promise<boolean> {
 function startRepl() {
 	printBanner();
 	console.log(c.dim("\n输入任务开始协作。命令：/agents /web /usage /abort /new /exit；运行中按 Ctrl+C 中止本轮。"));
+	console.log(c.dim("运行中：直接输入 = 插话（当前这一轮就能看到），/queue <任务> 排到下一轮；/continue 续跑中断的一轮，/compact 压缩上下文"));
 	console.log(c.dim("改动：/changes 待合并的改动、/diff <编号>、/apply <编号>、/drop <编号>、/clean\n"));
 	if (pendingChanges(app.changes).length) {
 		console.log(c.yellow(`有 ${pendingChanges(app.changes).length} 个改动等你确认合并：`));
@@ -205,6 +274,18 @@ function startRepl() {
 			};
 			if (immediate.has(line)) await run();
 			else commands = commands.then(run);
+			return;
+		}
+		// 总调度正在干活：这句话插进当前这一轮（steer），它在这一轮工具做完后就能看到；
+		// 想排到下一轮用 /queue。插话和原来那一轮一起结束，提示符由原来那一轮负责打印。
+		if ((await liveState())?.run !== undefined) {
+			console.log(c.dim("↪ 已插入当前这一轮，总调度在下一步就会看到（想排到这一轮之后，用 /queue <任务>）"));
+			repl.prompt();
+			try {
+				await ask(line, "steer");
+			} catch (error) {
+				console.log(c.red(`出错：${error instanceof Error ? error.message : String(error)}`));
+			}
 			return;
 		}
 		busy++;

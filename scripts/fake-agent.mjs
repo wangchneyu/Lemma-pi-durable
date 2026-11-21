@@ -31,11 +31,11 @@ const model = flag("--model") ?? flag("-m");
 const slug = Date.now().toString(36).slice(-5);
 
 /**
- * 在 cwd 里真的写文件，让工作区隔离有改动可看。只在 git 仓库里写（演示沙盒、测试仓库），
- * 不在任意目录留下垃圾；FAKE_AGENT_WRITE=0 时不写。
+ * 在 cwd 里真的写文件，让工作区隔离有改动可看。必须显式开启（FAKE_AGENT_WRITE=1，演示模式的沙盒仓库和隔离测试会设），
+ * 而且只在 git 仓库里写：避免旧配置把工作目录指向真实项目时，往项目里留下演示文件。
  */
 function writeFiles(files) {
-	if (process.env.FAKE_AGENT_WRITE === "0" || !existsSync(join(process.cwd(), ".git"))) return [];
+	if (process.env.FAKE_AGENT_WRITE !== "1" || !existsSync(join(process.cwd(), ".git"))) return [];
 	for (const [rel, content] of Object.entries(files)) {
 		const file = join(process.cwd(), rel);
 		mkdirSync(join(file, ".."), { recursive: true });

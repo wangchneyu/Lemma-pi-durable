@@ -34,9 +34,13 @@ function renderChrome() {
 	const { live, state } = store;
 	const status = $("#status");
 	const running = live.tools.filter((t) => t.status === "running").length;
+	const inbox = live.inbox ?? [];
+	const steers = inbox.filter((i) => i.mode === "steer").length;
+	const queued = inbox.length - steers;
+	const waiting = `${steers ? ` · 插话 ${steers}` : ""}${queued ? ` · 排队 ${queued}` : ""}`;
 	if (live.busy) {
 		status.dataset.state = "busy";
-		$("#statusText").textContent = `调度中 · 第 ${live.turns + 1} 轮${running ? ` · ${running} 名成员执行中` : ""}${live.retry ? " · 模型重试中" : ""}`;
+		$("#statusText").textContent = `调度中 · 第 ${live.turns + 1} 轮${running ? ` · ${running} 名成员执行中` : ""}${live.retry ? " · 模型重试中" : ""}${waiting}`;
 	} else if (live.runFailure && live.runFailure.reason !== "aborted") {
 		status.dataset.state = "failed";
 		$("#statusText").textContent = `上一轮未完成：${FAILURE_LABEL[live.runFailure.reason] ?? live.runFailure.reason}`;

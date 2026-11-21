@@ -22,6 +22,8 @@ export interface ViewLive {
 	retry?: { at: number; error: string };
 	tools: { callId: string; name: string; status: string; output: string; details?: unknown }[];
 	runFailure?: { reason: string; detail?: string };
+	/** 收件箱里还没放进对话的输入：插话（这一轮工具做完后放入）和排队（这一轮结束后处理） */
+	inbox: { mode: "steer" | "followUp"; text: string }[];
 }
 
 function textOf(content: unknown): string {
@@ -143,7 +145,7 @@ export function parseToolResult(text: string, isError: boolean, details: any) {
 	};
 }
 
-export function toViewLive(live: any): ViewLive {
+export function toViewLive(live: any, inbox?: any): ViewLive {
 	const partialBlocks = live?.generation?.message?.content;
 	return {
 		busy: live?.run !== undefined,
@@ -158,5 +160,9 @@ export function toViewLive(live: any): ViewLive {
 			details: t.details,
 		})),
 		runFailure: live?.runFailure ? { reason: String(live.runFailure.reason), detail: live.runFailure.detail } : undefined,
+		inbox: (inbox?.items ?? [])
+			.filter((i: any) => i.mode === "steer" || i.mode === "followUp")
+			// content 通常就是字符串；也兼容内容块数组和 { content } 的形式
+			.map((i: any) => ({ mode: i.mode, text: typeof i.content === "string" ? i.content : textOf(i.content?.content ?? i.content) })),
 	};
 }

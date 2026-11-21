@@ -7,7 +7,7 @@
     "demo": "node --no-warnings src/main.ts --demo",
     "check": "node --no-warnings scripts/check-agents.ts",
     "typecheck": "tsc -p .",
-    "test": "node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/web.ts"
+    "test": "node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/steer.ts && node --no-warnings test/web.ts"
   },
   "keywords": [],
   "author": "",

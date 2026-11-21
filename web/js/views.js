@@ -288,17 +288,39 @@ function overview() {
 		running(box, note) {
 			const active = store.live.tools.filter((t) => t.status !== "done");
 			note.textContent = active.length ? `${active.length} 项` : "";
+			// 还没放进对话的插话 / 排队（来自终端）
+			const inbox = store.live.inbox ?? [];
+			let waitBox = box.querySelector(".inbox-list");
+			if (inbox.length) {
+				if (!waitBox) {
+					waitBox = el("div", "inbox-list");
+					box.append(waitBox);
+				}
+				const html = inbox
+					.map((i) => `<div class="inbox-row" data-mode="${i.mode}"><span class="inbox-tag">${i.mode === "steer" ? "插话" : "排队"}</span><span class="inbox-text">${esc(short(i.text, 120))}</span><span class="muted">${i.mode === "steer" ? "这一轮工具做完后放入" : "这一轮结束后处理"}</span></div>`)
+					.join("");
+				if (waitBox.innerHTML !== html) waitBox.innerHTML = html;
+			} else waitBox?.remove();
 			if (!active.length) {
 				tickets.clear();
+				box.querySelector(".tickets")?.remove();
+				let line = box.querySelector(".empty-inline");
+				if (!line) {
+					line = el("div", "empty-inline");
+					box.prepend(line);
+				}
 				const text = store.live.busy ? "总调度正在规划，还没有派工" : "没有正在执行的派工";
-				if (box.textContent.trim() !== text) box.innerHTML = `<div class="empty-inline"><span class="dot"></span>${esc(text)}</div>`;
+				if (line.dataset.t !== text) {
+					line.dataset.t = text;
+					line.innerHTML = `<span class="dot"></span>${esc(text)}`;
+				}
 				return;
 			}
 			box.querySelector(".empty-inline")?.remove();
 			let wrap = box.querySelector(".tickets");
 			if (!wrap) {
 				wrap = el("div", "tickets multi");
-				box.append(wrap);
+				box.prepend(wrap);
 			}
 			for (const slot of active) {
 				let t = tickets.get(slot.callId);

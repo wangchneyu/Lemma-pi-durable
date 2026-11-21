@@ -10,6 +10,7 @@ import { check, fakeCalls, fauxOrchestrator, testConfig, toolResults } from "./h
 
 const context = BACKGROUND_CONTEXT;
 const config = testConfig();
+process.env.FAKE_AGENT_WRITE = "1"; // 让模拟 CLI 在临时仓库的 worktree 里真的写文件
 const repo = config.workdir;
 const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", windowsHide: true }).trim();
 

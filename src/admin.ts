@@ -160,7 +160,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	};
 	const watch = await root.watch(context);
 	const seen = new Set(watch.value.entries.map((e) => Number(e.id)));
-	let lastLive: ViewLive = toViewLive(watch.value.docs["pi.live"]);
+	let lastLive: ViewLive = toViewLive(watch.value.docs["pi.live"], watch.value.docs["pi.inbox"]);
 	let lastLiveJson = JSON.stringify(lastLive);
 	watch.start(async (call) => {
 		if (call.kind !== "value") return;
@@ -174,7 +174,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			if (item) fresh.push(item);
 		}
 		if (fresh.length > 0) broadcast("items", fresh);
-		const live = toViewLive(call.value.docs["pi.live"]);
+		const live = toViewLive(call.value.docs["pi.live"], call.value.docs["pi.inbox"]);
 		const json = JSON.stringify(live);
 		if (json !== lastLiveJson) {
 			lastLive = live;

@@ -28,7 +28,7 @@ export class Timeline {
 
 	render(item) {
 		if (item.type === "user") {
-			const node = el("div", "item user", `${whoLine("你 · 终端", item.at)}<div class="bubble"></div>`);
+			const node = el("div", `item user${item.steer ? " steer" : ""}`, `${whoLine(item.steer ? "你 · 插话" : "你 · 终端", item.at)}<div class="bubble"></div>`);
 			node.querySelector(".bubble").textContent = item.text;
 			return node;
 		}

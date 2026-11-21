@@ -59,6 +59,8 @@ export function demoConfig(config: AppConfig): AppConfig {
 	demo.budget = { perRunUsd: 0.5 };
 	process.env.FAKE_AGENT_DELAY_MS ??= "4000";
 	process.env.FAKE_AGENT_JITTER ??= "1";
+	// 只有工作目录是沙盒仓库时才让模拟 CLI 写文件
+	if (workdir.startsWith(dataDir)) process.env.FAKE_AGENT_WRITE ??= "1";
 	return demo;
 }
 
@@ -89,11 +91,20 @@ export function demoOrchestrator(): OrchestratorModel {
 	let reviewPending: string | undefined; // 剧本二：Codex 实现完后，下一步让 Claude 基于它的改动审查
 
 	const step = (ctx: { messages: readonly any[] }) => {
-		const last = ctx.messages.at(-1);
+		let messages = ctx.messages;
+		let last = messages.at(-1);
 		const id = (k: string) => ({ id: `demo-${k}-${run}-${round}` });
+		// 插话（steer）：放在一轮工具结果之后的用户消息。不当成新任务，而是带进这一轮接下来的步骤
+		let steer: string | undefined;
+		if (last?.role === "user" && messages.at(-2)?.role === "toolResult") {
+			steer = textOf(last);
+			messages = messages.slice(0, -1);
+			last = messages.at(-1);
+		}
+		const heard = steer ? `收到你的插话：「${steer}」，已按它调整。\n\n` : "";
 		if (last?.role === "toolResult") {
 			const results: any[] = [];
-			for (const m of ctx.messages.slice().reverse()) {
+			for (const m of messages.slice().reverse()) {
 				if (m.role !== "toolResult") break;
 				results.unshift(m);
 			}
@@ -105,8 +116,12 @@ export function demoOrchestrator(): OrchestratorModel {
 				if (change) {
 					return fauxAssistantMessage(
 						[
-							fauxText(`Codex 完成了实现（改动 #${change}）。接着让 Claude 用强力模型基于这个改动做审查。`),
-							fauxToolCall("ask_claude", { task: `审查改动 #${change} 并补充文档：${task}`, model: "claude-opus-5-5", based_on: change }, id("r")),
+							fauxText(`${heard}Codex 完成了实现（改动 #${change}）。接着让 Claude 用强力模型基于这个改动做审查。`),
+							fauxToolCall(
+								"ask_claude",
+								{ task: `审查改动 #${change} 并补充文档：${task}${steer ? `（用户补充：${steer}）` : ""}`, model: "claude-opus-5-5", based_on: change },
+								id("r"),
+							),
 						],
 						{ stopReason: "toolUse" },
 					);
@@ -122,7 +137,7 @@ export function demoOrchestrator(): OrchestratorModel {
 			const changes = [...new Set(results.map((m) => textOf(m).match(/改动 #(\w+)：\d+ 个文件/)?.[1]).filter(Boolean))];
 			return fauxAssistantMessage(
 				fauxText(
-					`## 汇报\n\n${failed ? "有成员没有完成：" : "成员都完成了："}\n\n${lines.join("\n")}\n\n` +
+					`## 汇报\n\n${heard}${failed ? "有成员没有完成：" : "成员都完成了："}\n\n${lines.join("\n")}\n\n` +
 						(changes.length ? `改动都在独立分支里，还没有进入主目录。确认没问题后在终端执行 \`/apply ${changes.join(" ")}\`（逐个），或 \`/apply all\`。\n\n` : "") +
 						(failed ? "失败的部分需要再派一次，或者先看看报错。" : "下一步可以让另一位成员交叉审查。"),
 				),

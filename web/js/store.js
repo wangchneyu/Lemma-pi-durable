@@ -120,13 +120,19 @@ export function dispatchRows() {
 export function buildRuns() {
 	const runs = [];
 	let current = null;
+	let prev = null;
 	for (const item of store.items) {
 		if (item.type === "divider") {
 			runs.push({ id: `d${item.id}`, divider: true, label: item.label, at: undefined });
 			current = null;
+			prev = item;
 			continue;
 		}
-		if (item.type === "user" || !current) {
+		// 插话（steer）只会放在一轮工具结果之后：紧跟在成员结果后面的用户消息属于当前这次运行
+		const steer = item.type === "user" && current && prev?.type === "tool";
+		if (steer) item.steer = true;
+		prev = item;
+		if ((item.type === "user" && !steer) || !current) {
 			current = { id: String(item.id), user: item.type === "user" ? item : null, items: [], at: item.at };
 			runs.push(current);
 		}
@@ -147,7 +153,7 @@ export function buildRuns() {
 		else if (lastAssistant?.error) run.status = "error";
 		else if (run.answer)
 			// 总调度给了最终汇报，但中间有成员失败：标成"有失败"，别让失败藏在"完成"里
-			run.status = run.items.some((i) => i.type === "tool" && i.isError && !/<harness>/.test(i.text)) ? "partial" : "done";
+			run.status = run.items.some((i) => i.type === "tool" && i.isError) ? "partial" : "done";
 		else if (run === last && store.live.runFailure) run.status = store.live.runFailure.reason === "aborted" ? "aborted" : "error";
 		else if (run.items.some((i) => i.type === "tool" && /<harness>[\s\S]*aborted/i.test(i.text))) run.status = "aborted";
 		else run.status = "open";
