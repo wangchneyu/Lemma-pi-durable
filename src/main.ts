@@ -209,6 +209,9 @@ async function shutdown(code = 0): Promise<void> {
  *   steer    总调度正忙时插进当前这一轮（在这一轮工具做完后、下一次思考前看到）；空闲时就是新的一轮
  *   followUp 正忙时排队，这一轮结束后作为新的一轮处理
  */
+/** 模型服务商因内容政策拦截整段请求（换个说法或续跑都没用，只能重置上下文） */
+const CONTEXT_BLOCKED = /violate .*(terms|usage polic)|blocked as it seems|content (policy|filter)|safety (system|filter)|内容(安全|审核|政策)/i;
+
 async function ask(text: string, whenBusy: "steer" | "followUp" = "followUp") {
 	const target = root;
 	const id = sessionId;
@@ -217,7 +220,10 @@ async function ask(text: string, whenBusy: "steer" | "followUp" = "followUp") {
 	if (settled.status !== "done") {
 		const { reason, detail } = settled as { reason?: string; detail?: string };
 		log(c.red(`\n[${id}] 本轮没有完成：${reason ?? settled.status}${detail ? ` — ${detail}` : ""}`));
-		if (reason === "model_error" || reason === "interrupted" || reason === "turn_limit") log(c.dim("（输入 /continue 可以在原来的上下文里续跑）"));
+		if (reason === "model_error" && CONTEXT_BLOCKED.test(detail ?? "")) {
+			// 服务商的内容检查拦下的是整段上下文：之后每次请求都会带上它，续跑和重发都没用
+			log(c.yellow("（这是模型服务商的内容检查拦截，不是 pi-agent 的故障。被拦的那条消息还在上下文里，之后每次请求都会被拦。输入 /new 重置上下文就能恢复；对话记录仍保存在存储里。）"));
+		} else if (reason === "model_error" || reason === "interrupted" || reason === "turn_limit") log(c.dim("（输入 /continue 可以在原来的上下文里续跑）"));
 	}
 	return settled;
 }

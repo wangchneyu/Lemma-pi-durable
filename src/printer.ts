@@ -70,9 +70,15 @@ export async function follow(
 	const watch = await root.watch(context);
 	const seen = new Set(watch.value.entries.map((e) => e.id));
 	const printedOutput = new Map<string, number>();
-	if (options.replay) for (const entry of watch.value.entries) {
-		if (entry.kind === "pi.user") writeLine(`你 › ${textOf((entry.model?.[0] as any)?.content)}`);
-		else printEntry(entry);
+	if (options.replay) {
+		// 只回放最近一次重置（/new）之后的内容：重置前的记录模型已经看不到了，也不该再刷到屏幕上
+		const entries = watch.value.entries;
+		const lastReset = entries.findLastIndex((e) => e.kind === "pi.reset");
+		if (lastReset >= 0) writeLine(c.dim("（更早的对话已重置：模型不再看到它们，记录仍在存储里，网页「运行记录」可查看）"));
+		for (const entry of entries.slice(lastReset + 1)) {
+			if (entry.kind === "pi.user") writeLine(`你 › ${textOf((entry.model?.[0] as any)?.content)}`);
+			else printEntry(entry);
+		}
 	}
 	options.onLive?.(watch.value.docs["pi.live"]);
 

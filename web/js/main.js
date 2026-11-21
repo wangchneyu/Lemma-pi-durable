@@ -49,7 +49,9 @@ function renderChrome() {
 		$("#statusText").textContent = `后台执行中 · ${jobs} 项（总调度空闲，结果回来后自动继续）`;
 	} else if (live.runFailure && live.runFailure.reason !== "aborted") {
 		status.dataset.state = "failed";
-		$("#statusText").textContent = `上一轮未完成：${FAILURE_LABEL[live.runFailure.reason] ?? live.runFailure.reason}`;
+		// 服务商内容检查拦下整段上下文时，续跑没用，提示重置上下文
+		const blocked = live.runFailure.reason === "model_error" && /violate .*(terms|usage polic)|blocked as it seems|content (policy|filter)|内容(安全|审核|政策)/i.test(live.runFailure.detail ?? "");
+		$("#statusText").textContent = blocked ? "上一轮被模型服务商拦截：点「重置上下文」恢复" : `上一轮未完成：${FAILURE_LABEL[live.runFailure.reason] ?? live.runFailure.reason}`;
 	} else {
 		status.dataset.state = "idle";
 		$("#statusText").textContent = live.runFailure ? "待命 · 上一轮已中止" : "待命";
