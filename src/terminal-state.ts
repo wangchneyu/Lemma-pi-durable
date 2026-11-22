@@ -4,6 +4,7 @@ import type { Conversation, ConversationView, ConversationWatch, EntryRecord, Ha
 import { ConversationTranscript } from "@earendil-works/pi-durable";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { toViewItem, toViewLive, type ViewItem, type ViewLive } from "./view.ts";
+import { transcriptSummary } from "./digest.ts";
 
 export type TerminalItem = ViewItem & { message?: Message };
 export type TerminalTool = ViewLive["tools"][number] & { args?: Record<string, unknown>; argsComplete?: boolean; isError?: boolean };
@@ -31,6 +32,9 @@ export interface NativeConversationSummary {
 	parentId?: string;
 	workdir?: string;
 	createdAt?: number;
+	lastAt?: number;
+	messageCount?: number;
+	searchText?: string;
 }
 
 export interface TerminalStateOptions {
@@ -129,15 +133,14 @@ export async function listNativeConversations(harness: Harness, root: Conversati
 	const summaries = await Promise.all(records.map(async (record): Promise<NativeConversationSummary | undefined> => {
 		const child = await harness.conversation(record.id, context);
 		if (!child) return undefined;
-		const [agent, first] = await Promise.all([child.agent(context), child.entries({ order: "ascending" }, 12, undefined, context)]);
-		const user = first.items.map(toViewItem).find((item) => item?.type === "user");
-		const summary = user?.type === "user" ? user.text.replace(/\s+/g, " " ).trim().slice(0, 100) : "尚无消息";
+		const [agent, stats] = await Promise.all([child.agent(context), transcriptSummary(harness, child)]);
+		const summary = stats.first?.slice(0, 100) ?? "尚无消息";
 		const isRoot = String(record.id) === String(root.id);
 		return {
 			id: String(record.id), title: isRoot ? "总调度" : summary,
 			parentId: isRoot ? undefined : String(record.owner?.conversationId ?? record.parent?.conversationId ?? root.id),
 			workdir: agent.cwd,
-			createdAt: user?.type === "user" ? user.at : undefined,
+			createdAt: stats.firstAt, lastAt: stats.lastAt, messageCount: stats.messageCount, searchText: stats.text,
 			detail: `${isRoot ? "主对话" : `所属对话 ${record.owner?.conversationId ?? record.parent?.conversationId ?? "独立"}`} · CID:${record.id}${agent.model ? ` · ${agent.model.modelId}` : ""}${agent.cwd ? ` · ${agent.cwd}` : ""}`,
 		};
 	}));

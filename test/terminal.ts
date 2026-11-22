@@ -353,6 +353,12 @@ try {
 	assert.equal(chosen, "second");
 	assert.equal(ui.editor.getExpandedText(), beforePicker);
 	const aborts: AbortSignal[] = [];
+	let refreshed = false;
+	const discovered = { ...models.getModel("selector-test", "second")!, id: "discovered-only", name: "discovered-only" };
+	ui.showModels({ ...catalog, getAvailableSnapshot: () => refreshed ? [...catalog.getAvailableSnapshot(), discovered] : catalog.getAvailableSnapshot(), refresh: async () => { refreshed = true; return { aborted: false, errors: new Map() }; } }, models.getModel("selector-test", "first"), [], (model) => { chosen = model.id; });
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	terminal.input("discovered-only"); terminal.input("\r");
+	assert.equal(chosen, "discovered-only");
 	ui.showModels({ ...catalog, refresh: (options) => new Promise((resolve) => { const signal = options!.signal!; aborts.push(signal); signal.addEventListener("abort", () => resolve({ aborted: true, errors: new Map() }), { once: true }); }) }, models.getModel("selector-test", "first"), catalog.getAvailableSnapshot(), () => {});
 	ui.bind(binding, beforePicker);
 	await new Promise((resolve) => setTimeout(resolve, 0));

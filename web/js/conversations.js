@@ -34,7 +34,7 @@ const STATE_TEXT = { busy: "总调度运行中", jobs: "后台派工中", idle: 
 
 function metaOf(c) {
 	const d = c.digest ?? {};
-	return [d.inputs ? `${d.inputs} 次输入` : "还没有输入", d.lastAt ? ago(d.lastAt) : c.createdAt ? `建于 ${ago(c.createdAt)}` : ""].filter(Boolean).join(" · ");
+	return [typeof d.messageCount === "number" ? `${d.messageCount} 条消息` : "", d.inputs ? `${d.inputs} 次输入` : "还没有输入", d.lastAt ? ago(d.lastAt) : c.createdAt ? `建于 ${ago(c.createdAt)}` : ""].filter(Boolean).join(" · ");
 }
 
 /** 搜索：标题、编号、所有输入、任务标题；命中内容时给一段上下文 */

@@ -4,7 +4,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness, type Conversation } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, type Conversation, type Cursor } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Board, boardTasks, type BoardState } from "./board.ts";
 
@@ -15,6 +15,9 @@ export type ConversationDigest = {
 	last?: string;
 	/** 最后一条记录的时间 */
 	lastAt?: number;
+	firstAt?: number;
+	/** 原始记录中的用户、助手和工具结果消息数，包含已重置的历史。 */
+	messageCount: number;
 	/** 用户输入了几次 */
 	inputs: number;
 	tasks: { done: number; total: number };
@@ -24,8 +27,45 @@ export type ConversationDigest = {
 	text: string;
 };
 
-const EMPTY: ConversationDigest = { inputs: 0, tasks: { done: 0, total: 0 }, pending: 0, text: "" };
+const EMPTY: ConversationDigest = { inputs: 0, messageCount: 0, tasks: { done: 0, total: 0 }, pending: 0, text: "" };
 const cache = new Map<string, { stamp: string; digest: ConversationDigest }>();
+export type TranscriptSummary = Pick<ConversationDigest, "first" | "last" | "firstAt" | "lastAt" | "inputs" | "messageCount" | "text">;
+const transcriptCache = new WeakMap<Harness, Map<string, { tail: string; value: TranscriptSummary }>>();
+
+/** Read the complete fork-aware transcript only when its durable tail changes. No model calls. */
+export async function transcriptSummary(harness: Harness, conversation: Conversation): Promise<TranscriptSummary> {
+	const latest = await conversation.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT);
+	const tail = String(latest.items[0]?.id ?? "empty");
+	let summaries = transcriptCache.get(harness);
+	if (!summaries) { summaries = new Map(); transcriptCache.set(harness, summaries); }
+	const hit = summaries.get(String(conversation.id));
+	if (hit?.tail === tail) return hit.value;
+	const value: TranscriptSummary = { inputs: 0, messageCount: 0, text: "" };
+	let cursor: Cursor | undefined;
+	do {
+		const page = await conversation.entries({ order: "ascending" }, 500, cursor, BACKGROUND_CONTEXT);
+		for (const entry of page.items) for (const message of entry.model ?? []) {
+			if (!["user", "assistant", "toolResult"].includes(message.role)) continue;
+			value.messageCount++;
+			if (Number.isFinite(message.timestamp) && message.timestamp > 0) {
+				value.firstAt = Math.min(value.firstAt ?? message.timestamp, message.timestamp);
+				value.lastAt = Math.max(value.lastAt ?? message.timestamp, message.timestamp);
+			}
+			if (entry.kind !== "pi.user" || message.role !== "user") continue;
+			const text = textOf(message.content).trim();
+			if (!text) continue;
+			value.inputs++;
+			value.first ??= oneLine(text, 140); value.last = oneLine(text, 140);
+			value.text = `${value.text} ${oneLine(text, 600)}`.slice(-6000);
+		}
+		cursor = page.next;
+	} while (cursor);
+	value.text = `${value.first ?? ""} ${value.text.trim()}`.slice(-6200);
+	// A concurrent append during pagination must invalidate rather than cache a mixed revision.
+	const after = await conversation.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT);
+	if (String(after.items[0]?.id ?? "empty") === tail) summaries.set(String(conversation.id), { tail, value });
+	return value;
+}
 
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
@@ -55,32 +95,12 @@ function pendingChanges(storage: string): number {
 /** 从一个 Harness 读：用户输入（第一句、最近一句、次数）、最后活动、分工表进度 */
 async function readDigest(harness: Harness, root: Conversation): Promise<Omit<ConversationDigest, "pending">> {
 	const ctx = BACKGROUND_CONTEXT;
-	let first: string | undefined;
-	let last: string | undefined;
-	let inputs = 0;
-	let text = "";
-	let lastAt: number | undefined;
-	let cursor: any;
-	do {
-		const page = await root.entries({ order: "ascending" } as any, 500, cursor, ctx);
-		for (const e of page.items) {
-			const m = e.model?.[0] as any;
-			if (typeof m?.timestamp === "number") lastAt = Math.max(lastAt ?? 0, m.timestamp);
-			if (e.kind !== "pi.user") continue;
-			const t = textOf(m?.content).trim();
-			if (!t) continue;
-			inputs++;
-			if (text.length < 6000) text += ` ${oneLine(t, 600)}`;
-			first ??= oneLine(t, 140);
-			last = oneLine(t, 140);
-		}
-		cursor = page.next;
-	} while (cursor);
+	const summary = await transcriptSummary(harness, root);
 	const tasks = boardTasks((await harness.snapshot(Board, ctx)) as BoardState | undefined).filter((t) => t.status !== "dropped");
 	// 分工表里的任务标题也能搜到
 	const allTasks = boardTasks((await harness.snapshot(Board, ctx)) as BoardState | undefined);
-	text += ` ${allTasks.map((t) => t.title).join(" ")}`.slice(0, 2000);
-	return { first, last, lastAt, inputs, text: text.trim().slice(0, 8000), tasks: { done: tasks.filter((t) => t.status === "done").length, total: tasks.length } };
+	const text = summary.text + ` ${allTasks.map((t) => t.title).join(" ")}`.slice(0, 2000);
+	return { ...summary, text: text.trim().slice(0, 8000), tasks: { done: tasks.filter((t) => t.status === "done").length, total: tasks.length } };
 }
 
 /** 打开着的对话：直接读 */
@@ -97,7 +117,8 @@ export async function storedDigest(id: string, storage: string): Promise<Convers
 	if (!existsSync(storage)) return { ...EMPTY, pending: pendingChanges(storage) };
 	const files = [storage, `${storage}-wal`, `${storage}.changes.json`].filter(existsSync);
 	const stamp = files.map((f) => statSync(f).mtimeMs).join("|");
-	const hit = cache.get(id);
+	const key = `${id}:${storage}`;
+	const hit = cache.get(key);
 	if (hit && hit.stamp === stamp) return hit.digest;
 	let digest: ConversationDigest = { ...EMPTY, pending: pendingChanges(storage) };
 	let harness: Harness | undefined;
@@ -112,6 +133,6 @@ export async function storedDigest(id: string, storage: string): Promise<Convers
 	} finally {
 		await harness?.close(BACKGROUND_CONTEXT).catch(() => {});
 	}
-	cache.set(id, { stamp, digest });
+	cache.set(key, { stamp, digest });
 	return digest;
 }

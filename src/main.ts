@@ -39,7 +39,7 @@ const sessionCatalog = new SessionCatalog(demo ? demoConfig(baseConfig) : baseCo
 let sessionId = argv.find((a) => a.startsWith("--session="))?.slice(10) ?? sessionCatalog.selected();
 if (sessionId !== "default" && !sessionCatalog.list().some((s) => s.id === sessionId)) sessionCatalog.create(sessionId);
 let config = sessionCatalog.config(sessionId);
-let orchestrator = demo ? demoOrchestrator() : createOrchestratorModel(config.orchestrator);
+let orchestrator = demo ? demoOrchestrator() : createOrchestratorModel(config.orchestrator, `${config.storage}.models.json`);
 let app = await openApp(config, orchestrator, context).catch((error: Error) => {
 	console.error(`启动失败：${error.message}`);
 	process.exit(1);
@@ -149,7 +149,7 @@ async function sessionCommand(line: string) {
 		let runtime = sessions.get(id);
 		if (!runtime) {
 			const nextConfig = sessionCatalog.config(id);
-			const nextModel = demo ? demoOrchestrator() : createOrchestratorModel(nextConfig.orchestrator);
+			const nextModel = demo ? demoOrchestrator() : createOrchestratorModel(nextConfig.orchestrator, `${nextConfig.storage}.models.json`);
 			const nextApp = await openApp(nextConfig, nextModel, context);
 			if (demo) installDemoMember(nextModel.models);
 			runtime = { app: nextApp, config: nextConfig, orchestrator: nextModel };
@@ -661,10 +661,15 @@ async function showTerminalConversations(tree = false) {
 	const activeId = sessionId;
 	const generation = terminalGeneration;
 	const native = await listNativeConversations(harness, root, context);
+	const sessionSummaries = await conversationList();
+	const summaryById = new Map(sessionSummaries.map((item) => [item.id, item.digest]));
 	if (closing || switchingSession || activeId !== sessionId || generation !== terminalGeneration) return;
 	const items = [
 		...sessionCatalog.list().map((info) => ({
-			id: `session:${info.id}`, title: info.title, createdAt: info.createdAt, workdir: info.workdir,
+			id: `session:${info.id}`, title: info.title, createdAt: summaryById.get(info.id)?.firstAt ?? info.createdAt, workdir: info.workdir,
+			lastAt: summaryById.get(info.id)?.lastAt,
+			messageCount: summaryById.get(info.id)?.messageCount,
+			searchText: summaryById.get(info.id)?.text,
 			detail: `${info.id} · ${sessions.has(info.id) ? "已打开" : "历史已保存"} · ${info.workdir}`,
 			current: info.id === sessionId && (!terminalConversation || String(terminalConversation.id) === String(root.id)),
 		})),
@@ -702,11 +707,11 @@ async function modelCommand(id = "") {
 		log("/model <模型ID> 切换；中转站可在 orchestrator.modelIds 配置更多模型。");
 		return;
 	}
-	const catalog = await nativeModelCatalog(models, provider);
+	const catalog = await nativeModelCatalog(models, provider, config.orchestrator.discoverModels === true);
 	if (!current()) return;
 	const available = catalog.getAvailableSnapshot();
 	if (!available.length) throw new Error("当前总控 provider 没有可用模型，请检查配置和密钥。");
-	terminalUI.showModels(catalog, agent.model ? models.getModel(agent.model.provider, agent.model.modelId) : undefined, available, (selected) => {
+	terminalUI.showModels(catalog, agent.model ? models.getModel(agent.model.provider, agent.model.modelId) : undefined, config.orchestrator.discoverModels ? [] : available, (selected) => {
 		terminalCommands = terminalCommands.then(() => apply(selected)).catch((error) => { if (current()) log(c.red(error instanceof Error ? error.message : String(error))); });
 	});
 }

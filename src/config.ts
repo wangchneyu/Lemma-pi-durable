@@ -78,6 +78,8 @@ export interface OrchestratorConfig {
 	modelId: string;
 	/** 可供总控原生选择器切换的额外模型 ID；使用同一 provider、地址和凭据。 */
 	modelIds?: string[];
+	/** 打开总控选择器时读取当前服务的 /models 目录，不发送聊天请求。 */
+	discoverModels?: boolean;
 	baseUrl?: string;
 	/** 读取密钥的环境变量名，按顺序尝试 */
 	apiKeyEnv?: string[];
@@ -289,6 +291,7 @@ export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 	};
 	config.workdir = isAbsolute(config.workdir) ? config.workdir : resolve(base, config.workdir);
 	if (config.orchestrator.modelIds !== undefined && (!Array.isArray(config.orchestrator.modelIds) || config.orchestrator.modelIds.some((id) => typeof id !== "string" || !id.trim() || id.length > 200))) throw new Error("orchestrator.modelIds 需要是非空模型 ID 的数组。");
+	if (config.orchestrator.discoverModels !== undefined && typeof config.orchestrator.discoverModels !== "boolean") throw new Error("orchestrator.discoverModels 需要为布尔值。");
 	config.storage = isAbsolute(config.storage) ? config.storage : resolve(base, config.storage);
 	if (!Number.isInteger(config.autonomy.maxRepairAttempts) || config.autonomy.maxRepairAttempts < 0 || config.autonomy.maxRepairAttempts > 3) throw new Error("autonomy.maxRepairAttempts 需要是 0–3 的整数。");
 	if (!Number.isInteger(config.autonomy.resultMaxChars) || config.autonomy.resultMaxChars < 500 || config.autonomy.resultMaxChars > 20_000) throw new Error("autonomy.resultMaxChars 需要是 500–20000 的整数。");

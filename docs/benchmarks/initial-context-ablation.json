@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "revision": "c355ed0776b0c2d879c2f1ea952fe8c40ff4a982",
+  "startedAt": "2026-11-22T09:38:24.763Z",
+  "mode": "provider-measured",
+  "model": {
+    "provider": "orchestrator",
+    "modelId": "claude-sonnet-5-5"
+  },
+  "repeats": 1,
+  "limit": 4000,
+  "outputTokenCap": 128,
+  "requestRetry": false,
+  "maxToolRounds": 2,
+  "fixture": "fixed-member-report-v1",
+  "scope": "Production clipping-policy ablation only; excludes member generation, CLI startup, coding, and repair. Not total multi-agent savings.",
+  "pricingConfigured": false,
+  "summary": {
+    "arms": [
+      {
+        "arm": "full",
+        "runs": 2,
+        "successes": 1,
+        "successRate": 0.5,
+        "totalTokens": 8015,
+        "costUsd": null,
+        "meanDurationMs": 4338
+      },
+      {
+        "arm": "bounded",
+        "runs": 2,
+        "successes": 1,
+        "successRate": 0.5,
+        "totalTokens": 4463,
+        "costUsd": null,
+        "meanDurationMs": 6004
+      }
+    ],
+    "tokenReduction": 0.44316905801621964,
+    "successRateDelta": 0,
+    "note": "Includes failures. Only tests the shared result-clipping policy on fixed reports; not end-to-end coding performance or total multi-agent savings."
+  },
+  "runs": [
+    {
+      "task": "result-at-edges",
+      "repeat": 0,
+      "arm": "full",
+      "success": false,
+      "settled": "done",
+      "durationMs": 4225,
+      "requests": 2,
+      "reportCharacters": 10767,
+      "deliveredCharacters": 10767,
+      "usage": {
+        "input": 4309,
+        "output": 52,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 4361
+      },
+      "costUsd": null,
+      "costSource": "unavailable"
+    },
+    {
+      "task": "result-at-edges",
+      "repeat": 0,
+      "arm": "bounded",
+      "success": true,
+      "settled": "done",
+      "durationMs": 8361,
+      "requests": 2,
+      "reportCharacters": 10767,
+      "deliveredCharacters": 4022,
+      "usage": {
+        "input": 2206,
+        "output": 42,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 2248
+      },
+      "costUsd": null,
+      "costSource": "unavailable"
+    },
+    {
+      "task": "important-middle",
+      "repeat": 0,
+      "arm": "full",
+      "success": true,
+      "settled": "done",
+      "durationMs": 4451,
+      "requests": 2,
+      "reportCharacters": 8643,
+      "deliveredCharacters": 8643,
+      "usage": {
+        "input": 3611,
+        "output": 43,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 3654
+      },
+      "costUsd": null,
+      "costSource": "unavailable"
+    },
+    {
+      "task": "important-middle",
+      "repeat": 0,
+      "arm": "bounded",
+      "success": false,
+      "settled": "done",
+      "durationMs": 3647,
+      "requests": 2,
+      "reportCharacters": 8643,
+      "deliveredCharacters": 4021,
+      "usage": {
+        "input": 2183,
+        "output": 32,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 2215
+      },
+      "costUsd": null,
+      "costSource": "unavailable"
+    }
+  ],
+  "provenanceNote": "Initial run against an uncommitted evaluator derived from revision c355ed0. Legacy schema predates per-answer diagnostics and evaluator hashes. No rerun or sample selection was applied."
+}

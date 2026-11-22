@@ -38,14 +38,14 @@ export type NativeModelCatalog = Pick<ModelRuntime, "getAvailableSnapshot" | "ge
 
 /** Adapter for the four public catalog methods consumed by the pinned upstream selector.
  * It delegates to the same pi-ai Models that Harness uses. No credentials, execution or second runtime. */
-export async function nativeModelCatalog(models: Models, provider: string): Promise<NativeModelCatalog> {
+export async function nativeModelCatalog(models: Models, provider: string, allowNetwork = false): Promise<NativeModelCatalog> {
 	let snapshot = await models.getAvailable(provider);
 	return {
 		getAvailableSnapshot: () => snapshot,
 		getModel: (owner, id) => owner === provider ? models.getModel(owner, id) : undefined,
 		getError: () => undefined,
 		async refresh(options) {
-			const result = await models.refresh({ ...options, allowNetwork: false, providers: [provider] });
+			const result = await models.refresh({ ...options, allowNetwork, providers: [provider] });
 			if (!result.aborted) snapshot = await models.getAvailable(provider, { signal: options?.signal });
 			return result;
 		},

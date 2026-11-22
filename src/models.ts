@@ -4,6 +4,9 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { claudeSettingsEnv, type OrchestratorConfig } from "./config.ts";
+import { createHash } from "node:crypto";
+import { readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { dirname } from "node:path";
 
 export interface OrchestratorModel {
 	models: MutableModels;
@@ -30,7 +33,7 @@ function keySource(config: OrchestratorConfig): string {
 	return "未找到密钥";
 }
 
-export function createOrchestratorModel(config: OrchestratorConfig): OrchestratorModel {
+export function createOrchestratorModel(config: OrchestratorConfig, catalogPath?: string): OrchestratorModel {
 	if (config.type === "builtin") {
 		if (!config.provider) throw new Error("orchestrator.type=builtin 时必须填写 orchestrator.provider（例如 anthropic、openai、google）");
 		const models = builtinModels();
@@ -48,6 +51,12 @@ export function createOrchestratorModel(config: OrchestratorConfig): Orchestrato
 		config.baseUrl ??
 		(config.type === "anthropic-compatible" ? (claudeSettingsEnv().baseUrl ?? "https://api.anthropic.com") : undefined);
 	if (!baseUrl) throw new Error("orchestrator.type=openai-compatible 时必须填写 orchestrator.baseUrl");
+	const source = createHash("sha256").update(`${config.type}:${baseUrl}`).digest("hex");
+	let cached: string[] = [];
+	if (config.discoverModels && catalogPath) try {
+		const data = JSON.parse(readFileSync(catalogPath, "utf8"));
+		if (data.source === source && Array.isArray(data.ids)) cached = data.ids.filter((id: unknown): id is string => typeof id === "string" && !!id.trim() && id.length <= 200).slice(0, 1000);
+	} catch { /* 初次发现或缓存损坏时使用显式配置。 */ }
 
 	const model: Model<typeof api> = {
 		id: config.modelId,
@@ -80,7 +89,28 @@ export function createOrchestratorModel(config: OrchestratorConfig): Orchestrato
 				},
 			},
 		},
-		models: [...new Set([config.modelId, ...(config.modelIds ?? [])])].map((id) => ({ ...model, id, name: id })),
+		models: [...new Set([config.modelId, ...(config.modelIds ?? []), ...cached])].map((id) => ({ ...model, id, name: id })),
+		fetchModels: config.discoverModels ? async (context) => {
+			const key = resolveKey(config);
+			const endpoint = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+			const prefix = endpoint.pathname.endsWith("/") ? endpoint.pathname.slice(0, -1) : endpoint.pathname;
+			endpoint.pathname = `${prefix}${prefix.endsWith("/v1") ? "" : "/v1"}/models`;
+			const response = await fetch(endpoint, { redirect: "error", signal: AbortSignal.any([context.signal, AbortSignal.timeout(8000)]),
+				headers: config.type === "anthropic-compatible" ? { "x-api-key": key ?? "", "anthropic-version": "2023-06-01" } : { Authorization: `Bearer ${key ?? ""}` },
+			});
+			if (!response.ok) throw new Error(`模型目录返回 HTTP ${response.status}；继续使用已配置模型。`);
+			const body = await response.json() as { data?: { id?: unknown; display_name?: unknown }[] };
+			if (!Array.isArray(body.data)) throw new Error("服务未返回标准模型目录；继续使用已配置模型。");
+			const discovered = body.data.filter((item) => item && typeof item.id === "string" && item.id.trim() && item.id.length <= 200).slice(0, 1000);
+			if (catalogPath) {
+				mkdirSync(dirname(catalogPath), { recursive: true });
+				writeFileSync(`${catalogPath}.tmp`, JSON.stringify({ source, checkedAt: Date.now(), ids: discovered.map((item) => item.id) }, null, 2));
+				renameSync(`${catalogPath}.tmp`, catalogPath);
+			}
+			return discovered.map((item) => ({
+				...model, id: item.id as string, name: typeof item.display_name === "string" ? item.display_name : item.id as string,
+			}));
+		} : undefined,
 		api: config.type === "anthropic-compatible" ? anthropicMessagesApi() : openAICompletionsApi(),
 	});
 	const models = createModels();

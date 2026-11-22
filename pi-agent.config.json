@@ -2,6 +2,7 @@
 	"orchestrator": {
 		"type": "anthropic-compatible",
 		"modelId": "claude-sonnet-5-5",
+		"discoverModels": true,
 		"apiKeyEnv": ["PI_ORCHESTRATOR_API_KEY"],
 		"apiKeyFromClaudeSettings": true,
 		"maxTurns": 40

@@ -79,6 +79,8 @@ try {
 	const oldChanges = await get("/api/changes");
 	const oldDispatches = await get("/api/dispatches");
 	assert.ok(oldHistory.items.some((item: any) => item.text === "旧对话独有的导出功能"));
+	const oldDigest = (await get("/api/conversations")).conversations.find((c: any) => c.id === "default").digest;
+	assert.ok(oldDigest.messageCount > 1 && oldDigest.inputs > 0 && oldDigest.lastAt >= oldDigest.firstAt);
 	assert.ok(oldState.project.tasks.length > 0 && oldState.usage.length > 0 && oldChanges.changes.length > 0);
 	const created = await raw("/api/conversations", { title: "接口排查 新对话", expectedSession: "default" });
 	assert.equal(created.status, 202, JSON.stringify(created.data));
@@ -111,6 +113,7 @@ try {
 	await stop(); launch();
 	await until("重启恢复选中对话", async () => (await get("/api/state")).conversation.id === id);
 	const persisted = await get("/api/conversations");
+	assert.equal(persisted.conversations.find((c: any) => c.id === "default").digest.messageCount, oldDigest.messageCount);
 	assert.equal(persisted.conversations.find((c: any) => c.id === "default").title, "原始开发对话");
 	assert.equal(persisted.conversations.find((c: any) => c.id === id).title, "保留的接口排查");
 	await choose("default", id);

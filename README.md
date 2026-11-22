@@ -151,6 +151,7 @@ npm run demo:tui
 
 - 顶部显示项目、模型和当前对话，中间用官方 coding-agent 组件显示用户输入、助手回答、流式内容和执行结果，底部固定显示多行输入区、运行状态、后台派工、本轮成员花费和待合并数量。业务工具默认预览前十行，Ctrl+E 展开完整输出；内置文件工具按官方规则折叠。Alt+T 展开或收起原生思考块。
 - Ctrl+K 打开可搜索的会话选择器：既可切换独立工作会话，也可只读查看当前会话内的子调度和 API 成员子对话。查看子对话不会触发模型、转发历史或把输入发给成员；输入 `/main` 返回总控。外部 CLI 的私有完整聊天仍由各 CLI 管理。
+- 会话列表的消息数和活动时间来自持久化记录，包含 reset 前的用户、助手和工具结果；首次扫描按页读取，后续按记录尾部 ID 缓存，追加后失效。搜索保留首条和最近输入摘要；网页与终端共用统计，读取不会触发模型。
 - Alt+C 或 `/tree` 打开官方树选择器，展示「工作会话 → 总控 → 子调度 / API 成员」的 Durable 所属关系，支持搜索和分支折叠；选择节点只切换视图，不回滚消息或改写执行分支。这里只展示当前存储的子对话，其他工作会话先切换再读取；它不是消息级时间旅行。
 - Ctrl+L 或 `/model` 打开官方模型选择器；`/model <模型ID>` 也可直接切换当前总控。选中模型保存在本会话的 Durable agent 文档，重启继续使用；运行中和只读子对话拒绝切换。其他会话和已经派出的成员保持原模型，网页与终端显示从 Durable 读取的当前选择。
 - Ctrl+T 或 `/taskgraph` 切换原生任务面板，直接订阅 Pi Durable `watchTaskGraph()`，显示排队、运行、等待、休眠、收尾状态以及任务父子关系。`/tasks` 继续显示项目分工表。
@@ -345,6 +346,8 @@ npm run demo
 
 `orchestrator.modelId` 是启动默认模型；中转站可用 `orchestrator.modelIds` 显式列出更多可切换 ID，同用配置的地址、协议、凭据、上下文上限和单价。请只填写服务实际支持的模型，并确认这些参数适用。内置 provider 使用它自己的模型目录与参数。选择器限当前总控 provider，不混入成员模型，不会发出聊天请求。
 
+项目配置启用了 `orchestrator.discoverModels: true`：打开 Ctrl+L 时通过 pi-ai 的目录刷新钩子读取当前服务 `GET /v1/models`（已有 `/v1` 前缀不会重复）。仅接受服务返回的 ID，8 秒超时，失败继续显示显式配置或上次缓存。目录 ID 保存在当前存储旁的 `.models.json`，无密钥；重启可恢复已发现模型的选择。设为 `false` 可关闭网络发现。服务返回目录不等于每个模型都有调用额度或支持当前协议；发现模型暂沿用中转站的上下文、输出上限及定价配置，不能把模板参数当作服务核实的规格。
+
 会话内切换模型不修改项目配置文件。启动默认模型不变时恢复会话选择；显式修改 `orchestrator.modelId` 或 provider 后按新配置更新。旧会话和任务无需迁移。
 
 **成员**（`agents.<claude|codex|gemini>`）：
@@ -391,6 +394,19 @@ npm run demo
 
 `stripEnv`：启动子 CLI 前去掉的环境变量。默认去掉 `CLAUDECODE`、`CLAUDE_CODE_*`、`ANTHROPIC_*`，让各 CLI 使用自己的配置文件，而不是宿主进程注入的变量。
 
+## Token 与效果对照评测
+
+```bash
+npm run bench:context                         # 本地模拟，只检验流程与裁剪风险
+npm run bench:context -- --real --repeats=1    # 当前总控 API，最多 8 次短请求，可能计费
+```
+
+评测固定同一成员报告、同一问题和精确验收答案，在独立 Durable 内存会话里比较完整报告与生产使用的 `summarizeResult` 裁剪策略。包含关键信息在首尾及中段的两类样本；多次重复交替策略顺序。输出 `data/benchmarks/<时间>-<模式>/results.json` 与 `report.md`，记录每次服务 usage（input/output/cacheRead/cacheWrite/totalTokens）、请求数、通过/失败、耗时、定价来源和代码版本。模型输出上限 128 tokens、最多两轮工具调用、关闭自动重试，整次限时四分钟；不启动成员 CLI，不修改工作区文件。
+
+本地模拟的 token 与费用标记为未测量。真实运行只使用服务返回的 usage，无单价且服务未报告账单时费用留空，不按免费计算；缺少任一组样本不计算节省比例。失败样本计入通过率，不只挑成功结果。此项只测成员结果裁剪对总控后续请求的影响，**不能代表端到端编码成功率、成员续接收益或多 Agent 总成本**，也不能把一次小样本结果当成稳定收益。中段信息可能被截断，评测刻意保留此反例。
+
+仓库保留了[首次真实测量记录](docs/benchmarks/initial-context-ablation.md)：固定报告小样本中裁剪组 token 少约 44%，但没有更高通过率，也没有更快；不能据此宣称整体性能提高。
+
 ## 测试
 
 ```bash
@@ -414,6 +430,7 @@ npm test
 - `test/admin-rebind.ts`：HTTP 服务原位切换会话，同一连接、端口和启动时间保持；验证实时连接重取快照、过期控制请求拒绝、失败回滚及订阅释放
 - `test/terminal.ts`：检查实际使用官方消息、工具、编辑器和选择器实例，验证关系树导航、模型搜索、刷新取消、思考块、流式参数、工具展开、控制序列过滤、窄窗口和输入隔离
 - `test/model-selection.ts`：模型选择写入 Durable，重启恢复、独立会话隔离、后续真实请求路由（假模型）、运行中拒绝切换、配置变更及目录刷新不发出聊天请求
+- `npm run test:metrics`：跨页消息统计与缓存失效、原生列表显示、服务模型目录发现/重启缓存/失败降级、固定报告 A/B 评测和未测量标记
 - `test/terminal-model-selection.ts`：真实终端入口使用原生模型选择器，验证网页与拓扑同步、草稿保留、跨工作会话模型隔离及进程重启恢复，不调用模型服务
 - `test/terminal-state.ts`：原生消息和任务图订阅、完整模型消息、生成文档、嵌套工具、滑动历史窗口、重置后记录保留、最新子对话列表及停止后不再更新，不产生模型请求
 - `test/terminal-child-view.ts`：通过真实终端选择器只读查看成员子对话，验证输入和重置不会修改子对话、返回后恢复草稿，终端与网页服务不重启
@@ -440,6 +457,9 @@ npm test
 | `src/native-terminal-components.ts` | 官方 coding-agent 消息与工具组件、原生工具展示钩子与终端控制序列过滤 |
 | `src/native-selectors.ts` | 官方会话列表与关系树的纯展示适配，沿用 Durable ID，禁用文件删除 |
 | `src/model-selection.ts` | Durable agent 模型选择、启动恢复和原生模型目录接口适配 |
+| `src/context-benchmark.ts` | 完整与裁剪报告的 Durable A/B 测量、usage 汇总与失败计数 |
+| `src/result-summary.ts` | 生产派工和对照评测共用的结果裁剪策略 |
+| `scripts/benchmark-context.ts` | 本地/真实评测入口，输出 JSON 和 Markdown 结果 |
 | `src/terminal.ts` | 组合官方消息与工具组件，提供会话选择器、任务面板和持久编辑器 |
 | `src/terminal-state.ts` | 原生 conversation/task graph 订阅、ConversationTranscript、完整模型消息与只读子对话列表 |
 | `src/models.ts` | 总调度模型 |

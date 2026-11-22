@@ -14,6 +14,7 @@ import type { AgentKind, AppConfig, ModelOption } from "./config.ts";
 import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
 import { addWorktree, commitAll, git, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
 import { Learning, relevantLessons } from "./learning.ts";
+import { summarizeResult } from "./result-summary.ts";
 import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
 
 /** 子调度的提交前缀（和 lead.ts 一致；放在这里避免循环引用） */
@@ -511,7 +512,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	}
 	let body = parsed.text.trim() || "（没有文字输出）";
 	const outputLimit = config.autonomy.enabled ? Math.min(agent.maxOutputChars, config.autonomy.resultMaxChars) : agent.maxOutputChars;
-	if (body.length > outputLimit) body = `${body.slice(0, Math.floor(outputLimit * 0.6))}\n…（中间已省略，原文 ${parsed.text.length} 字符）\n${body.slice(-Math.floor(outputLimit * 0.4))}`;
+	body = summarizeResult(body, outputLimit);
 	const changeLine = finished
 		? finished.files.length
 			? `\n\n[改动 #${finished.id}：${finished.files.length} 个文件 +${finished.add} −${finished.del}，在分支 ${finished.branch}，还没有合并到主目录，等用户在终端确认（/apply ${finished.id}）]`

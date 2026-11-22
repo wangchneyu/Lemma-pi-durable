@@ -5,14 +5,14 @@ import { cleanText, safeNativeComponent } from "./native-terminal-components.ts"
 
 export interface ConversationChoice {
 	id: string; title: string; detail?: string; current?: boolean;
-	parentId?: string; createdAt?: number; workdir?: string;
+	parentId?: string; createdAt?: number; lastAt?: number; messageCount?: number; workdir?: string; searchText?: string;
 }
 
 export function nativeSessions(items: ConversationChoice[], select: (id: string) => void, cancel: () => void, render: () => void): SessionSelectorComponent {
 	const project = (): SessionInfo[] => items.map((item) => ({
 		path: item.id, id: item.id, cwd: cleanText(item.workdir ?? ""), name: cleanText(item.title),
-		created: new Date(item.createdAt ?? 0), modified: new Date(item.createdAt ?? 0), messageCount: 0,
-		firstMessage: cleanText(`${item.id} ${item.detail ?? ""}`), allMessagesText: cleanText(`${item.id} ${item.detail ?? ""}`),
+		created: new Date(item.createdAt ?? item.lastAt ?? 0), modified: new Date(item.lastAt ?? item.createdAt ?? 0), messageCount: item.messageCount ?? 0,
+		firstMessage: cleanText(`${item.id} ${item.detail ?? ""}`), allMessagesText: cleanText(`${item.id} ${item.detail ?? ""} ${item.searchText ?? ""}`),
 		parentSessionPath: item.parentId,
 	}));
 	// Upstream only needs matches() here; use the application's existing key map.

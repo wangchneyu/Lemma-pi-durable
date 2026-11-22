@@ -24,7 +24,8 @@ export class SessionCatalog {
 		if (id === "default") {
 			let title = "默认会话";
 			try { title = (JSON.parse(readFileSync(join(this.directory, "default.json"), "utf8")) as { title: string }).title || title; } catch {}
-			return { id, title, workdir: this.base.workdir, storage: this.base.storage, createdAt: 0 };
+			const createdAt = existsSync(this.base.storage) ? statSync(this.base.storage).birthtimeMs : 0;
+			return { id, title, workdir: this.base.workdir, storage: this.base.storage, createdAt };
 		}
 		const file = join(this.directory, id, "session.json");
 		if (!existsSync(file)) throw new Error(`没有会话 ${id}；用 /session new ${id} 新建。`);
