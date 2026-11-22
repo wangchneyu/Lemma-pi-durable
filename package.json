@@ -10,8 +10,8 @@
     "check": "node --no-warnings scripts/check-agents.ts",
     "typecheck": "tsc -p .",
     "test:harness": "node --no-warnings test/sessions.ts && node --no-warnings test/repair.ts && node --no-warnings test/sessions-cli.ts",
-    "test:conversations": "node --no-warnings test/conversations-web.ts",
-    "test:terminal": "node --no-warnings test/terminal.ts && node --no-warnings test/terminal-cli.ts",
+    "test:conversations": "node --no-warnings test/conversations-web.ts && node --no-warnings test/admin-rebind.ts",
+    "test:terminal": "node --no-warnings test/terminal.ts && node --no-warnings test/terminal-state.ts && node --no-warnings test/terminal-cli.ts && node --no-warnings test/terminal-child-view.ts",
     "test": "node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/steer.ts && node --no-warnings test/board.ts && node --no-warnings test/jobs.ts && node --no-warnings test/api-member.ts && node --no-warnings test/lead.ts && node --no-warnings test/conventions.ts && node --no-warnings test/web.ts && npm run test:terminal && npm run test:harness && npm run test:conversations"
   },
   "keywords": [],

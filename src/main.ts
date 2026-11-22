@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { LiveDoc } from "@earendil-works/pi-durable";
+import { LiveDoc, type Conversation } from "@earendil-works/pi-durable";
 import { startAdmin, type AdminServer } from "./admin.ts";
 import { Board, boardTasks, STATUS_LABEL, type BoardState } from "./board.ts";
 import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-ops.ts";
@@ -23,7 +23,7 @@ import { colors as c, follow, setOutputSink, writeLine as log } from "./printer.
 import { AgentSessions, RunBudget } from "./dispatch.ts";
 import { Learning } from "./learning.ts";
 import { AgentTerminal } from "./terminal.ts";
-import { toViewLive } from "./view.ts";
+import { listNativeConversations, watchTerminalState } from "./terminal-state.ts";
 import { SessionCatalog } from "./sessions.ts";
 import { liveDigest, storedDigest } from "./digest.ts";
 
@@ -51,10 +51,15 @@ const drafts = new Map<string, string>();
 if (demo) installDemoMember(orchestrator.models);
 let stopFollowing = async () => {};
 let terminalUI: AgentTerminal | undefined;
+let terminalConversation: Conversation | undefined;
+let terminalGeneration = 0;
+let terminalCommands = Promise.resolve();
+let activeTerminalCommands = 0;
 let stopTerminalStatus = () => {};
+const terminalDraftKey = () => `${sessionId}:${terminalConversation?.id ?? root.id}`;
 // 后台派工的实时输出：带上编号打印，提示符跟着重画
 function attachJobOutput(id: string, target: typeof app) { target.jobs.on("output", (job: string, line: string) => {
-	if (id !== sessionId || closing) return;
+	if (id !== sessionId || closing || terminalUI) return;
 	// 先擦掉当前的提示符行再打印；终端空闲时再把提示符（和已经输入的内容）画回来
 	clearPromptLine();
 	log(c.dim(`  [${id === sessionId ? job : `${id}/${job}`}] ${line}`));
@@ -92,27 +97,29 @@ async function conversationList() {
 async function startWeb() {
 	if (!config.web.enabled || flags.has("--no-web")) return;
 	const port = webPort ?? Number(process.env.PI_AGENT_PORT ?? (demo ? config.web.port + 1 : config.web.port));
-	admin = await startAdmin({
+	const options = {
 		app, config, configPath, orchestrator, demo, port, context,
 		session: { id: sessionId, title: sessionCatalog.get(sessionId).title, controllerId: String(root.id) },
 		conversations: {
 			list: conversationList,
-			busy: () => switchingSession || closing,
-			async create(title) {
+			busy: () => switchingSession || closing || activeTerminalCommands > 0,
+			async create(title: string) {
 				const label = title.trim() || `新对话 ${new Date().toLocaleString("zh-CN")}`;
 				if (label.length > 120) throw new Error("对话标题不能超过 120 个字符");
 				const info = sessionCatalog.create(`c-${randomUUID().slice(0, 12)}`, config.workdir);
 				sessionCatalog.rename(info.id, label);
 				return { id: info.id };
 			},
-			select: (id) => sessionCommand(`/session use ${id}`),
-			async rename(id, title) {
+			select: (id: string) => sessionCommand(`/session use ${id}`),
+			async rename(id: string, title: string) {
 				sessionCatalog.rename(id, title);
 				if (id === sessionId && admin) log(`网页已重命名当前对话：${title}`);
 			},
 		},
-		notify: (line) => { clearPromptLine(); log(c.yellow(`\n[${line}]`)); rl?.prompt(true); },
-	}).catch((error: Error) => { log(c.red(`后台网页没能启动：${error.message}（终端照常可用）`)); return undefined; });
+		notify: (line: string) => { clearPromptLine(); log(c.yellow(`\n[${line}]`)); rl?.prompt(true); },
+	};
+	if (admin) await admin.rebind(options);
+	else admin = await startAdmin(options).catch((error: Error) => { log(c.red(`后台网页没能启动：${error.message}（终端照常可用）`)); return undefined; });
 	if (admin) webPort = Number(new URL(admin.url).port);
 }
 
@@ -132,6 +139,7 @@ async function sessionCommand(line: string) {
 	}
 	if (action === "rename") { sessionCatalog.rename(id, rest.join(" ")); log(`已重命名 ${id}。`); return; }
 	if (action !== "new" && action !== "use") throw new Error("用法：/sessions 或 /session new|use|rename <编号>");
+	if (activeTerminalCommands) throw new Error("当前控制命令尚未完成，请稍后再切换会话。");
 	if (switchingSession) throw new Error("正在切换会话，请稍后。");
 	switchingSession = true;
 	try {
@@ -148,20 +156,29 @@ async function sessionCommand(line: string) {
 			attachJobOutput(id, nextApp);
 		}
 		const wasTui = !!terminalUI;
-		if (terminalUI) drafts.set(sessionId, terminalUI.editor.getExpandedText());
+		if (terminalUI) drafts.set(terminalDraftKey(), terminalUI.editor.getExpandedText());
+		terminalGeneration++;
 		stopTerminalStatus();
 		await stopFollowing();
-		terminalUI?.stop();
-		terminalUI = undefined;
-		setOutputSink(undefined);
-		await admin?.close();
-		admin = undefined;
+		const previousId = sessionId;
+		const previousRuntime = sessions.get(previousId)!;
+		const previousConversation = terminalConversation;
 		sessionId = id;
-		sessionCatalog.select(id);
+		terminalConversation = undefined;
 		({ app, config, orchestrator } = runtime);
 		({ harness, root, agents } = app);
-		await startWeb();
-		if (closing) { await (admin as AdminServer | undefined)?.close(); return; }
+		try { await startWeb(); sessionCatalog.select(id); }
+		catch (error) {
+			sessionId = previousId;
+			({ app, config, orchestrator } = previousRuntime);
+			({ harness, root, agents } = app);
+			terminalConversation = previousConversation;
+			if (!closing) await startWeb().catch((rollbackError: unknown) => log(c.red(`恢复网页绑定失败：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)));
+			if (wasTui && !closing) await startTui();
+			else if (!closing) stopFollowing = await follow(root, context, { replay: true });
+			throw error;
+		}
+		if (closing) return;
 		if (wasTui) await startTui();
 		else { stopFollowing = await follow(root, context, { replay: true }); printBanner(); }
 		if (closing) return;
@@ -217,7 +234,7 @@ async function ask(text: string, whenBusy: "steer" | "followUp" = "followUp") {
 	const id = sessionId;
 	const submission = await target.submit({ type: "input", content: text, whenBusy }, context);
 	const settled = await submission.wait(context);
-	if (settled.status !== "done") {
+	if (settled.status !== "done" && id === sessionId && (!terminalConversation || String(terminalConversation.id) === String(root.id))) {
 		const { reason, detail } = settled as { reason?: string; detail?: string };
 		log(c.red(`\n[${id}] 本轮没有完成：${reason ?? settled.status}${detail ? ` — ${detail}` : ""}`));
 		if (reason === "model_error" && CONTEXT_BLOCKED.test(detail ?? "")) {
@@ -234,14 +251,15 @@ async function liveState(): Promise<any> {
 
 /** 上一轮出错 / 中断后，不重新输入，直接在原来的上下文里续跑 */
 async function continueRun() {
-	const live = await liveState();
+	const target = root, targetHarness = harness;
+	const live = await targetHarness.snapshot(LiveDoc, target.id, context);
 	if (live?.run) return log(c.dim("总调度正在运行，不需要续跑。"));
 	if (!live?.runFailure) return log(c.dim("上一轮已经正常结束，没有可以续跑的。"));
 	if (live.runFailure.reason === "aborted" || live.runFailure.reason === "reset") {
 		log(c.dim(`上一轮是被${live.runFailure.reason === "aborted" ? "中止" : "重置"}的，仍然尝试续跑。`));
 	}
 	log(c.yellow("续跑上一轮…"));
-	const submission = await root.submit({ type: "continue" }, context);
+	const submission = await target.submit({ type: "continue" }, context);
 	const settled = await submission.wait(context);
 	if (settled.status !== "done") {
 		const { reason, detail } = settled as { reason?: string; detail?: string };
@@ -251,9 +269,10 @@ async function continueRun() {
 
 /** 手动压缩：把较早的对话总结成摘要，总调度之后只看摘要 + 最近的内容（原始记录仍在存储里） */
 async function compactNow(instructions: string | undefined) {
+	const target = root, targetHarness = harness;
 	log(c.yellow("正在压缩上下文…"));
-	const taskId = await root.compact(instructions, context);
-	const outcome = ((await harness.waitForTask(taskId, context)) as any).state?.outcome;
+	const taskId = await target.compact(instructions, context);
+	const outcome = ((await targetHarness.waitForTask(taskId, context)) as any).state?.outcome;
 	if (outcome?.status === "completed") {
 		// entryId：空闲时摘要已直接放入；submissionId：正忙，摘要在这一轮的下一个间隙放入；都没有：对话还短，不需要压缩
 		const r = outcome.result ?? {};
@@ -271,8 +290,8 @@ async function compactNow(instructions: string | undefined) {
 
 const JOB_STATUS: Record<JobRecord["status"], string> = { running: "进行中", done: "完成", failed: "失败", cancelled: "已取消" };
 
-async function jobList(): Promise<JobRecord[]> {
-	const doc = (await harness.snapshot(Jobs, context)) as JobsState | undefined;
+async function jobList(targetHarness = harness): Promise<JobRecord[]> {
+	const doc = (await targetHarness.snapshot(Jobs, context)) as JobsState | undefined;
 	return Object.values(doc?.jobs ?? {}).sort((a, b) => b.startedAt - a.startedAt);
 }
 
@@ -283,13 +302,14 @@ function jobLine(j: JobRecord): string {
 }
 
 async function jobsCommand(arg: string) {
+	const targetApp = app, targetHarness = harness;
 	const [sub, target = ""] = arg.split(/\s+/, 2);
-	const jobs = await jobList();
+	const jobs = await jobList(targetHarness);
 	if (sub === "cancel") {
 		const ids = target === "all" ? jobs.filter((j) => j.status === "running").map((j) => j.id) : [target];
 		if (!ids[0]) return log(c.dim(target === "all" ? "没有进行中的后台派工。" : "用法：/jobs cancel <编号|all>"));
 		for (const id of ids) {
-			const r = await app.jobs.cancel(id, "user", context);
+			const r = await targetApp.jobs.cancel(id, "user", context);
 			log(r === "cancelled" ? c.yellow(`已取消 ${id}（总调度会收到通知）`) : r === "not_running" ? c.dim(`${id} 已经结束了`) : c.red(`没有后台派工 ${id}`));
 		}
 		return;
@@ -300,7 +320,7 @@ async function jobsCommand(arg: string) {
 		log(jobLine(j));
 		log(c.dim(`  任务：${j.task}`));
 		if (j.sessionId) log(c.dim(`  会话：${j.sessionId}`));
-		const lines = app.jobs.recent(j.id).slice(-12);
+		const lines = targetApp.jobs.recent(j.id).slice(-12);
 		if (lines.length) log([c.dim("  最近输出："), ...lines.map((l) => c.dim(`    ${l}`))].join("\n"));
 		if (j.result) log(`  结果：${clip(j.result, 600)}`);
 		return;
@@ -346,6 +366,7 @@ function printChanges(all: boolean) {
 }
 
 async function changeCommand(line: string): Promise<boolean> {
+	const targetChanges = app.changes;
 	const [cmd, arg = ""] = line.split(/\s+/, 2);
 	switch (cmd) {
 		case "/changes":
@@ -368,16 +389,16 @@ async function changeCommand(line: string): Promise<boolean> {
 				log(c.red(`用法：${cmd} <编号>（或 ${cmd} all 处理全部待合并的改动）`));
 				return true;
 			}
-			const ids = arg === "all" ? pendingChanges(app.changes).map((ch) => ch.id) : [arg];
+			const ids = arg === "all" ? pendingChanges(targetChanges).map((ch) => ch.id) : [arg];
 			if (!ids.length) log(c.dim("没有待合并的改动。"));
 			for (const id of ids) {
-				const r = cmd === "/apply" ? await applyChange(app.changes, id) : await dropChange(app.changes, id);
+				const r = cmd === "/apply" ? await applyChange(targetChanges, id) : await dropChange(targetChanges, id);
 				log(r.ok ? c.green(r.message) : c.red(r.message));
 			}
 			return true;
 		}
 		case "/clean": {
-			const r = await cleanChanges(app.changes);
+			const r = await cleanChanges(targetChanges);
 			log(c.green(r.message));
 			return true;
 		}
@@ -388,11 +409,27 @@ async function changeCommand(line: string): Promise<boolean> {
 
 async function command(line: string): Promise<boolean> {
 	if (/^\/sessions?(?:\s|$)/.test(line)) { await sessionCommand(line); return true; }
+	if (line === "/conversations") { await showTerminalConversations(); return true; }
+	if (line === "/main") { await selectTerminalConversation(String(root.id)); return true; }
+	if (line === "/taskgraph") {
+		if (terminalUI) terminalUI.toggleTasks();
+		else {
+			const graph = await harness.watchTaskGraph(context);
+			try {
+				const tasks = Object.values(graph.value.tasks);
+				if (!tasks.length) log("当前没有活动的原生任务。");
+				for (const task of tasks) log(`${task.id} · ${task.kind} · ${task.state.status} · 对话 ${task.conversationId}${task.owner ? ` · 父任务 ${task.owner}` : ""}`);
+			} finally { await graph.stop(); }
+		}
+		return true;
+	}
 	if (line === "/conversation" || line === "/id") {
 		log(`会话编号：${sessionId}（可读名称，不是模型对话 ID）`);
 		log(`总控 conversation_id：${root.id}（Pi Durable ID，仅在本会话存储内唯一）`);
 		log(`会话存储：${config.storage}`);
-		log("当前输入发送给总控；成员分别持有自己的上下文，仅接收派工说明、项目背景与显式交接内容。总控只收到派工结果，不自动复制成员完整聊天记录。");
+		log(terminalConversation && String(terminalConversation.id) !== String(root.id)
+			? `当前只读查看子对话 CID:${terminalConversation.id}，消息不会发送。/main 返回总控；成员历史仍由其原任务管理。`
+			: "当前输入发送给总控；成员分别持有自己的上下文，仅接收派工说明、项目背景与显式交接内容。总控只收到派工结果，不自动复制成员完整聊天记录。");
 		log("重启默认恢复上次选中的会话；--session=编号 可指定恢复。Ctrl+N / /session new 新建独立聊天；/new 只重置当前总控上下文，保留任务与成员登记。");
 		return true;
 	}
@@ -510,11 +547,12 @@ async function command(line: string): Promise<boolean> {
 		}
 		case "/abort":
 		case "/abort all": {
-			await root.abort(context);
+			const target = root, targetApp = app, targetHarness = harness;
+			await target.abort(context);
 			log(c.yellow("已中止。"));
-			const running = (await jobList()).filter((j) => j.status === "running");
+			const running = (await jobList(targetHarness)).filter((j) => j.status === "running");
 			if (line === "/abort all") {
-				for (const j of running) await app.jobs.cancel(j.id, "user", context);
+				for (const j of running) await targetApp.jobs.cancel(j.id, "user", context);
 				if (running.length) log(c.yellow(`后台派工 ${running.map((j) => j.id).join("、")} 也已取消。`));
 			} else if (running.length) {
 				log(c.dim(`后台还有 ${running.length} 个派工在跑（${running.map((j) => j.id).join("、")}），做完后结果会发回总调度。/abort all 连它们一起停。`));
@@ -612,101 +650,157 @@ function startRepl() {
 	repl.prompt();
 }
 
-/** 新界面使用同一份命令和提交逻辑，只替换终端输入与呈现。 */
+/** 选择器只读取已有会话；查看成员不会复制历史，也不会触发模型。 */
+async function showTerminalConversations() {
+	if (!terminalUI) { await sessionCommand("/sessions"); return; }
+	if (closing || switchingSession) return;
+	const activeId = sessionId;
+	const generation = terminalGeneration;
+	const native = await listNativeConversations(harness, root, context);
+	if (closing || switchingSession || activeId !== sessionId || generation !== terminalGeneration) return;
+	terminalUI.showConversations([
+		...sessionCatalog.list().map((info) => ({
+			id: `session:${info.id}`, title: info.title,
+			detail: `${info.id} · ${sessions.has(info.id) ? "已打开" : "历史已保存"} · ${info.workdir}`,
+			current: info.id === sessionId && (!terminalConversation || String(terminalConversation.id) === String(root.id)),
+		})),
+		...native.map((info) => ({ ...info, id: `conversation:${info.id}`,
+			detail: `${String(root.id) === info.id ? "返回总控" : "只读查看 · " + info.detail}`,
+			current: info.id === String(terminalConversation?.id ?? root.id),
+		})),
+	]);
+}
+
+async function selectTerminalConversation(id: string) {
+	if (!terminalUI) { log("子对话查看请使用新版终端（npm start）。"); return; }
+	if (closing || switchingSession) throw new Error("正在切换会话，请稍后。");
+	if (activeTerminalCommands) throw new Error("当前控制命令尚未完成，请稍后再查看子对话。");
+	switchingSession = true;
+	try {
+		const target = await harness.conversation(id as any, context);
+		if (!target) throw new Error("当前会话中没有这个子对话。");
+		if (closing || String(target.id) === String(terminalConversation?.id ?? root.id)) return;
+		drafts.set(terminalDraftKey(), terminalUI.editor.getExpandedText());
+		terminalConversation = target;
+		await startTui();
+		if (String(target.id) !== String(root.id)) log("正在只读查看子对话；/main 返回总控。成员继续在原任务中执行。");
+	} finally { switchingSession = false; }
+}
+
+/** 同一个 Pi TUI 一直存在，切换仅替换 Durable 订阅和界面绑定。 */
 async function startTui() {
+	const report = (error: unknown) => { if (!closing) log(c.red(`出错：${error instanceof Error ? error.message : String(error)}`)); };
+	const creating = !terminalUI;
+	if (!terminalUI) {
+		const ui = new AgentTerminal({
+			workdir: config.workdir, model: orchestrator.describe, demo, web: admin?.url, session: sessionId, conversationId: String(root.id),
+			onSubmit(text) {
+				if (closing) return;
+				const generation = terminalGeneration;
+				const readingChild = !!terminalConversation && String(terminalConversation.id) !== String(root.id);
+				if (text.startsWith("/")) {
+					const run = async () => {
+						if (closing || generation !== terminalGeneration) return;
+						if (switchingSession && text !== "/exit" && text !== "/quit") return log(c.dim("正在切换，命令未执行，请稍后重试。"));
+						// Task-owned 子对话由原派工管理，只允许查看或返回，不改变它的执行。
+						const readCommand = /^(?:\/main|\/conversations|\/taskgraph|\/conversation|\/id|\/sessions?|\/members|\/tasks|\/goal|\/jobs|\/changes|\/diff|\/usage|\/agents|\/web|\/learn|\/repair|\/exit|\/quit)(?:\s|$)/.test(text) && !/^\/jobs\s+cancel/.test(text);
+						if (readingChild && !readCommand) return log(c.yellow("子对话为只读查看；请先 /main 返回总控再执行控制命令。"));
+						const bindsView = /^\/(?:sessions?|conversations|main)(?:\s|$)/.test(text);
+						if (!bindsView) activeTerminalCommands++;
+						try { if (!(await command(text))) log(c.red(`未知命令：${text}`)); } catch (error) { report(error); }
+						finally { if (!bindsView) activeTerminalCommands--; }
+					};
+					if (["/abort", "/abort all", "/exit", "/quit"].includes(text)) void run();
+					else terminalCommands = terminalCommands.then(run).catch(report);
+				} else {
+					if (switchingSession) return log(c.dim("正在切换，消息未发送，请稍后重试。"));
+					if (readingChild) return log(c.yellow("子对话为只读查看，消息未发送。/main 返回总控继续对话。"));
+					const activeId = sessionId;
+					void ask(text, "steer").catch((error) => { if (sessionId === activeId) report(error); });
+				}
+			},
+			onInterrupt() {
+				void (async () => {
+					if (closing || switchingSession) return;
+					if (terminalConversation && String(terminalConversation.id) !== String(root.id)) return log(c.dim("正在只读查看子对话；/main 返回总控，/exit 退出。"));
+					const target = root, targetHarness = harness, generation = terminalGeneration;
+					const live = await targetHarness.snapshot(LiveDoc, target.id, context);
+					if (closing || switchingSession || generation !== terminalGeneration) return;
+					if (live?.run !== undefined) { log(c.yellow("正在中止本轮…（后台任务继续；/abort all 全部中止）")); await target.abort(context); }
+					else await shutdown(0);
+				})().catch(report);
+			},
+			onExit: () => { void shutdown(0).catch(report); },
+			onSessionNext: () => {
+				if (closing || switchingSession) return;
+				const ids = sessionCatalog.list().map((s) => s.id);
+				void sessionCommand(`/session use ${ids[(ids.indexOf(sessionId) + 1) % ids.length]!}`).catch(report);
+			},
+			onSessionNew: () => { if (!switchingSession) void sessionCommand("/session new").catch(report); },
+			onConversations: () => { void showTerminalConversations().catch(report); },
+			onConversationSelect: (id) => {
+				if (id.startsWith("session:")) {
+					const target = id.slice(8);
+					void (target === sessionId ? selectTerminalConversation(String(root.id)) : sessionCommand(`/session use ${target}`)).catch(report);
+				} else if (id.startsWith("conversation:")) void selectTerminalConversation(id.slice(13)).catch(report);
+			},
+		});
+		terminalUI = ui;
+		setOutputSink((text) => ui.write(text));
+		ui.start();
+	}
+	const ui = terminalUI;
+	const generation = ++terminalGeneration;
+	stopTerminalStatus();
+	await stopFollowing();
+	stopFollowing = async () => {};
+	if (closing || generation !== terminalGeneration) return;
 	const activeId = sessionId;
 	const activeApp = app;
-	let commands = Promise.resolve();
-	let stopping = false;
-	const immediate = new Set(["/abort", "/abort all", "/exit", "/quit"]);
-	const report = (error: unknown) => { if (!closing && sessionId === activeId) log(c.red(`出错：${error instanceof Error ? error.message : String(error)}`)); };
-	async function interrupt() {
-		if (stopping || closing) return;
-		if ((await liveState())?.run !== undefined) {
-			log(c.yellow("正在中止本轮…（后台任务继续；/abort all 全部中止）"));
-			await root.abort(context);
-		} else {
-			stopping = true;
-			await shutdown(0);
-		}
-	}
-	const ui = new AgentTerminal({
-		workdir: config.workdir, model: orchestrator.describe, demo, web: admin?.url, session: sessionId, conversationId: String(root.id),
-		onSubmit(text) {
-			if (closing || sessionId !== activeId) return;
-			if (text.startsWith("/")) {
-				const run = async () => {
-					if (closing || sessionId !== activeId) return;
-					try { if (!(await command(text))) log(c.red(`未知命令：${text}`)); }
-					catch (error) { report(error); }
-					finally { refreshStatus(); }
-				};
-				if (immediate.has(text)) void run();
-				else commands = commands.then(run);
-			} else {
-				// Durable 原子地决定是新一轮还是插话，避免先读状态再提交的竞态。
-				void ask(text, "steer").catch(report);
-			}
-		},
-		onInterrupt: () => { void interrupt().catch(report); },
-		onExit: () => { void shutdown(0).catch(report); },
-		onSessionNext: () => {
-			const ids = sessionCatalog.list().map((s) => s.id);
-			const next = ids[(ids.indexOf(sessionId) + 1) % ids.length]!;
-			void sessionCommand(`/session use ${next}`).catch(report);
-		},
-		onSessionNew: () => { void sessionCommand("/session new").catch(report); },
-	});
-	terminalUI = ui;
-	ui.editor.setText(drafts.get(sessionId) ?? "");
-	setOutputSink((text) => ui.write(text));
-	let latestLive: any;
+	const conversation = terminalConversation ?? root;
+	terminalConversation = conversation;
+	const current = () => !closing && activeId === sessionId && generation === terminalGeneration;
+	ui.bind({ workdir: config.workdir, model: orchestrator.describe, demo, web: admin?.url, session: sessionId,
+		conversationId: String(conversation.id), conversationLabel: String(conversation.id) === String(root.id) ? "总控 CID" : "子对话 CID · 只读",
+	}, drafts.get(terminalDraftKey()) ?? "");
+	printBanner();
+	log("输入任务开始协作。Ctrl+K 搜索会话，Ctrl+T 查看原生任务，Ctrl+E 展开工具；/main 返回总控。");
+	if (pendingChanges(activeApp.changes).length) printChanges(false);
+	let busy = false;
 	let refreshing = false;
 	let refreshAgain = false;
 	async function refresh() {
-		if (closing || sessionId !== activeId) return;
+		if (!current()) return;
 		if (refreshing) { refreshAgain = true; return; }
 		refreshing = true;
 		try {
 			do {
 				refreshAgain = false;
-				const [jobs, budget] = await Promise.all([jobList(), activeApp.harness.snapshot(RunBudget, context)]);
-				if (closing || sessionId !== activeId) return;
-				ui.setStatus({
-					busy: latestLive?.run !== undefined,
-					jobs: jobs.filter((j) => j.status === "running").map((j) => `${j.id} ${j.agent}`),
-					spent: budget?.spent ?? 0, budget: config.budget.perRunUsd,
-					pending: pendingChanges(app.changes).length,
-				});
-			} while (refreshAgain && !closing);
-		} catch (error) { if (!closing) report(error); }
+				const [jobs, budget] = await Promise.all([activeApp.harness.snapshot(Jobs, context), activeApp.harness.snapshot(RunBudget, context)]);
+				if (!current()) return;
+				ui.setStatus({ busy, jobs: Object.values(jobs?.jobs ?? {}).filter((j) => j.status === "running").map((j) => `${j.id} ${j.agent}`),
+					spent: budget?.spent ?? 0, budget: config.budget.perRunUsd, pending: pendingChanges(activeApp.changes).length });
+			} while (refreshAgain && current());
+		} catch (error) { if (current()) report(error); }
 		finally { refreshing = false; }
 	}
 	const refreshStatus = () => { void refresh(); };
 	activeApp.jobs.on("change", refreshStatus);
-	stopTerminalStatus = () => activeApp.jobs.off("change", refreshStatus);
+	activeApp.changes.on("change", refreshStatus);
+	stopTerminalStatus = () => { activeApp.jobs.off("change", refreshStatus); activeApp.changes.off("change", refreshStatus); };
 	try {
-		ui.start();
-		printBanner();
-		log("输入任务开始协作。运行中发送文字会插话；/queue 排到下一轮。/tasks 看分工，/changes 看改动。");
-		if (pendingChanges(app.changes).length) printChanges(false);
-		stopFollowing = await follow(root, context, {
-			replay: true,
-			onLive(live) {
-				latestLive = live;
-				ui.setPartial(toViewLive(live).partial);
-				refreshStatus();
-			},
+		const stop = await watchTerminalState({ harness: activeApp.harness, conversation, context,
+			onConversation(view) { if (!current()) return; busy = view.live.busy; ui.applyConversation(view); refreshStatus(); },
+			onTasks(tasks) { if (current()) ui.applyTasks(tasks); },
+			onError(error) { if (current()) report(error); },
 		});
-		if (closing) { await stopFollowing(); ui.stop(); return; }
+		if (!current()) { await stop(); return; }
+		stopFollowing = stop;
 		await refresh();
 	} catch (error) {
 		stopTerminalStatus();
-		ui.stop();
-		setOutputSink(undefined);
-		terminalUI = undefined;
-		if (closing) return;
-		throw error;
+		if (creating) { ui.stop(); terminalUI = undefined; terminalConversation = undefined; setOutputSink(undefined); }
+		if (!closing) throw error;
 	}
 }
 

@@ -46,7 +46,14 @@ export interface AdminOptions {
 
 export interface AdminServer {
 	url: string;
+	/** 切换数据绑定，监听端口和 HTTP 服务不重启。 */
+	rebind(options: AdminOptions): Promise<void>;
 	close(): Promise<void>;
+}
+
+interface AdminBinding {
+	handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
+	dispose(): Promise<void>;
 }
 
 const RESUME_COMMAND: Record<AgentKind, (id: string) => string> = {
@@ -72,9 +79,88 @@ const MIME: Record<string, string> = {
 };
 
 export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
+	const startedAt = Date.now();
+	let port = options.port;
+	let binding: AdminBinding | undefined;
+	let closing = false;
+	let operations = Promise.resolve();
+	let closed: Promise<void> | undefined;
+	const server: Server = createServer((req, res) => {
+		// 请求开始时固定绑定，await 期间不会误读另一个会话。
+		const current = binding;
+		if (!current || closing) {
+			res.writeHead(503, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+			res.end(JSON.stringify({ error: "后台正在切换或关闭，请稍后重试" }));
+			return;
+		}
+		void current.handle(req, res).catch((error) => {
+			if (res.destroyed || res.writableEnded) return;
+			if (!res.headersSent) res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+			res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+		});
+	});
+	try {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				await new Promise<void>((resolve, reject) => {
+					server.once("error", reject);
+					server.listen(port, HOST, () => { server.off("error", reject); resolve(); });
+				});
+				port = (server.address() as { port: number }).port;
+				break;
+			} catch (error: any) {
+				if (error?.code !== "EADDRINUSE" || attempt >= 9) throw error;
+				port++;
+			}
+		}
+		binding = await createAdminBinding({ ...options, port }, startedAt);
+	} catch (error) {
+		server.closeAllConnections();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+		throw error;
+	}
+	return {
+		url: "http://" + HOST + ":" + port,
+		rebind(nextOptions) {
+			if (closing) return Promise.reject(new Error("后台已关闭，不能切换会话"));
+			const operation = operations.then(async () => {
+				if (closing) throw new Error("后台已关闭，不能切换会话");
+				// 先准备新视图，失败时保留旧绑定。
+				const next = await createAdminBinding({ ...nextOptions, port }, startedAt);
+				if (closing) { await next.dispose(); throw new Error("后台正在关闭"); }
+				const previous = binding;
+				binding = next;
+				await previous?.dispose();
+			});
+			operations = operation.catch(() => {});
+			return operation;
+		},
+		close() {
+			if (closed) return closed;
+			closing = true;
+			closed = operations.then(async () => {
+				await binding?.dispose();
+				binding = undefined;
+				const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
+				server.closeAllConnections();
+				await stopped;
+			});
+			return closed;
+		},
+	};
+}
+
+async function createAdminBinding(options: AdminOptions, startedAt: number): Promise<AdminBinding> {
+	let disposed = false;
+	const cleanup: (() => unknown | Promise<unknown>)[] = [];
+	const dispose = async () => {
+		if (disposed) return;
+		disposed = true;
+		await Promise.allSettled(cleanup.map((fn) => Promise.resolve().then(fn)));
+	};
+	try {
 	const { app, config, orchestrator, demo, context } = options;
 	const { harness, root, agents, changes, project } = app;
-	const startedAt = Date.now();
 
 	// ---------- 派工汇总：启动时扫一遍全部历史，之后随新条目增量更新 ----------
 	const dispatches = new Map<string, Dispatch>(); // key -> 派工
@@ -85,6 +171,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	const leads = new Map<string, Lead>();
 	const latestLeadByCall = new Map<string, string>();
 	const childWatches: { stop(): Promise<unknown> }[] = [];
+	cleanup.push(async () => { await Promise.allSettled(childWatches.map((watch) => watch.stop())); });
 	const attached = new Set<string>();
 
 	/** lead：这条记录来自哪个子调度的子对话（总调度自己的记录不传） */
@@ -177,21 +264,23 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	let onLeadActivity = () => {};
 	function attachLead(l: Lead, conversationId: string) {
 		l.conversationId = conversationId;
-		if (attached.has(conversationId)) return;
+		if (disposed || attached.has(conversationId)) return;
 		attached.add(conversationId);
 		void (async () => {
 			const child = await harness.conversation(conversationId as any, context);
-			if (!child) return;
+			if (!child || disposed) return;
 			let cursor: any;
 			do {
 				const page = await child.entries({ order: "ascending" } as any, 500, cursor, context);
+				if (disposed) return;
 				for (const entry of page.items) ingest(entry, l.key);
 				cursor = page.next;
 			} while (cursor);
 			const watch = await child.watch(context);
+			if (disposed) { await watch.stop(); return; }
 			const seenChild = new Set(watch.value.entries.map((e) => String(e.id)));
 			watch.start(async (call) => {
-				if (call.kind !== "value") return;
+				if (disposed || call.kind !== "value") return;
 				let fresh = false;
 				for (const entry of call.value.entries) {
 					if (seenChild.has(String(entry.id))) continue;
@@ -282,16 +371,19 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 
 	// ---------- 实时状态：一个 watch，广播给所有浏览器 ----------
 	const clients = new Set<ServerResponse>();
+	cleanup.push(() => { for (const res of clients) res.end(); clients.clear(); });
 	const broadcast = (event: string, data: unknown) => {
+		if (disposed) return;
 		const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 		for (const res of clients) res.write(payload);
 	};
 	const watch = await root.watch(context);
+	cleanup.push(() => watch.stop());
 	const seen = new Set(watch.value.entries.map((e) => Number(e.id)));
 	let lastLive: ViewLive = toViewLive(watch.value.docs["pi.live"], watch.value.docs["pi.inbox"]);
 	let lastLiveJson = JSON.stringify(lastLive);
 	watch.start(async (call) => {
-		if (call.kind !== "value") return;
+		if (disposed || call.kind !== "value") return;
 		const fresh: ViewItem[] = [];
 		for (const entry of call.value.entries) {
 			const id = Number(entry.id);
@@ -319,21 +411,26 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	// 改动记录变了（派工收尾、终端里 /apply /drop）：通知页面刷新
 	const onChange = (record: unknown) => broadcast("change", record);
 	changes.on("change", onChange);
+	cleanup.push(() => changes.off("change", onChange));
 	// 目标或分工表变了：通知页面刷新「项目」
 	const onProject = () => broadcast("project", null);
 	project.on("change", onProject);
+	cleanup.push(() => project.off("change", onProject));
 	// 后台派工开工 / 结束：刷新记录并通知页面；成员的实时输出直接转发
 	onLeadActivity = () => broadcast("lead", null);
 	const onJobs = () => {
-		void refreshJobs().then(() => broadcast("jobs", Object.values(jobs)));
+		if (disposed) return;
+		void refreshJobs().then(() => broadcast("jobs", Object.values(jobs))).catch(() => {});
 	};
 	const onJobOutput = (id: string, line: string) => broadcast("job-output", { id, line });
 	app.jobs.on("change", onJobs);
 	app.jobs.on("output", onJobOutput);
+	cleanup.push(() => { app.jobs.off("change", onJobs); app.jobs.off("output", onJobOutput); });
 	const ping = setInterval(() => {
 		for (const res of clients) res.write(": ping\n\n");
 	}, 20_000);
 	ping.unref();
+	cleanup.push(() => clearInterval(ping));
 
 	// ---------- 数据 ----------
 	/** 往前取 limit 条能显示的条目（系统提示更新等不显示的条目不占名额） */
@@ -595,7 +692,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 	}
 
 	// ---------- HTTP ----------
-	let port = options.port;
+	const port = options.port;
 	const allowed = () => ({
 		hosts: new Set([`127.0.0.1:${port}`, `localhost:${port}`]),
 		origins: new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]),
@@ -629,8 +726,9 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		return value as Record<string, unknown>;
 	}
 	const afterResponse = (res: ServerResponse, id: string) => {
-		// 先把新编号送回浏览器，再重建当前会话的服务，避免关闭正在响应的连接。
+		// 先响应再切换数据绑定；HTTP 监听器始终保留。
 		res.once("finish", () => setImmediate(() => {
+			if (disposed) return;
 			void options.conversations!.select(id).catch((error) => options.notify?.(`切换对话失败：${error instanceof Error ? error.message : String(error)}`)).finally(() => { changingConversation = false; });
 		}));
 	};
@@ -648,7 +746,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		}
 	}
 
-	const server: Server = createServer(async (req, res) => {
+	const handle = async (req: IncomingMessage, res: ServerResponse) => {
 		const denied = forbidden(req);
 		if (denied) return sendJson(res, 403, { error: denied });
 		const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -663,6 +761,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 				if (!options.conversations) return sendJson(res, 503, { error: "当前运行入口未启用对话管理" });
 				let body: Record<string, unknown>;
 				try { body = await readJson(req); } catch (error) { return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) }); }
+				if (disposed) return sendJson(res, 409, { error: "对话已切换，请刷新后重试" });
 				if (body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "当前对话已变化，请刷新后重试" });
 				if (changingConversation || options.conversations.busy()) return sendJson(res, 409, { error: "正在切换对话，请稍后重试" });
 				changingConversation = true;
@@ -678,6 +777,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 					if (conversationAction) {
 						id = conversationAction[1]!;
 						const list = await options.conversations.list() as { id: string }[];
+						if (disposed) return sendJson(res, 409, { error: "对话已切换，未执行切换" });
 						if (!list.some((item) => item.id === id)) { changingConversation = false; return sendJson(res, 404, { error: "没有这个对话" }); }
 					} else {
 						if (body.title !== undefined && typeof body.title !== "string") { changingConversation = false; return sendJson(res, 400, { error: "标题需要是文字" }); }
@@ -690,6 +790,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			if (url.pathname === "/api/events" && req.method === "GET") {
 				res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", connection: "keep-alive" });
 				const { items, hasMore } = await history(400);
+				if (disposed || res.destroyed) { res.end(); return; }
 				res.write(`event: snapshot\ndata: ${JSON.stringify({ items, hasMore, live: lastLive, conversation: { id: options.session?.id ?? "default", controllerId: String(root.id), storage: config.storage } })}\n\n`);
 				clients.add(res);
 				req.on("close", () => clients.delete(res));
@@ -728,6 +829,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			const jobCancel = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
 			if (jobCancel && req.method === "POST") {
 				const body = await readJson(req);
+				if (disposed) return sendJson(res, 409, { error: "对话已切换，未执行取消" });
 				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行取消" });
 				const id = decodeURIComponent(jobCancel[1]!);
 				const r = await app.jobs.cancel(id, "user", context);
@@ -750,6 +852,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			}
 			if (url.pathname === "/api/abort" && req.method === "POST") {
 				const body = await readJson(req);
+				if (disposed) return sendJson(res, 409, { error: "对话已切换，未执行中止" });
 				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行中止" });
 				await root.abort(context);
 				options.notify?.("后台网页：已中止本轮");
@@ -757,6 +860,7 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 			}
 			if (url.pathname === "/api/reset" && req.method === "POST") {
 				const body = await readJson(req);
+				if (disposed) return sendJson(res, 409, { error: "对话已切换，未执行重置" });
 				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行重置" });
 				await root.reset(undefined, context);
 				options.notify?.("后台网页：已开始新的上下文");
@@ -768,43 +872,10 @@ export async function startAdmin(options: AdminOptions): Promise<AdminServer> {
 		} catch (error) {
 			sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
 		}
-	});
-
-	// 端口被占用时依次往后找（比如正式模式和演示模式同时开着）
-	for (let attempt = 0; ; attempt++) {
-		try {
-			await new Promise<void>((resolve, reject) => {
-				server.once("error", reject);
-				server.listen(port, HOST, () => {
-					server.off("error", reject);
-					resolve();
-				});
-			});
-			break;
-		} catch (error: any) {
-			if (error?.code !== "EADDRINUSE" || attempt >= 9) {
-				await watch.stop();
-				throw error;
-			}
-			port++;
-		}
-	}
-
-	return {
-		url: `http://${HOST}:${port}`,
-		async close() {
-			clearInterval(ping);
-			changes.off("change", onChange);
-			project.off("change", onProject);
-			app.jobs.off("change", onJobs);
-			for (const w of childWatches) await w.stop().catch(() => {});
-			app.jobs.off("output", onJobOutput);
-			for (const res of clients) res.end();
-			clients.clear();
-			const closed = new Promise<void>((resolve) => server.close(() => resolve()));
-			server.closeAllConnections();
-			await closed;
-			await watch.stop();
-		},
 	};
+	return { handle, dispose };
+	} catch (error) {
+		await dispose();
+		throw error;
+	}
 }

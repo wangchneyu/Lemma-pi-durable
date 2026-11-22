@@ -41,7 +41,8 @@ async function until(label: string, test: () => boolean | Promise<boolean>, time
 const send = (text: string) => child.stdin!.write(`\x1b[200~${text}\x1b[201~\r`);
 try {
 	await until("后台随终端启动", async () => (await json("/api/state")).conversation?.id === "default");
-	const controllerId = (await json("/api/state")).conversation.controllerId;
+	const initialState = await json("/api/state");
+	const controllerId = initialState.conversation.controllerId;
 	assert.equal(typeof controllerId, "string");
 	assert.ok(controllerId.length > 0);
 	child.stdin!.write("\x1b[?1;2c");
@@ -55,6 +56,10 @@ try {
 	await until("新会话切换", async () => { newId = (await json("/api/state")).conversation.id; return newId !== "default"; });
 	child.stdin!.write("\x1b[?1;2c");
 	const fresh = await json("/api/state");
+	assert.equal(fresh.startedAt, initialState.startedAt, "切换不得重建 HTTP 服务");
+	assert.equal(fresh.pid, initialState.pid);
+	assert.equal(output.split("\x1b[?1049h").length - 1, 1, "切换不得重启终端渲染器");
+	assert.equal(output.includes("\x1b[?1049l"), false, "会话切换期间不得退出终端主屏幕");
 	assert.equal(fresh.jobs.length, 0);
 	assert.equal((await json("/api/history")).items.length, 0);
 	const marker = output.length;
@@ -66,6 +71,15 @@ try {
 	assert.ok((await json("/api/history")).items.some((i: any) => i.type === "user" && i.text === "默认会话独有功能"));
 	assert.ok(!(await json("/api/history")).items.some((i: any) => /未发送草稿/.test(i.text ?? "")));
 	check(true, "后台随终端启动，切换会话时跟随当前会话，原会话派工继续完成");
+	check(true, "会话切换保留同一终端渲染器和网页服务启动时间");
+	child.stdin!.write("\x15");
+	send("/taskgraph");
+	await until("原生任务面板", () => terminalText(output).includes("原生任务"));
+	send("/conversations");
+	await until("可搜索会话列表", () => terminalText(output).includes("切换会话 / 查看子对话"));
+	child.stdin!.write("\x1b");
+	await sleep(100);
+	child.stdin!.write("默认会话未发送草稿");
 	const nextMarker = output.length;
 	child.stdin!.write("\x0f");
 	await until("再次进入新会话", async () => (await json("/api/state")).conversation.id === newId);
