@@ -37,7 +37,8 @@ async function demo(tui: boolean, real = false): Promise<void> {
 		while (!condition() && Date.now() < deadline && !exited && !spawnError) await sleep(50);
 		assert.ok(condition(), `${label}：${spawnError?.message ?? errors}\n${terminalText(output).slice(-5000)}`);
 	}
-	const send = (text: string) => child.stdin.write(tui ? `\x1b[200~${text}\x1b[201~\r` : `${text}\n`);
+	// 无修饰 Enter 不受 Windows 测试期间真实键盘 Shift 状态影响。
+	const send = (text: string) => child.stdin.write(tui ? `\x1b[200~${text}\x1b[201~\x1b[13u` : `${text}\n`);
 	try {
 		await until("终端启动", () => output.includes(tui ? "Enter" : "你"));
 		if (tui && !real) {

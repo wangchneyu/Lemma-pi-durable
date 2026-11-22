@@ -163,7 +163,7 @@ function cell(text: string): string {
 /** 放进总调度系统提示的分工摘要（每次请求都按最新状态渲染） */
 export function boardSummary(board: BoardState | undefined): string {
 	const tasks = boardTasks(board).filter((t) => t.status !== "dropped");
-	if (!tasks.length) return "（还没有分工表。接到项目级、多步骤的任务时，先用 plan_tasks 拆解。）";
+	if (!tasks.length) return "（当前没有项目任务；普通对话无需创建分工表。）";
 	const selected = tasks.length > 25 ? [...tasks.filter((t) => t.status !== "done").slice(-20), ...tasks.filter((t) => t.status === "done").slice(-5)] : tasks;
 	return (tasks.length > selected.length ? `共 ${tasks.length} 项，完成 ${tasks.filter((t) => t.status === "done").length} 项；显示最近活动与完成项。\n` : "") + selected
 		.map(

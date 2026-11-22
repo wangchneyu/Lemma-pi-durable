@@ -38,7 +38,8 @@ async function until(label: string, test: () => boolean | Promise<boolean>, time
 	if (await test()) return;
 	throw new Error(`${label} 超时：${errors}\n${terminalText(output).slice(-2500)}`);
 }
-const send = (text: string) => child.stdin!.write(`\x1b[200~${text}\x1b[201~\r`);
+// 无修饰 Enter 不受 Windows 测试期间真实键盘 Shift 状态影响。
+const send = (text: string) => child.stdin!.write(`\x1b[200~${text}\x1b[201~\x1b[13u`);
 try {
 	await until("后台随终端启动", async () => (await json("/api/state")).conversation?.id === "default");
 	const initialState = await json("/api/state");

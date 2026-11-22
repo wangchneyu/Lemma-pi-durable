@@ -44,7 +44,8 @@ async function until(label: string, predicate: () => boolean | Promise<boolean>,
 	if (await predicate()) return;
 	throw new Error(`${label} 超时：${errors}\n${terminalText(output).slice(-4000)}`);
 }
-const send = (text: string) => terminal.stdin.write(`\x1b[200~${text}\x1b[201~\r`);
+// 显式无修饰 Enter，避免 Windows 读取真实 Shift 状态影响管道模拟终端。
+const send = (text: string) => terminal.stdin.write(`\x1b[200~${text}\x1b[201~\x1b[13u`);
 const visibleSince = (offset: number) => terminalText(output.slice(offset));
 function entries(storage: string, id: string): string[] {
 	const database = new DatabaseSync(storage, { readOnly: true });
@@ -56,8 +57,8 @@ async function openChild(id: string): Promise<void> {
 	terminal.stdin.write("\x0b"); // Ctrl+K，保留原编辑区中的草稿。
 	await until("打开会话选择器", () => visibleSince(marker).includes("切换会话 / 查看子对话"));
 	terminal.stdin.write(`conversation:${id}`);
-	await sleep(100);
-	terminal.stdin.write("\r");
+	await until("搜索词已显示", () => visibleSince(marker).includes(`查找 › conversation:${id}`));
+	terminal.stdin.write("\x1b[13u");
 	await until("进入只读成员子对话", () => visibleSince(marker).includes("正在只读查看子对话") && visibleSince(marker).includes("子对话 CID · 只读"));
 }
 try {

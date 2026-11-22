@@ -24,6 +24,7 @@ import {
 import { clip, JOB_REPORT_ENTRY, JOB_REQUEST_PREFIX, JobDone, jobReport, Jobs, type JobHub, type JobRecord, type JobsState } from "./jobs.ts";
 import { managedDispatch } from "./repair.ts";
 import { createLeadTool, LEAD_TOOL } from "./lead.ts";
+import { conversationIdentity, CONVERSATION_POLICY } from "./conversation.ts";
 
 export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
@@ -483,7 +484,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 	const setGoal = defineTool({
 		name: "set_goal",
 		description:
-			"起草项目的最终目标（.pi-agent/GOAL.md）：要做成什么、验收标准、约束和不做什么。只在还没有 GOAL.md、用户给出项目级目标时使用；" +
+			"起草项目的最终目标（.pi-agent/GOAL.md）：要做成什么、验收标准、约束和不做什么。只在还没有 GOAL.md、用户明确要求开展项目且给出具体目标时使用；问候、身份确认、使用咨询或仅说想做项目时不用此工具。" +
 			"GOAL.md 以用户写的为准，已经存在时不要改，除非用户明确要求（overwrite: true）。",
 		parameters: obj({
 			content: str({ description: "GOAL.md 的 Markdown 内容" }),
@@ -546,11 +547,13 @@ export function createLocalAgentsExtension(
 		tools,
 		tasks: [jobTask],
 		sections: [
+			section("identity", conversationIdentity),
+			section("conversation", () => CONVERSATION_POLICY),
 			section(
 				"team",
 				() =>
 					[
-						"你是本机多 agent 协作的总调度，相当于团队的项目负责人。你自己不直接改代码，而是把工作拆成清晰的任务，按角色分给下面这些本机 AI，再核对、汇总它们的结果。",
+						"需要执行项目任务时，Lemma 总调度相当于团队的项目负责人；子调度只负责自己的子目标。你自己不直接改代码，而是按任务需要派给下面这些本机 AI，再核对、汇总结果。普通聊天直接回答。",
 						"",
 						"团队成员：",
 						roster,
@@ -568,7 +571,7 @@ export function createLocalAgentsExtension(
 									`6b. 子调度（${LEAD_TOOL}）：目标很大、能分成几块相对独立的子目标时（比如前端 / 后端 / 数据），把每块整个交给一个子调度：给出子目标、范围和验收标准，它会自己拆任务、派成员、验收后汇报给你。几个子调度可以在同一轮里并行。小任务直接派成员，不要用子调度。子调度汇报后，你仍要对照验收标准核对。`,
 								]
 							: []),
-						"7. 最后用中文向用户汇报：按任务编号说明谁做了什么、用了什么模型、结果、改动编号、还有什么没完成或有风险。",
+						"7. 完成实际派工后，再用中文汇报：有任务编号时按编号说明成员、模型、结果、改动与未完成事项；没有派工的普通对话不套执行汇报模板。",
 						...(config.autonomy.enabled ? [
 							`自动验收与修复已启用：由执行层运行配置中的检查，失败时最多修复 ${config.autonomy.maxRepairAttempts} 次。收到“停止重试”时不要再派相同任务，汇报失败证据和下一步。`,
 							"节省上下文：工具结果已给出结论、验收摘要和改动编号，不要把完整历史反复转给成员；续接用 session_id，跨成员交接用 based_on。未通过的检查不能通过改测试标准或标 done 绕过。",
@@ -606,7 +609,8 @@ export function createLocalAgentsExtension(
 				const running = jobs.filter((j) => j.status === "running");
 				const unread = jobs.filter((j) => j.status !== "running" && !j.delivered);
 				return [
-					goal ? `项目最终目标（.pi-agent/GOAL.md，以用户写的为准）：\n${goal}` : "还没有 .pi-agent/GOAL.md。用户给出项目级目标时，用 set_goal 起草一份，并请用户确认。",
+					"以下项目状态只供当前话题相关时参考；缺少目标或任务是正常空状态，不是要求你立即创建它们。",
+					goal ? `项目最终目标（.pi-agent/GOAL.md，以用户写的为准）：\n${goal}` : "项目目标：尚未设置。仅在用户明确要求开展项目且目标已清楚时，才按需起草；普通对话不要求提供目标。",
 					"",
 					"当前分工表（.pi-agent/ASSIGN.md 由你通过 plan_tasks / update_task 维护）：",
 					boardSummary(board),
