@@ -261,6 +261,15 @@ try {
 		operationStart = output.length; send("/agent enable helper");
 		await until(() => terminalText(output.slice(operationStart)).includes("配置已保存并生效"));
 		check(true, "真实终端配置：斜杠向导新增、启停与选模型当场生效，密钥隐藏且不进入配置文件");
+		operationStart = output.length; send("/tool add helper business_lookup");
+		for (const [title, answer] of [["工具用途", "查询业务记录"], ["固定 HTTP(S)", api("analyst").baseUrl + "/records"], ["方法", "GET"], ["参数 JSON Schema", JSON.stringify({ type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false })], ["Bearer 密钥", "HIDDEN_BUSINESS_TOOL_KEY"]]) {
+			await until(() => terminalText(output.slice(operationStart)).includes(title!)); send(answer!);
+		}
+		await until(() => terminalText(output.slice(operationStart)).includes("业务工具 business_lookup 已保存"));
+		assert(!output.includes("HIDDEN_BUSINESS_TOOL_KEY"));
+		assert(!readFileSync(terminalConfig, "utf8").includes("HIDDEN_BUSINESS_TOOL_KEY"));
+		assert.equal(JSON.parse(readFileSync(terminalConfig, "utf8")).agents.helper.api.httpTools[0].id, "business_lookup");
+		check(true, "真实终端业务工具：/tool 向导保存参数和隐藏凭据，即时更新成员授权");
 		const urlBefore = terminalText(output).match(/http:\/\/127[.]0[.]0[.]1:[0-9]+/)![0];
 		const stateBefore = await (await fetch(`${urlBefore}/api/state`)).json() as any;
 		operationStart = output.length; send("/setup");
@@ -280,9 +289,15 @@ try {
 		const terminalState = await (await fetch(`${url}/api/state`)).json() as any;
 		assert(terminalState.sessions.some((session: any) => session.agent === "analyst"));
 		assert(terminalState.agents.some((member: any) => member.kind === "helper" && member.available));
+		assert(terminalState.agents.find((member: any) => member.kind === "helper").api.tools.includes("business_lookup"));
+		assert(!JSON.stringify(terminalState).includes("HIDDEN_BUSINESS_TOOL_KEY"));
+		const resultId = terminalText(output).match(/result_id: (dispatch:[^\s|\]]+)/)![1]!;
+		operationStart = output.length; send(`/result ${resultId}`);
+		await until(() => terminalText(output.slice(operationStart)).includes("ANALYSIS_EVIDENCE_42"));
 		assert(!JSON.stringify(terminalState).includes("HIDDEN_TERMINAL_SETTING_KEY"));
 		const history = await (await fetch(`${url}/api/history`)).text();
 		assert(!history.includes("HIDDEN_TERMINAL_SETTING_KEY") && !history.includes("/agent add helper"));
+		assert(!history.includes("HIDDEN_BUSINESS_TOOL_KEY") && !history.includes("/tool add") && !history.includes(`/result ${resultId}`));
 		operationStart = output.length; send("/session new configured_session");
 		await until(() => terminalText(output.slice(operationStart)).includes("已切换到 configured_session"));
 		const switchedState = await (await fetch(`${url}/api/state`)).json() as any;

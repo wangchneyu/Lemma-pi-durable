@@ -294,6 +294,9 @@ function taskCard(t, all) {
 		<header><span class="mono task-id">${esc(t.id)}</span>${t.role ? `<span class="role-chip">${esc(t.role)}</span>` : ""}${t.owner ? agentTag(t.owner) : ""}</header>
 		<h3>${esc(t.title)}</h3>
 		${t.acceptance ? `<p class="task-accept" title="${esc(t.acceptance)}"><span>验收</span>${esc(short(t.acceptance, 90))}</p>` : ""}
+		${t.verification ? `<p class="task-accept" title="${esc(t.verification.checks.map((c) => `${c.name}：${c.passed ? "通过" : "失败"} · ${c.evidence}`).join("\n"))}"><span>机器检查</span>${t.verification.passed ? "通过，仍需复核" : "未通过，需要返工"}</p>` : ""}
+		${t.review ? `<p class="task-note" title="${esc(t.review.evidence)}">复核 ${esc(t.review.verdict)} · ${esc(short(t.review.evidence, 90))}</p>` : ""}
+		${t.latestResult ? `<p class="task-note mono" title="${esc(t.latestResult)}">结果 ${esc(t.latestResult)}</p>` : ""}
 		${
 			deps.length || t.changes.length
 				? `<footer>${deps.map((d) => `<span class="dep" data-s="${d.status}" title="${esc(d.title)}">← ${esc(d.id)}</span>`).join("")}${t.changes.map((c) => changeLink(c)).join("")}</footer>`

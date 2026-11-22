@@ -647,7 +647,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					models: c.models,
 					defaultModel: c.defaultModel ?? null,
 					api: c.api
-						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow, tools: memberToolNames(c.api) }
+						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow, tools: [...memberToolNames(c.api), ...(c.api.httpTools ?? []).map((tool) => tool.id)] }
 						: null,
 				};
 			}),

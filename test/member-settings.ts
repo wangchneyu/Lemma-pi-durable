@@ -56,6 +56,18 @@ try {
 	await memberSettingsCommand("/agent show researcher", host);
 	assert(!logs.join("\n").includes("替换密钥")); assert(!logs.join("\n").includes("SECRET_FIXTURE_NOT_FOR_CHAT"));
 	check(true, "成员管理：启停、模型和密钥变更生效，凭据不会进入配置展示或聊天记录");
+	answers = ["查询资料", "https://business.invalid/records", "GET", JSON.stringify({ type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false }), "TOOL_SECRET_FIXTURE"];
+	await memberSettingsCommand("/tool add researcher lookup", host);
+	assert.equal(answers.length, 0); assert.equal(config.agents.researcher.api!.httpTools![0]!.id, "lookup");
+	assert.equal(readCredential(config.agents.researcher.api!.httpTools![0]!.auth!.credential), "TOOL_SECRET_FIXTURE");
+	assert(!readFileSync(file, "utf8").includes("TOOL_SECRET_FIXTURE"));
+	await memberSettingsCommand("/tool list researcher", host); assert(!logs.join("\n").includes("TOOL_SECRET_FIXTURE"));
+	answers = ["TOOL_SECRET_REPLACED"]; await memberSettingsCommand("/tool key researcher lookup", host);
+	assert.equal(readCredential(config.agents.researcher.api!.httpTools![0]!.auth!.credential), "TOOL_SECRET_REPLACED");
+	assert.equal(loadConfig(file).agents.researcher.api!.httpTools![0]!.id, "lookup");
+	await memberSettingsCommand("/tool remove researcher lookup", host); assert.equal(config.agents.researcher.api!.httpTools!.length, 0);
+	assert.equal(app.harness, harness); assert.equal(app.root.id, rootId);
+	check(true, "业务工具向导：新增、凭据更新、重载与移除不重建运行时，不泄漏密钥");
 	answers = ["anthropic-compatible", "https://controller.invalid", "controller-model", "CONTROLLER_SECRET"];
 	await memberSettingsCommand("/setup", host);
 	assert.equal(loadConfig(file).orchestrator.modelId, "controller-model");

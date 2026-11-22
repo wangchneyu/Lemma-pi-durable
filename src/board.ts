@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { defineDoc } from "@earendil-works/pi-durable";
+import type { AcceptanceCheck, TaskVerification } from "./acceptance.ts";
 
 export type TaskStatus = "todo" | "doing" | "review" | "done" | "blocked" | "dropped";
 
@@ -24,6 +25,10 @@ export type BoardTask = {
 	parent?: string;
 	/** 验收标准：做到什么程度算完成 */
 	acceptance?: string;
+	checks?: AcceptanceCheck[];
+	latestResult?: string;
+	verification?: TaskVerification;
+	review?: { resultId: string; verdict: "accepted" | "rework" | "blocked"; evidence: string; at: number };
 	notes: string[];
 	/** 关联的派工（callId）和改动编号 */
 	dispatches: string[];
@@ -148,6 +153,9 @@ export function renderAssign(tasks: BoardTask[], updatedAt: number): string {
 		lines.push(`- 状态：${STATUS_LABEL[t.status]}${t.role ? ` · 角色：${t.role}` : ""}${t.owner ? ` · 负责：${t.owner}` : ""}`);
 		if (t.deps.length) lines.push(`- 依赖：${t.deps.join("、")}`);
 		if (t.acceptance) lines.push(`- 验收标准：${t.acceptance}`);
+		if (t.latestResult) lines.push(`- 最新结果：${t.latestResult}（终端 /result ${t.latestResult} 查看）`);
+		if (t.verification) lines.push(`- 机器检查：${t.verification.passed ? "通过，仍需复核依据" : "未通过"}；${t.verification.checks.map((check) => `${check.name}：${check.passed ? "通过" : "失败"}（${check.evidence}）`).join("；")}`);
+		if (t.review) lines.push(`- 复核：${t.review.verdict} · ${t.review.evidence.replace(/\n+/g, " ")}`);
 		if (t.detail) lines.push(`- 说明：${t.detail.replace(/\n+/g, " ")}`);
 		if (t.changes.length) lines.push(`- 改动：${t.changes.map((c) => `#${c}`).join("、")}（终端 /changes 查看）`);
 		for (const n of t.notes.slice(-5)) lines.push(`- 记录：${n}`);
@@ -185,6 +193,7 @@ export function taskBrief(goal: string | undefined, board: BoardState | undefine
 			[
 				`【你负责的任务】${task.id} · ${task.title}${task.role ? `（角色：${task.role}）` : ""}`,
 				task.acceptance ? `验收标准：${task.acceptance}` : "",
+				task.checks?.length ? `机器验收规则（首次派工后锁定）：${JSON.stringify(task.checks)}` : "",
 				deps.length ? `前置任务：${deps.map((d) => `${d.id} ${d.title}（${STATUS_LABEL[d.status]}）`).join("；")}` : "",
 			]
 				.filter(Boolean)

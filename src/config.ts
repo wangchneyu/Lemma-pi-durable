@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { validateBusinessTools, type HttpBusinessTool } from "./business-tools.ts";
 
 /** claude / codex / gemini 是本机 CLI；deepseek 是 Pi 原生的 API 成员（Pi Durable 子对话 + 内置读写工具） */
 export type BuiltinAgentKind = "claude" | "codex" | "gemini" | "deepseek";
@@ -18,6 +19,7 @@ export const CLI_KINDS = ["claude", "codex", "gemini"] as const;
  * 用内置的 read / write / edit / bash 工具在（隔离的）工作目录里干活。
  */
 export interface ApiMemberConfig {
+	httpTools?: HttpBusinessTool[];
 	/** Reference into the local credential store; never the secret itself. */
 	credential?: string;
 	/** Explicit file/shell grants. Custom API members default to no tools. */
@@ -306,6 +308,7 @@ export function normalizeConfig(raw: Partial<AppConfig>, path = "pi-agent.config
 		if (!Number.isFinite(merged.timeoutMinutes) || merged.timeoutMinutes <= 0 || !Number.isSafeInteger(merged.maxOutputChars) || merged.maxOutputChars < 1) throw new Error(`成员 ${kind} 的超时和结果长度需要为正数。`);
 		if (merged.api) {
 			const api = merged.api;
+			validateBusinessTools(api.httpTools);
 			if (api.credential !== undefined && (typeof api.credential !== "string" || !/^local-[a-f0-9-]{36}$/.test(api.credential))) throw new Error(`成员 ${kind} 的本机凭据引用无效。`);
 			if (!["openai-compatible", "anthropic-compatible"].includes(api.type) || !["off", "allowlist", "all"].includes(api.bash)) throw new Error(`成员 ${kind} 的 API 协议或 bash 配置无效。`);
 			if (!Array.isArray(api.apiKeyEnv) || api.apiKeyEnv.some((key) => typeof key !== "string" || !key.trim()) || !Array.isArray(api.bashAllow) || api.bashAllow.some((entry) => typeof entry !== "string" || !entry.trim())) throw new Error(`成员 ${kind} 的 API 凭据与命令白名单需要字符串数组。`);

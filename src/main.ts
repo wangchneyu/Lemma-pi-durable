@@ -26,6 +26,7 @@ import { controllerModels, nativeModelCatalog, selectControllerModel, restoreCon
 import { colors as c, follow, setOutputSink, writeLine as log } from "./printer.ts";
 import { AgentSessions, RunBudget } from "./dispatch.ts";
 import { Learning } from "./learning.ts";
+import { Results, resultPage } from "./results.ts";
 import { AgentTerminal } from "./terminal.ts";
 import { listNativeConversations, watchTerminalState } from "./terminal-state.ts";
 import { SessionCatalog } from "./sessions.ts";
@@ -462,7 +463,7 @@ async function changeCommand(line: string): Promise<boolean> {
 
 async function command(line: string): Promise<boolean> {
 	if (line === "/help") { log(MEMBER_HELP); log("/sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); return true; }
-	if (/^\/(?:agent|setup)(?:\s|$)/.test(line)) {
+	if (/^\/(?:agent|setup|tool)(?:\s|$)/.test(line)) {
 		if (configuring) throw new Error("配置正在进行中。");
 		configuring = true;
 		try { return await memberSettingsCommand(line, { path: configPath, config: () => config, question: settingQuestion, assertIdle: assertConfigIdle, commit: commitSettings, log }); }
@@ -500,6 +501,16 @@ async function command(line: string): Promise<boolean> {
 		log(`所属会话：${sessionId} · 总控 conversation_id=${root.id}；成员 ID 只可在所属会话续接。`);
 		for (const [id, record] of Object.entries(records)) log(`${config.agents[record.agent]?.name ?? record.agent} · session_id=${id} · 总控=${record.controllerId ?? String(root.id)} · ${record.model ?? "默认模型"} · ${record.rounds ?? 0} 轮 · ${record.lastTask ?? ""}`);
 		if (!Object.keys(records).length) log("当前会话还没有成员上下文；任务派工后会显示在这里。");
+		return true;
+	}
+	if (/^\/result(?:\s|$)/.test(line)) {
+		const [, id, offset = "0", extra] = line.trim().split(/\s+/);
+		if (!id || extra || !/^\d+$/.test(offset)) throw new Error("用法：/result <result_id> [字符偏移]；仅查看当前总控的结果。");
+		const report = (await harness.snapshot(Results, root.id, id, context))?.result;
+		if (!report) throw new Error("当前总控没有这个结果。");
+		const page = resultPage(report, Number(offset), 4000);
+		log(`${page.id} · ${page.member} · ${page.status} · ${page.offset}/${page.totalChars}\n${page.text}`);
+		if (page.nextOffset !== null) log(`下一页：/result ${id} ${page.nextOffset}`);
 		return true;
 	}
 	if (line === "/learn" || line === "/repair") {
@@ -540,6 +551,9 @@ async function command(line: string): Promise<boolean> {
 			log(
 				`  ${tint(`${t.id} ${STATUS_LABEL[t.status]}`.padEnd(8))} ${t.title}${c.dim(`${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.map((x) => `#${x}`).join(",")}` : ""}`)}`,
 			);
+			if (t.latestResult) log(c.dim(`    结果：${t.latestResult} · /result ${t.latestResult}`));
+			if (t.verification) log(`    机器检查：${t.verification.passed ? "通过，仍需复核" : "未通过"} · ${t.verification.checks.map((check) => `${check.name}:${check.passed ? "通过" : "失败"}`).join("、")}`);
+			if (t.review) log(`    复核：${t.review.verdict} · ${t.review.evidence.slice(0, 250)}`);
 		}
 		log(c.dim(`  完整分工表：${app.project.assignPath}${admin ? `　后台：${admin.url}/#/project` : ""}`));
 		return true;

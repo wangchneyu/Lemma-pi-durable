@@ -1,0 +1,121 @@
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { configure } from "@earendil-works/pi-durable";
+import { openApp } from "../src/app.ts";
+import { createMemberTools, memberProvider } from "../src/api-member.ts";
+import { Board } from "../src/board.ts";
+import { callBusinessTool, createBusinessTools, validateBusinessTools, type HttpBusinessTool } from "../src/business-tools.ts";
+import { verifyReport, validateAcceptanceChecks } from "../src/acceptance.ts";
+import { Results, storeResult } from "../src/results.ts";
+import { check, fakeCalls, fauxOrchestrator, testConfig, toolResults } from "./helpers.ts";
+
+const context = BACKGROUND_CONTEXT;
+const received: { path: string; key?: string; auth?: string; body: string }[] = [];
+const server = createServer(async (req, res) => {
+	const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+	const path = new URL(req.url!, "http://localhost").pathname;
+	received.push({ path: req.url!, key: req.headers["idempotency-key"] as string, auth: req.headers.authorization, body: Buffer.concat(chunks).toString() });
+	if (path === "/slow") return;
+	if (path === "/redirect") { res.writeHead(302, { Location: "/forbidden" }); res.end(); return; }
+	res.writeHead(path === "/failed" ? 503 : 200, { "content-type": "application/json" });
+	res.end(JSON.stringify({ evidence: "SOURCE_42", amount: 42, secret: process.env.LEMMA_BUSINESS_TEST_KEY }));
+});
+await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+const base = `http://127.0.0.1:${(server.address() as any).port}`;
+const schema = { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false };
+const tool: HttpBusinessTool = { id: "lookup", description: "查询业务记录", url: `${base}/lookup`, method: "GET", parameters: schema, auth: { env: "LEMMA_BUSINESS_TEST_KEY" } };
+const oldKey = process.env.LEMMA_BUSINESS_TEST_KEY; process.env.LEMMA_BUSINESS_TEST_KEY = "BUSINESS_SECRET_FIXTURE";
+const config = testConfig(); config.isolation.enabled = false;
+const orch = fauxOrchestrator(); let app = await openApp(config, orch, context);
+const run = async (name: string, args: any, error = false) => {
+	let answer: any;
+	orch.faux.setResponses([fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" }), (request: any) => { answer = toolResults(request).at(-1); return fauxAssistantMessage(fauxText("OK")); }]);
+	await (await app.root.submit({ type: "input", content: name }, context)).wait(withAbortSignal(AbortSignal.timeout(12000), context));
+	assert(answer, name); assert.equal(answer.isError, error, answer.text); return answer.text as string;
+};
+try {
+	validateBusinessTools([tool]);
+	assert.throws(() => validateBusinessTools([{ ...tool, url: `${base}/lookup?api_key=bad` }]));
+	assert.throws(() => validateBusinessTools([{ ...tool, parameters: { type: "object", $ref: "missing" } }]));
+	const result = await callBusinessTool(tool, { query: "a & b" }, new AbortController().signal, "one");
+	assert(!result.isError); assert(!result.text.includes("BUSINESS_SECRET_FIXTURE")); assert.equal(received.at(-1)!.auth, "Bearer BUSINESS_SECRET_FIXTURE");
+	assert.equal(new URL(received.at(-1)!.path, base).searchParams.get("query"), "a & b");
+	const count = received.length; assert((await callBusinessTool(tool, { query: 1 }, new AbortController().signal, "bad")).isError); assert.equal(received.length, count);
+	const post = { ...tool, method: "POST" as const, idempotencyHeader: "Idempotency-Key" };
+	await callBusinessTool(post, { query: "x" }, new AbortController().signal, "stable"); await callBusinessTool(post, { query: "x" }, new AbortController().signal, "stable");
+	assert.equal(received.at(-1)!.key, received.at(-2)!.key);
+	assert.equal(createBusinessTools("member", [post])[0]!.replay, "safe");
+	assert.equal(createBusinessTools("member", [{ ...tool, method: "POST" }])[0]!.replay, "unsafe");
+	assert((await callBusinessTool({ ...tool, url: `${base}/failed` }, { query: "x" }, new AbortController().signal, "failed")).isError);
+	assert((await callBusinessTool({ ...tool, url: `${base}/redirect` }, { query: "x" }, new AbortController().signal, "redirect")).isError);
+	assert(!received.some((item) => item.path === "/forbidden"));
+	assert((await callBusinessTool({ ...post, url: `${base}/slow`, timeoutSeconds: 0.03 }, { query: "x" }, new AbortController().signal, "slow")).text.includes("状态未知"));
+	assert((await callBusinessTool({ ...tool, url: `${base}/slow` }, { query: "x" }, AbortSignal.timeout(30), "cancel")).isError);
+	check(true, "业务 HTTP：参数校验、密钥脱敏、固定端点、幂等键、拒绝重定向、超时和取消");
+
+	// Install the actual member extension into a native Durable conversation.
+	const api = { type: "openai-compatible" as const, baseUrl: base, apiKeyEnv: [], tools: [] as [], bash: "off" as const, bashAllow: [], httpTools: [tool] };
+	const extension = createMemberTools("fixture", api);
+	app.prepareMembers({ ...config, agents: { ...config.agents, fixture: { enabled: true, description: "fixture", workspace: "none", extraArgs: [], models: [{ id: "fixture-model", tier: "standard" }], defaultModel: "fixture-model", timeoutMinutes: 1, maxOutputChars: 1000, api: { ...api, apiKeyEnv: ["LEMMA_BUSINESS_TEST_KEY"] } } } })();
+	const member = await app.harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+	await app.harness.commit((tx) => configure(tx, member.id, { model: orch.ref, extensions: [extension], instructions: "test" }), context);
+	assert.deepEqual((await member.agent(context)).tools.map((entry) => entry.name), ["lookup"]);
+	assert(!(await app.root.agent(context)).tools.some((entry) => entry.name === "lookup"));
+	let toolReply = ""; orch.faux.setResponses([fauxAssistantMessage([fauxToolCall("lookup", { query: "record" })], { stopReason: "toolUse" }), (request: any) => { toolReply = toolResults(request).at(-1)!.text; return fauxAssistantMessage(fauxText("RESULT")); }]);
+	assert.equal((await (await member.submit({ type: "input", content: "query" }, context)).wait(context)).status, "done");
+	assert(toolReply.includes("SOURCE_42")); assert(!toolReply.includes("BUSINESS_SECRET_FIXTURE"));
+	check(true, "原生 Durable 工具调用：业务工具仅授权给对应成员，模型实际调用 HTTP 获得结果");
+
+	assert.throws(() => validateAcceptanceChecks([{ name: "bad", kind: "json_exists", path: "__proto__.x" }]));
+	assert(verifyReport("r", '{"item":{"b":2,"a":1}}', "", [{ name: "equal", kind: "json_equals", path: "item", value: '{"a":1,"b":2}' }], 1).passed);
+	await run("plan_tasks", { tasks: [{ title: "bad", deps: ["T999"] }] }, true);
+	await run("plan_tasks", { tasks: [{ title: "a", deps: ["+2"] }, { title: "b", deps: ["+1"] }] }, true);
+	await run("plan_tasks", { tasks: [{ title: "核对报告", acceptance: "必须交付成功状态与来源", checks: [{ name: "状态", kind: "json_equals", path: "status", value: '"approved"' }, { name: "来源", kind: "json_exists", path: "source" }] }, { title: "后续工作", deps: ["+1"] }] });
+	await run("ask_claude", { task: "too early", task_id: "T2" }, true);
+	assert.equal(fakeCalls(config).length, 0);
+	await run("ask_claude", { task: "REPORT", task_id: "T1" });
+	let board = (await app.harness.snapshot(Board, context))!; const firstId = board.tasks.T1!.latestResult!;
+	assert(firstId); assert.equal(board.tasks.T1!.verification!.passed, false);
+	await run("update_task", { id: "T1", status: "done" }, true);
+	await run("update_task", { id: "T1", acceptance: "降低要求" }, true);
+	await run("review_task", { id: "T1", action: "accept", result_id: firstId, evidence: "通过" }, true);
+	await run("review_task", { id: "T1", action: "rework", result_id: firstId, evidence: "缺少 JSON 状态和来源，请按原标准补齐" });
+	assert.equal((await app.harness.snapshot(Board, context))!.tasks.T1!.status, "todo");
+	check(true, "机器验收失败保留证据；拒绝提前派依赖任务、直接完成或降低标准；返工明确退回待办");
+
+	const report = { id: "fixture:new-report", member: "claude", conversationId: "fixture", submissionId: null, taskId: "fixture", status: "done" as const, text: '{"status":"approved","source":"SOURCE_42"}', createdAt: Date.now() };
+	await app.harness.commit(async (tx) => { await storeResult(tx, app.root.id, report); const b = await tx.doc(Board); b.tasks.T1!.latestResult = report.id; b.tasks.T1!.status = "review"; }, context);
+	await run("review_task", { id: "T1", action: "accept", result_id: firstId, evidence: "旧结果" }, true);
+	await run("review_task", { id: "T1", action: "accept", result_id: report.id }, true);
+	await run("review_task", { id: "T1", action: "accept", result_id: report.id, evidence: "逐项核对状态和 SOURCE_42；业务事实由测试固定响应提供" });
+	await run("review_task", { id: "T1", action: "accept", result_id: report.id, evidence: "逐项核对状态和 SOURCE_42；业务事实由测试固定响应提供" });
+	board = (await app.harness.snapshot(Board, context))!; assert.equal(board.tasks.T1!.status, "done"); assert(board.tasks.T1!.verification!.passed);
+	await run("ask_claude", { task: "HANDOFF", task_id: "T2", inputs: [{ result_id: report.id, offset: 0, limit: 8000 }] });
+	assert(fakeCalls(config).at(-1)!.prompt.includes(report.text)); assert(fakeCalls(config).at(-1)!.prompt.includes("fixture:new-report"));
+	await run("ask_claude", { task: "DENIED", inputs: [{ result_id: "another-controller" }] }, true);
+	assert((await app.harness.snapshot(Results, app.root.id, report.id, context))?.result);
+	check(true, "验收绑定最新结果和证据，跨成员交接传原文与来源；跨会话结果不可读取");
+
+	const failedApi = { ...config.agents.fixture!, api: { ...config.agents.fixture!.api!, httpTools: [{ ...tool, url: `${base}/failed` }] } };
+	app.prepareMembers({ ...config, agents: { ...config.agents, fixture: failedApi } })();
+	let provider = fauxProvider({ provider: memberProvider("fixture"), models: [{ id: "fixture-model" }] }); orch.models.setProvider(provider.provider);
+	provider.setResponses([fauxAssistantMessage([fauxToolCall("lookup", { query: "missing" })], { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("成员声称一切成功"))]);
+	await run("plan_tasks", { tasks: [{ title: "读取业务资料" }] });
+	const failure = await run("ask_fixture", { task: "读取资料", task_id: "T3" }, true);
+	assert(failure.includes("业务工具 lookup 失败"));
+	board = (await app.harness.snapshot(Board, context))!; assert.equal(board.tasks.T3!.status, "blocked"); assert(board.tasks.T3!.latestResult);
+	const sid = failure.match(/session_id: ([0-9]+)/)![1]!;
+	const recoveredApi = { ...failedApi, api: { ...failedApi.api!, httpTools: [tool] } };
+	app.prepareMembers({ ...config, agents: { ...config.agents, fixture: recoveredApi } })();
+	provider = fauxProvider({ provider: memberProvider("fixture"), models: [{ id: "fixture-model" }] }); orch.models.setProvider(provider.provider);
+	provider.setResponses([fauxAssistantMessage([fauxToolCall("lookup", { query: "fixed" })], { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("SOURCE_42 资料已恢复"))]);
+	const recovery = await run("ask_fixture", { task: "接口恢复，核对原任务", task_id: "T3", session_id: sid });
+	assert(recovery.includes(`session_id: ${sid}`)); assert.equal((await app.harness.snapshot(Board, context))!.tasks.T3!.status, "review");
+	check(true, "业务工具失败不能凭成员自述标成功；保存受阻结果后可在同一会话恢复");
+	await app.harness.close(context); app = await openApp(config, orch, context);
+	board = (await app.harness.snapshot(Board, context))!; assert.equal(board.tasks.T1!.status, "done"); assert.equal(board.tasks.T1!.review!.resultId, report.id);
+	assert(board.tasks.T1!.verification!.passed); assert((await app.harness.snapshot(Results, app.root.id, board.tasks.T3!.latestResult!, context))?.result?.text.includes("SOURCE_42"));
+	check(true, "重启保留原会话中的验收规则、通过证据、返工记录与最新完整结果");
+} finally { await app.harness.close(context); server.closeAllConnections(); await new Promise<void>((done) => server.close(() => done())); if (oldKey === undefined) delete process.env.LEMMA_BUSINESS_TEST_KEY; else process.env.LEMMA_BUSINESS_TEST_KEY = oldKey; }

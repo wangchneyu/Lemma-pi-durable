@@ -26,6 +26,8 @@ import { managedDispatch } from "./repair.ts";
 import { createLeadTool, LEAD_TOOL } from "./lead.ts";
 import { conversationIdentity, CONVERSATION_POLICY } from "./conversation.ts";
 import { createReadResultTool } from "./results.ts";
+import { validateAcceptanceChecks, type AcceptanceCheck } from "./acceptance.ts";
+import { createTaskReviewTool } from "./task-review.ts";
 
 export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
@@ -232,6 +234,7 @@ function createAgentTool(kind: AgentKind, command: string[], deps: DispatchDeps,
 			...(models.length ? { model: opt(str({ description: `用哪个模型：${models.map((m) => m.id).join(" / ")}` })) } : {}),
 			based_on: opt(str({ description: "在某次改动（改动编号）的基础上开工，比如审查或接着修改另一个成员刚做的改动" })),
 			task_id: opt(str({ description: "这次派工对应分工表里的哪项任务（如 T3）；会把目标和任务上下文一起交给成员，并更新任务状态" })),
+			inputs: opt(arr(obj({ result_id: str(), offset: opt(num({ minimum: 0 })), limit: opt(num({ minimum: 1, maximum: 8000 })) }), { maxItems: 8, description: "显式交接已成功的成员结果片段；保留来源，不复制完整聊天" })),
 			background: opt(bool({ description: "放到后台执行，不等结果（耗时长、可以和别的工作并行的任务用）" })),
 			...(adapter.canResume ? { session_id: opt(str({ description: "续接之前的会话（之前返回的 session_id）" })) } : {}),
 		}),
@@ -397,6 +400,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 				obj({
 					title: str({ description: "任务标题，一句话" }),
 					acceptance: opt(str({ description: "验收标准：做到什么程度算完成，尽量可检验（比如测试通过、接口可调用）" })),
+					checks: opt(arr(obj({ name: str(), kind: oneOf(["contains", "json_exists", "json_equals"]), path: opt(str()), value: opt(str({ description: "contains 用文本；json_equals 用 JSON 文本" })) }), { maxItems: 20 })),
 					role: opt(str({ description: "角色" })),
 					owner: opt(str({ description: "指定成员：claude / codex / gemini；不填按角色" })),
 					deps: opt(arr(str(), { description: "依赖的任务" })),
@@ -406,16 +410,25 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 			),
 		}),
 		replay: "safe",
-		execute: async (args: { tasks: { title: string; acceptance?: string; role?: string; owner?: string; deps?: string[]; detail?: string; parent?: string }[] }, api, context) => {
+		execute: async (args: { tasks: { title: string; acceptance?: string; checks?: AcceptanceCheck[]; role?: string; owner?: string; deps?: string[]; detail?: string; parent?: string }[] }, api, context) => {
+			for (const task of args.tasks) validateAcceptanceChecks(task.checks ?? []);
 			const { result } = await commitBoard(project, toolIO(api, context), (b) => {
 				// 同一次调用重放时不重复建任务
 				const done = (b as any).calls?.[api.callId] as string[] | undefined;
 				if (done) return done;
-				const ids: string[] = [];
-				for (const t of args.tasks) {
-					const id = `T${b.nextId++}`;
-					ids.push(id);
-					const deps = (t.deps ?? []).map((d) => (/^\+\d+$/.test(d) ? ids[Number(d.slice(1)) - 1] ?? "" : d)).filter((d) => d && d !== id);
+				const ids = args.tasks.map((_, index) => `T${b.nextId + index}`);
+				const dependencies = args.tasks.map((task) => [...new Set((task.deps ?? []).map((id) => /^\+\d+$/.test(id) ? ids[Number(id.slice(1)) - 1] ?? "" : id))]);
+				const graph = new Map(Object.values(b.tasks).map((task) => [task.id, task.deps]));
+				for (const [index, deps] of dependencies.entries()) {
+					if (deps.some((id) => !id || id === ids[index] || (!ids.includes(id) && !b.tasks[id]))) throw new Error("任务依赖不存在、引用自己或新增序号无效，未创建任务。");
+					graph.set(ids[index]!, deps);
+				}
+				const visiting = new Set<string>(), visited = new Set<string>();
+				const visit = (id: string): void => { if (visiting.has(id)) throw new Error("任务依赖存在循环，未创建任务。"); if (visited.has(id)) return; visiting.add(id); for (const dependency of graph.get(id) ?? []) visit(dependency); visiting.delete(id); visited.add(id); };
+				for (const id of ids) visit(id);
+				b.nextId += ids.length;
+				for (const [index, t] of args.tasks.entries()) {
+					const id = ids[index]!, deps = dependencies[index]!;
 					b.tasks[id] = defined({
 						id,
 						title: t.title,
@@ -426,6 +439,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 						deps,
 						parent: t.parent,
 						acceptance: t.acceptance,
+						checks: t.checks,
 						notes: [],
 						dispatches: [],
 						changes: [],
@@ -470,6 +484,9 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 			const { result, board } = await commitBoard(project, toolIO(api, context), (b) => {
 				const t = b.tasks[args.id];
 				if (!t) return false;
+				if (args.acceptance !== undefined && args.acceptance !== t.acceptance && t.dispatches.length) return "首次派工后验收标准已锁定；请保留失败证据，需求变化时新建任务。";
+				if (args.status === "done" && t.checks?.length && t.status !== "done") return "该任务配置了机器验收规则，请使用 review_task 对最新结果验收，不能直接标完成。";
+				if (args.status === "done" && t.deps.some((id) => b.tasks[id]?.status !== "done")) return "前置任务尚未验收完成。";
 				if (args.status === "done" && config.autonomy.enabled && t.changes.some((id) => {
 					const change = changes.get(id);
 					return change && change.files.length > 0 && config.autonomy.checks.length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed);
@@ -522,6 +539,7 @@ export function createLocalAgentsExtension(
 	const jobTask = createJobTask(deps, commands);
 	const tools = [
 		createReadResultTool(),
+		createTaskReviewTool(project, config, changes),
 		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
 		...createJobTools(hub),
 		...createBoardTools(config, project, changes),
@@ -572,7 +590,8 @@ export function createLocalAgentsExtension(
 						"2. 项目级、多步骤的任务：先用 plan_tasks 拆解，每项写清楚验收标准、角色、依赖；然后按依赖顺序派工，互不依赖的任务同时派。",
 						"3. 派工时传 task_id：成员会同时拿到项目目标、这项任务和分工全貌，知道自己在全局里的位置。",
 						"4. 选模型：按任务难度传 model。简单、机械的活用［经济］，日常开发用［标准］，复杂设计、跨模块改动、疑难问题才用［强力］。不确定就不传，用默认（角色配置里写了模型的优先用它）。",
-						"5. 成员完成后任务会变成「待验收」：对照验收标准核对（必要时派审查角色），用 update_task 标完成或打回并写明原因。",
+						"5. 成员完成后任务会变成「待验收」：用 review_task 对最新 result_id 检查、accept、rework 或 block，并写明证据。预设 checks 会对完整结果计算，不通过不能完成；规则只验证格式和显式字段，不证明事实。首次派工后标准锁定，不能降低标准绕过失败。",
+						"5a. 跨成员交接使用 ask_* 的 inputs，按 result_id、offset、limit 交付原文片段；保留来源，避免手工转述失真。有依赖的任务必须等前置任务验收完成才能派工。业务工具 POST 失败时可能已在远端生效，先核对状态，不自动重试。",
 						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
 						"6a. 成员结果默认只带限长预览；全文按 result_id 持久保存。缺少证据时用 read_result 分页读取，不能把截断预览当全文。续接只发送变更和必要证据，避免重复复制整段历史。",
 						...(config.lead.enabled
