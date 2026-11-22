@@ -12,7 +12,7 @@
     "test:dialogue": "node --no-warnings test/conversation.ts",
     "test:harness": "node --no-warnings test/sessions.ts && node --no-warnings test/repair.ts && node --no-warnings test/sessions-cli.ts",
     "test:conversations": "node --no-warnings test/conversations-web.ts && node --no-warnings test/admin-rebind.ts",
-    "test:terminal": "node --no-warnings test/terminal.ts && node --no-warnings test/terminal-state.ts && node --no-warnings test/terminal-cli.ts && node --no-warnings test/terminal-child-view.ts",
+    "test:terminal": "node --no-warnings test/terminal.ts && node --no-warnings test/terminal-state.ts && node --no-warnings test/model-selection.ts && node --no-warnings test/terminal-cli.ts && node --no-warnings test/terminal-child-view.ts && node --no-warnings test/terminal-model-selection.ts",
     "test": "npm run test:dialogue && node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/steer.ts && node --no-warnings test/board.ts && node --no-warnings test/jobs.ts && node --no-warnings test/api-member.ts && node --no-warnings test/lead.ts && node --no-warnings test/conventions.ts && node --no-warnings test/web.ts && npm run test:terminal && npm run test:harness && npm run test:conversations"
   },
   "keywords": [],
@@ -26,6 +26,7 @@
   "dependencies": {
     "@earendil-works/chord": "^1.6.0",
     "@earendil-works/pi-ai": "^1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
     "@earendil-works/pi-durable": "^1.6.0",
     "@earendil-works/pi-schema": "^1.6.0",
     "@earendil-works/pi-tui": "1.6.0"

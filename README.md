@@ -127,7 +127,15 @@ Lemma 的产品身份会随每次模型请求提供，并与实际配置的模�
 
 ### 新版终端（默认真实模式）
 
-使用与 Pi Durable 同版本的 `@earendil-works/pi-tui@1.6.0`，把输入、对话日志和任务状态交给一个渲染器管理。Windows 上建议在 Windows Terminal + PowerShell 7 中体验。
+沿用 [Pi Durable 官方示例](https://earendil.com/posts/pi-durable/)的组合方式：Durable 负责执行与持久化，`@earendil-works/pi-coding-agent@1.6.0` 提供原生消息和工具组件，`pi-tui@1.6.0` 负责终端布局与输入。Windows 上建议在 Windows Terminal + PowerShell 7 中体验。
+
+具体复用边界：
+
+- 用户消息、助手消息、Markdown、代码高亮、思考块和工具执行展示直接使用官方 `UserMessageComponent`、`AssistantMessageComponent`、`ToolExecutionComponent`，不再维护自建消息或工具卡片。文件读写、编辑和 shell 工具沿用官方展示钩子；`ask_*` 等业务工具使用官方通用展示。
+- 终端通过 `conversation.watch()` 读取原始模型消息与流式参数，通过 `ConversationTranscript` 合并滑动窗口，通过 `watchTaskGraph()` 查看执行关系。网页继续使用自己的 JSON 投影，终端保留完整思考块和结构化工具结果。
+- Pi Durable 的 Harness、任务、SQLite、子对话和恢复机制继续负责运行。编码代理的 UI 组件不执行任务，也不会启动第二套 `AgentSession`。
+- 交互复用官方 `CustomEditor`、`SessionSelectorComponent`、`TreeSelectorComponent` 和 `ModelSelectorComponent`。编辑器额外处理各会话的历史、草稿、撤销与剪切隔离；选择器只映射已有会话元数据，不创建 Pi JSONL 会话，不删除数据库，也不复制成员完整聊天。
+- 保留薄的 Durable 控制适配层，不实例化完整 `InteractiveMode`：它要求 coding-agent 的 `AgentSessionRuntime`，会引入另一套会话和执行控制。模型目录适配器只提供原生选择器需要的四个读取/刷新方法，直接委托给 Harness 使用的同一个 pi-ai Models。选择结果写入 Durable 的 `pi.agent`；这项接入依赖固定的 `1.6.0` 组件契约，有专项回归测试。
 
 默认直接使用配置中的真实模型和本机 CLI，会按各服务的计费规则产生费用：
 
@@ -141,8 +149,10 @@ npm start
 npm run demo:tui
 ```
 
-- 顶部显示项目、模型和当前对话，中间用 Pi TUI 的 Markdown 消息与工具卡片显示用户输入、助手回答、流式内容和执行结果，底部固定显示多行输入区、运行状态、后台派工、本轮成员花费和待合并数量。工具卡片默认显示摘要和最近输出，Ctrl+E 切换更多详情。
+- 顶部显示项目、模型和当前对话，中间用官方 coding-agent 组件显示用户输入、助手回答、流式内容和执行结果，底部固定显示多行输入区、运行状态、后台派工、本轮成员花费和待合并数量。业务工具默认预览前十行，Ctrl+E 展开完整输出；内置文件工具按官方规则折叠。Alt+T 展开或收起原生思考块。
 - Ctrl+K 打开可搜索的会话选择器：既可切换独立工作会话，也可只读查看当前会话内的子调度和 API 成员子对话。查看子对话不会触发模型、转发历史或把输入发给成员；输入 `/main` 返回总控。外部 CLI 的私有完整聊天仍由各 CLI 管理。
+- Alt+C 或 `/tree` 打开官方树选择器，展示「工作会话 → 总控 → 子调度 / API 成员」的 Durable 所属关系，支持搜索和分支折叠；选择节点只切换视图，不回滚消息或改写执行分支。这里只展示当前存储的子对话，其他工作会话先切换再读取；它不是消息级时间旅行。
+- Ctrl+L 或 `/model` 打开官方模型选择器；`/model <模型ID>` 也可直接切换当前总控。选中模型保存在本会话的 Durable agent 文档，重启继续使用；运行中和只读子对话拒绝切换。其他会话和已经派出的成员保持原模型，网页与终端显示从 Durable 读取的当前选择。
 - Ctrl+T 或 `/taskgraph` 切换原生任务面板，直接订阅 Pi Durable `watchTaskGraph()`，显示排队、运行、等待、休眠、收尾状态以及任务父子关系。`/tasks` 继续显示项目分工表。
 - Enter 发送；Shift+Enter 或 Ctrl+J 换行；Tab 补全斜杠命令和路径；方向键可找回输入历史；PageUp/PageDown 翻看日志。
 - 多行粘贴保留为一个任务，实时日志和流式回答不会修改正在编辑的草稿。所有原有 `/jobs`、`/tasks`、`/apply` 等命令继续可用。
@@ -333,6 +343,10 @@ npm run demo
 | `openai-compatible` | OpenAI Chat Completions 协议（DeepSeek、Ollama、各种中转站），需填 `baseUrl`。 |
 | `builtin` | pi-ai 内置 provider，填 `provider`（如 `anthropic`、`openai`、`google`），读取对应的标准环境变量。 |
 
+`orchestrator.modelId` 是启动默认模型；中转站可用 `orchestrator.modelIds` 显式列出更多可切换 ID，同用配置的地址、协议、凭据、上下文上限和单价。请只填写服务实际支持的模型，并确认这些参数适用。内置 provider 使用它自己的模型目录与参数。选择器限当前总控 provider，不混入成员模型，不会发出聊天请求。
+
+会话内切换模型不修改项目配置文件。启动默认模型不变时恢复会话选择；显式修改 `orchestrator.modelId` 或 provider 后按新配置更新。旧会话和任务无需迁移。
+
 **成员**（`agents.<claude|codex|gemini>`）：
 
 - `enabled`：开关
@@ -398,7 +412,10 @@ npm test
 - `test/web.ts`：以演示模式启动终端，从 stdin 下发任务（异步剧本），检查后台接口、Host/Origin 校验、网页不能下发任务、SSE 实时推送（包括后台派工的状态和实时输出）、派工汇总、拓扑接口（多会话泳道、依赖、并行峰值）和历史分页
 - `test/conversations-web.ts`：网页新建、切换、重命名与过期请求保护；比较切换前后的原始聊天、项目任务、成员会话、派工、用量和改动，验证进程重启后历史与选中状态仍保留
 - `test/admin-rebind.ts`：HTTP 服务原位切换会话，同一连接、端口和启动时间保持；验证实时连接重取快照、过期控制请求拒绝、失败回滚及订阅释放
-- `test/terminal-state.ts`：原生消息和任务图订阅、滑动历史窗口、重置后记录保留、最新子对话列表及停止后不再更新，不产生模型请求
+- `test/terminal.ts`：检查实际使用官方消息、工具、编辑器和选择器实例，验证关系树导航、模型搜索、刷新取消、思考块、流式参数、工具展开、控制序列过滤、窄窗口和输入隔离
+- `test/model-selection.ts`：模型选择写入 Durable，重启恢复、独立会话隔离、后续真实请求路由（假模型）、运行中拒绝切换、配置变更及目录刷新不发出聊天请求
+- `test/terminal-model-selection.ts`：真实终端入口使用原生模型选择器，验证网页与拓扑同步、草稿保留、跨工作会话模型隔离及进程重启恢复，不调用模型服务
+- `test/terminal-state.ts`：原生消息和任务图订阅、完整模型消息、生成文档、嵌套工具、滑动历史窗口、重置后记录保留、最新子对话列表及停止后不再更新，不产生模型请求
 - `test/terminal-child-view.ts`：通过真实终端选择器只读查看成员子对话，验证输入和重置不会修改子对话、返回后恢复草稿，终端与网页服务不重启
 
 ## 代码结构
@@ -420,8 +437,11 @@ npm test
 | `src/sessions.ts` | 命名会话目录、独立存储和项目看板隔离 |
 | `src/repair.ts` | 有次数和预算限制的自动修复 |
 | `src/learning.ts` | 经配置验收通过的修复记录与按需检索 |
-| `src/terminal.ts` | Pi TUI 消息与工具卡片、会话选择器、任务面板和持久编辑器 |
-| `src/terminal-state.ts` | 原生 conversation/task graph 订阅、消息窗口与只读子对话列表 |
+| `src/native-terminal-components.ts` | 官方 coding-agent 消息与工具组件、原生工具展示钩子与终端控制序列过滤 |
+| `src/native-selectors.ts` | 官方会话列表与关系树的纯展示适配，沿用 Durable ID，禁用文件删除 |
+| `src/model-selection.ts` | Durable agent 模型选择、启动恢复和原生模型目录接口适配 |
+| `src/terminal.ts` | 组合官方消息与工具组件，提供会话选择器、任务面板和持久编辑器 |
+| `src/terminal-state.ts` | 原生 conversation/task graph 订阅、ConversationTranscript、完整模型消息与只读子对话列表 |
 | `src/models.ts` | 总调度模型 |
 | `src/app.ts` | 打开 Harness（SQLite + 工具 + 模型） |
 | `src/printer.ts` | 终端实时显示进度 |

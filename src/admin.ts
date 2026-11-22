@@ -469,6 +469,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 	 * 同一个成员的多条泳道 = 它同时 / 先后开的多个会话；时间条重叠 = 并行。
 	 */
 	async function topology(limit = 80) {
+		const controller = await root.agent(context);
 		const sessions = ((await harness.snapshot(AgentSessions, context)) as any)?.sessions ?? {};
 		const live = lastLive;
 		const now = Date.now();
@@ -574,7 +575,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		for (const e of edges) peak = Math.max(peak, (current += e.d));
 		return {
 			now,
-			orchestrator: { model: orchestrator.info?.modelId ?? config.orchestrator.modelId, busy: live.busy, turns: live.turns },
+			orchestrator: { model: controller.model?.modelId ?? config.orchestrator.modelId, busy: live.busy, turns: live.turns },
 			members: [
 				...agents.map((a) => ({ kind: a.kind, label: ADAPTERS[a.kind].label, available: a.available })),
 				...(leads.size ? [{ kind: "lead", label: "子调度", available: true }] : []),
@@ -588,6 +589,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 
 	async function state() {
 		await refreshJobs();
+		const controller = await root.agent(context);
 		const usage = (await harness.usage(context)) as any;
 		const sessions = ((await harness.snapshot(AgentSessions, context)) as any)?.sessions ?? {};
 		const useCount = new Map<string, number>();
@@ -606,9 +608,9 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			entries: entryCount,
 			jobs: jobList(),
 			orchestrator: {
-				describe: orchestrator.describe,
+				describe: controller.model ? `${controller.model.provider}/${controller.model.modelId}` : orchestrator.describe,
 				type: orchestrator.info?.type ?? o.type,
-				modelId: orchestrator.info?.modelId ?? o.modelId,
+				modelId: controller.model?.modelId ?? o.modelId,
 				host: orchestrator.info?.host,
 				keySource: orchestrator.info?.keySource ?? "",
 				maxTurns: o.maxTurns ?? 40,

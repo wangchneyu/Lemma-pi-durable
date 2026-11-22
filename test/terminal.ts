@@ -5,6 +5,12 @@ import { AgentTerminal, terminalText } from "../src/terminal.ts";
 import { setOutputSink, writeLine } from "../src/printer.ts";
 import { check } from "./helpers.ts";
 import type { ViewItem, ViewLive } from "../src/view.ts";
+import { AssistantMessageComponent, CustomEditor, UserMessageComponent, ToolExecutionComponent, SessionSelectorComponent, TreeSelectorComponent } from "@earendil-works/pi-coding-agent";
+import { assistantMessage } from "../src/native-terminal-components.ts";
+import { nativeSessions, nativeConversationTree, conversationTree } from "../src/native-selectors.ts";
+import { nativeModelCatalog } from "../src/model-selection.ts";
+import { createModels } from "@earendil-works/pi-ai";
+import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 
 class MemoryTerminal implements Terminal {
 	columns = 100;
@@ -75,6 +81,7 @@ const frame = () => {
 
 try {
 	ui.start();
+	assert.ok(ui.editor instanceof CustomEditor);
 	check(terminal.active && frame().includes("Lemma") && frame().includes("演示模式"), "新版终端可以启动并显示 Lemma 品牌");
 	check(
 		frame().includes("frontend") && frame().includes("总控 CID:controller-123"),
@@ -187,16 +194,24 @@ try {
 	let structured = frame();
 	assert.equal(structured.split("用户唯一标记").length - 1, 1);
 	assert.ok(structured.includes("FIRST_RESULT") && structured.includes("LIVE_OUTPUT"), structured);
-	assert.ok(structured.includes("完成") && structured.includes("执行中") && structured.includes("增量回答"), structured);
+	assert.ok(structured.includes("第一次派工") && structured.includes("第二次派工") && structured.includes("增量回答"), structured);
 	assert.ok(!structured.includes("**Markdown**"));
+	const nativeCards = (ui as unknown as { cards: Map<string, unknown> }).cards;
+	assert.ok(nativeCards.get("entry:1") instanceof UserMessageComponent);
+	assert.ok(nativeCards.get("entry:2") instanceof AssistantMessageComponent);
+	assert.ok(nativeCards.get("tool:2:reused") instanceof ToolExecutionComponent);
+	check(true, "消息和工具实际使用官方 coding-agent 组件实例，而非自建同名卡片");
 	items.push({ id: 5, type: "tool", callId: "reused", name: "ask_codex", text: "SECOND_RESULT", isError: true });
 	live.tools = [];
 	live.partial = "";
 	live.busy = false;
 	ui.applyConversation({ items, live });
 	structured = frame();
+	const failedTool = nativeCards.get("tool:4:reused") as ToolExecutionComponent;
+	const successfulTool = nativeCards.get("tool:2:reused") as ToolExecutionComponent;
+	assert.notEqual(failedTool.render(100).join("\n").match(/\x1b\[48[^m]*m/)?.[0], successfulTool.render(100).join("\n").match(/\x1b\[48[^m]*m/)?.[0]);
 	assert.ok(
-		structured.includes("FIRST_RESULT") && structured.includes("SECOND_RESULT") && structured.includes("失败"),
+		structured.includes("FIRST_RESULT") && structured.includes("SECOND_RESULT"),
 		structured,
 	);
 	assert.deepEqual(ui.editor.getCursor(), stableCursor);
@@ -209,18 +224,18 @@ try {
 			tools: [
 				{
 					callId: "expanded",
-					name: "read",
+					name: "ask_codex",
 					status: "running",
-					output: `${"旧日志\n".repeat(800)}DETAIL_TOP\nline2\nline3\nline4\nLATEST_OUTPUT`,
+					output: `DETAIL_TOP\n${"日志\n".repeat(15)}LATEST_OUTPUT`,
 				},
 			],
 		},
 	});
-	assert.ok(frame().includes("LATEST_OUTPUT") && !frame().includes("DETAIL_TOP"));
+	assert.ok(frame().includes("DETAIL_TOP") && !frame().includes("LATEST_OUTPUT") && frame().includes("ctrl+e"));
 	terminal.input("\x05");
-	assert.ok(frame().includes("DETAIL_TOP"));
+	assert.ok(frame().includes("LATEST_OUTPUT"));
 	terminal.input("\x05");
-	check(true, "工具输出默认跟随最新内容，展开后可查看保留的详细日志");
+	check(true, "工具使用原生前十行预览和 Ctrl+E 展开，快捷键提示与操作一致");
 
 	ui.applyConversation({
 		items: [
@@ -241,6 +256,33 @@ try {
 		JSON.stringify(rendered),
 	);
 	check(true, "Markdown 编码链接和模型控制序列不能发出终端操作或超链接载荷");
+	const thinkingMessage = assistantMessage("");
+	thinkingMessage.content = [{ type: "thinking", thinking: "原生思考唯一标记" }, { type: "text", text: "原生回答唯一标记" }];
+	ui.applyConversation({ items: [{ id: 30, type: "assistant", text: "原生回答唯一标记", toolCalls: [], message: thinkingMessage }], live });
+	assert.ok(!frame().includes("原生思考唯一标记") && frame().includes("Thinking"));
+	terminal.input("\x1bt");
+	assert.ok(frame().includes("原生思考唯一标记"));
+	terminal.input("\x1bt");
+	const partialMessage = assistantMessage("");
+	partialMessage.content = [{ type: "toolCall", id: "streamed", name: "ask_codex", arguments: { task: "流式参数第一版" } }];
+	const streamTool = { callId: "streamed", name: "ask_codex", status: "pending", output: "", argsComplete: false, args: { task: "流式参数第一版" } };
+	ui.applyConversation({ items: [], live, partialMessage, tools: [streamTool] });
+	assert.ok(frame().includes("流式参数第一版"));
+	streamTool.args = { task: "流式参数第二版" };
+	ui.applyConversation({ items: [], live, partialMessage, tools: [streamTool] });
+	assert.ok(frame().includes("流式参数第二版") && !frame().includes("流式参数第一版"));
+	ui.applyConversation({ items: [], live: { ...live, tools: [] } });
+	assert.ok(!frame().includes("流式参数第二版"));
+	check(true, "原始思考块可展开，原生工具参数增量更新且取消后清理");
+	ui.applyConversation({ items: [
+		{ id: 40, type: "assistant", text: "", toolCalls: [{ id: "file-read", name: "read", args: { path: "src/main.ts" } }] },
+		{ id: 41, type: "tool", callId: "file-read", name: "read", text: "FILE_NATIVE_CONTENT", isError: false },
+	], live });
+	assert.ok(frame().includes("src/main.ts") && !frame().includes("FILE_NATIVE_CONTENT"));
+	terminal.input("\x05");
+	assert.ok(frame().includes("FILE_NATIVE_CONTENT"));
+	terminal.input("\x05");
+	check(true, "内置 read 使用官方文件工具渲染和折叠规则，失败工具使用原生错误背景");
 
 	ui.applyTasks([
 		{
@@ -261,6 +303,7 @@ try {
 		{ id: "session:frontend", title: "前端", current: true },
 		{ id: "conversation:7", title: "后端审查", detail: "子对话 · 只读" },
 	]);
+	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.ok(frame().includes("切换会话"));
 	terminal.input("后端");
 	terminal.input("\r");
@@ -279,6 +322,43 @@ try {
 		terminal.input("\x1b");
 	}
 	check(true, "原生任务面板、可搜索会话选择器和只读子对话标题支持窄窗口且保留草稿");
+	terminal.columns = 100; terminal.rows = 30; terminal.resize();
+	const choices = [
+		{ id: "session:frontend", title: "前端", current: true },
+		{ id: "conversation:root", title: "总控", parentId: "session:frontend" },
+		{ id: "conversation:member", title: "成员唯一树标记", parentId: "conversation:root" },
+	];
+	const native = nativeSessions(choices, () => {}, () => {}, () => {});
+	assert.ok(native instanceof SessionSelectorComponent);
+	assert.equal(native.getSessionList().onDeleteSession, undefined);
+	native.getSessionList().onCancel?.();
+	const tree = nativeConversationTree(choices, 30, () => {}, () => {});
+	assert.ok(tree instanceof TreeSelectorComponent);
+	assert.equal(conversationTree(choices)[0]?.children[0]?.children[0]?.entry.id, "conversation:member");
+	assert.equal(conversationTree([{ id: "a", title: "a", parentId: "b" }, { id: "b", title: "b", parentId: "a" }]).length, 2);
+	ui.showConversationTree(choices);
+	assert.ok(frame().includes("Session Tree"));
+	terminal.input("成员唯一树标记");
+	terminal.input("\r");
+	assert.equal(selected.at(-1), "conversation:member");
+	assert.equal(ui.editor.getExpandedText(), beforePicker);
+	const models = createModels();
+	const faux = fauxProvider({ provider: "selector-test", models: [{ id: "first" }, { id: "second" }] });
+	models.setProvider(faux.provider);
+	const catalog = await nativeModelCatalog(models, "selector-test");
+	let chosen = "";
+	ui.showModels(catalog, models.getModel("selector-test", "first"), catalog.getAvailableSnapshot(), (model) => { chosen = model.id; });
+	terminal.input("second");
+	terminal.input("\r");
+	assert.equal(chosen, "second");
+	assert.equal(ui.editor.getExpandedText(), beforePicker);
+	const aborts: AbortSignal[] = [];
+	ui.showModels({ ...catalog, refresh: (options) => new Promise((resolve) => { const signal = options!.signal!; aborts.push(signal); signal.addEventListener("abort", () => resolve({ aborted: true, errors: new Map() }), { once: true }); }) }, models.getModel("selector-test", "first"), catalog.getAvailableSnapshot(), () => {});
+	ui.bind(binding, beforePicker);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.ok(aborts.every((signal) => signal.aborted));
+	assert.equal(faux.state.callCount, 0);
+	check(true, "实际原生会话、关系树和模型选择器可导航，切换时取消刷新并保留输入草稿");
 
 	terminal.input("\x03");
 	assert.equal(interrupts, 1);

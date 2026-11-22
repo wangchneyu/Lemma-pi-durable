@@ -1,9 +1,10 @@
 // 原生视图与任务图测试：只写内存存储，不调用模型或 CLI。
 import assert from "node:assert/strict";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createRegistry, defineExtension, defineTask, Harness, MemoryStorage, type Conversation, type ConversationWatch, type EntryDraft } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTask, Harness, LiveDoc, MemoryStorage, type Conversation, type ConversationWatch, type EntryDraft, type TaskId } from "@earendil-works/pi-durable";
 import { listNativeConversations, watchTerminalState, type NativeTerminalTask, type TerminalConversationView } from "../src/terminal-state.ts";
 import { check, fauxOrchestrator } from "./helpers.ts";
+import { assistantMessage } from "../src/native-terminal-components.ts";
 
 const context = BACKGROUND_CONTEXT;
 const registry = createRegistry();
@@ -45,6 +46,27 @@ try {
 	assert.equal((current.items[1] as { text: string }).text, "重置后的独立内容");
 	assert.equal((await root.entries({}, 1000, undefined, context)).items.filter((entry) => entry.kind === "pi.user").length, 541);
 	check(true, "重置后只展示新上下文，原始记录仍在原生存储中");
+	const nativeMessage = assistantMessage("原始回答");
+	nativeMessage.content.unshift({ type: "thinking", thinking: "不能被网页投影丢掉的思考" });
+	await root.commit((tx) => tx.appendEntry(root.id, { kind: "pi.assistant", model: [nativeMessage] }), context);
+	await until(() => current.items.at(-1)?.type === "assistant");
+	assert.deepEqual(current.items.at(-1)?.message, JSON.parse(JSON.stringify(nativeMessage)));
+	check(true, "终端保留完整原始助手消息，思考、模型和用量不经过网页文本压平");
+	const streaming = assistantMessage("原生流式正文");
+	streaming.content.push({ type: "toolCall", id: "stream-args", name: "ask_codex", arguments: { task: "尚未完成的参数" } });
+	await root.commit(async (tx) => {
+		const doc = await tx.doc(LiveDoc, root.id);
+		doc.generation = { attempt: 1, message: JSON.parse(JSON.stringify(streaming)) };
+		doc.nestedTools = [{ callId: "outer/read", parentCallId: "outer", name: "read", status: "done", parentTaskId: 1 as TaskId, taskId: 2 as TaskId, arguments: { path: "src/main.ts" }, summary: { isError: true, error: "nested failure" } }];
+	}, context);
+	await until(() => current.tools?.some((tool) => tool.callId === "stream-args") === true);
+	assert.deepEqual(current.partialMessage, JSON.parse(JSON.stringify(streaming)));
+	assert.equal(current.tools?.find((tool) => tool.callId === "stream-args")?.argsComplete, false);
+	assert.deepEqual(current.tools?.find((tool) => tool.callId === "stream-args")?.args, { task: "尚未完成的参数" });
+	assert.equal(current.tools?.find((tool) => tool.callId === "outer/read")?.isError, true);
+	await root.commit(async (tx) => { const doc = await tx.doc(LiveDoc, root.id); delete doc.generation; delete doc.nestedTools; }, context);
+	await until(() => current.partialMessage === undefined && current.tools?.length === 0);
+	check(true, "原生生成文档保留流式参数和嵌套工具，结束时清理且不调用模型");
 	const owner = await root.commit((tx) => tx.createTask(sleeper, null, { ownership: { kind: "conversation" }, background: true }), context);
 	const child = await harness.createConversation({ ownership: { kind: "task", taskId: owner } }, context);
 	await child.commit((tx) => tx.appendEntry(child.id, userEntry("子负责人验证任务")), context);

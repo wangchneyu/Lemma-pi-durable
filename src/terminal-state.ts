@@ -1,10 +1,17 @@
 // 终端的状态适配层：只订阅 Durable 原生视图，不调度模型，也不拥有会话。
 import type { Context } from "@earendil-works/chord/context";
-import type { Conversation, ConversationView, ConversationWatch, Harness, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
+import type { Conversation, ConversationView, ConversationWatch, EntryRecord, Harness, LiveState, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
+import { ConversationTranscript } from "@earendil-works/pi-durable";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { toViewItem, toViewLive, type ViewItem, type ViewLive } from "./view.ts";
 
+export type TerminalItem = ViewItem & { message?: Message };
+export type TerminalTool = ViewLive["tools"][number] & { args?: Record<string, unknown>; argsComplete?: boolean; isError?: boolean };
+
 export interface TerminalConversationView {
-	items: ViewItem[];
+	items: TerminalItem[];
+	partialMessage?: AssistantMessage;
+	tools?: TerminalTool[];
 	live: ViewLive;
 }
 
@@ -21,6 +28,9 @@ export interface NativeConversationSummary {
 	id: string;
 	title: string;
 	detail: string;
+	parentId?: string;
+	workdir?: string;
+	createdAt?: number;
 }
 
 export interface TerminalStateOptions {
@@ -41,10 +51,9 @@ export async function watchTerminalState(options: TerminalStateOptions): Promise
 	let stopped = false;
 	let conversationWatch: ConversationWatch | undefined;
 	let graphWatch: TaskGraphWatch | undefined;
-	let newest = -1;
-	let resetAt = -1;
-	let retained: { item: ViewItem; size: number }[] = [];
-	let retainedCharacters = 0;
+	const createTranscript = () => new ConversationTranscript((query, limit, ctx) => conversation.entries(query, limit, undefined, ctx));
+	let transcript = createTranscript();
+	const projected = new WeakMap<EntryRecord, { item: TerminalItem; size: number }>();
 	const report = (error: unknown) => {
 		if (stopped) return;
 		try { options.onError?.(error); } catch { /* 错误提示不能中断 Durable 的订阅。 */ }
@@ -57,24 +66,40 @@ export async function watchTerminalState(options: TerminalStateOptions): Promise
 	};
 	const renderConversation = (view: ConversationView) => {
 		if (stopped) return;
-		for (const entry of view.entries) {
-			const id = Number(entry.id);
-			if (id <= newest) continue;
-			newest = id;
-			if (entry.kind === "pi.reset") { resetAt = id; retained = []; retainedCharacters = 0; }
-			if (id < resetAt) continue;
-			let item = toViewItem(entry);
-			if (!item) continue;
-			// 只限制显示副本；完整原始条目仍在 SQLite 中。
-			if ("text" in item && item.text.length > 20_000) item = { ...item, text: `${item.text.slice(0, 20_000)}\n…（完整内容保存在历史记录中）` };
-			const size = JSON.stringify(item).length;
-			retained.push({ item, size });
-			retainedCharacters += size;
+		// Upstream owns sliding-window merging and entry identity; IDs need not be contiguous.
+		let merged = transcript.merge(view);
+		// Bound only the presentation cache. Original history remains in SQLite.
+		if (merged.items.length > MAX_ITEMS * 4) { transcript = createTranscript(); merged = transcript.merge(view); }
+		const retained: { item: TerminalItem; size: number }[] = [];
+		let retainedCharacters = 0;
+		for (const row of merged.items) {
+			if (row.kind !== "entry") continue;
+			const entry = row.entry;
+			if (entry.kind === "pi.reset") { retained.length = 0; retainedCharacters = 0; }
+			let display = projected.get(entry);
+			if (!display) {
+				const item = toViewItem(entry);
+				if (!item) continue;
+				const native = { ...item, message: entry.model?.[0] as Message | undefined };
+				display = { item: native, size: JSON.stringify(native).length };
+				projected.set(entry, display);
+			}
+			retained.push(display);
+			retainedCharacters += display.size;
 			while (retained.length > MAX_ITEMS || (retainedCharacters > MAX_CHARACTERS && retained.length > 1)) retainedCharacters -= retained.shift()!.size;
 		}
 		const live = toViewLive(view.docs["pi.live"], view.docs["pi.inbox"]);
-		if (retained.at(-1)?.item.type === "divider" && retained.at(-1)?.item.id === resetAt) live.runFailure = undefined;
-		publish(() => options.onConversation({ items: retained.map(({ item }) => item), live }));
+		if (view.entries.at(-1)?.kind === "pi.reset") live.runFailure = undefined;
+		const raw = view.docs["pi.live"] as LiveState | undefined;
+		const partialMessage = raw?.generation?.message as AssistantMessage | undefined;
+		const tools: TerminalTool[] = [...live.tools, ...(raw?.nestedTools ?? []).map((slot) => ({
+			callId: slot.callId, name: slot.name, status: slot.status, output: slot.output ?? slot.summary?.error ?? "",
+			details: slot.details, args: slot.arguments, isError: slot.summary?.isError,
+		}))];
+		for (const block of partialMessage?.content ?? []) if (block.type === "toolCall" && block.name && !tools.some((tool) => tool.callId === block.id)) tools.push({
+			callId: block.id, name: block.name, args: block.arguments, argsComplete: false, status: "pending", output: "",
+		});
+		publish(() => options.onConversation({ items: retained.map(({ item }) => item), live, partialMessage, tools }));
 	};
 	const renderGraph = (graph: TaskGraph) => publish(() => options.onTasks(Object.values(graph.tasks).map((node) => ({
 		id: String(node.id), kind: node.kind, status: node.state.status, conversationId: String(node.conversationId),
@@ -110,6 +135,9 @@ export async function listNativeConversations(harness: Harness, root: Conversati
 		const isRoot = String(record.id) === String(root.id);
 		return {
 			id: String(record.id), title: isRoot ? "总调度" : summary,
+			parentId: isRoot ? undefined : String(record.owner?.conversationId ?? record.parent?.conversationId ?? root.id),
+			workdir: agent.cwd,
+			createdAt: user?.type === "user" ? user.at : undefined,
 			detail: `${isRoot ? "主对话" : `所属对话 ${record.owner?.conversationId ?? record.parent?.conversationId ?? "独立"}`} · CID:${record.id}${agent.model ? ` · ${agent.model.modelId}` : ""}${agent.cwd ? ` · ${agent.cwd}` : ""}`,
 		};
 	}));

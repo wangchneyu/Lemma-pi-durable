@@ -80,7 +80,7 @@ export function createOrchestratorModel(config: OrchestratorConfig): Orchestrato
 				},
 			},
 		},
-		models: [model],
+		models: [...new Set([config.modelId, ...(config.modelIds ?? [])])].map((id) => ({ ...model, id, name: id })),
 		api: config.type === "anthropic-compatible" ? anthropicMessagesApi() : openAICompletionsApi(),
 	});
 	const models = createModels();

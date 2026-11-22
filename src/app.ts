@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import type { Context } from "@earendil-works/chord/context";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, MemoryStorage, type Conversation } from "@earendil-works/pi-durable";
+import { restoreControllerModel } from "./model-selection.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { registerApiMembers } from "./api-member.ts";
@@ -112,7 +113,8 @@ export async function openApp(
 	});
 	if (!options.readOnly) {
 		// 配置文件改了模型时，让已存在的会话跟着更新
-		await root.configure({ model: orchestrator.ref, maxTurns: config.orchestrator.maxTurns ?? 40, cwd: config.workdir }, context);
+		await restoreControllerModel(harness, root, orchestrator.models, orchestrator.ref, context);
+		await root.configure({ maxTurns: config.orchestrator.maxTurns ?? 40, cwd: config.workdir }, context);
 	}
 	jobs.harness = harness;
 	return { harness, root, agents, changes, project, jobs };

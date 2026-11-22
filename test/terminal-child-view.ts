@@ -52,12 +52,12 @@ function entries(storage: string, id: string): string[] {
 	try { return database.prepare("SELECT record FROM entries WHERE conversation_id = ? ORDER BY id").all(Number(id)).map((row) => String(row.record)); }
 	finally { database.close(); }
 }
-async function openChild(id: string): Promise<void> {
+async function openChild(id: string, tree = false): Promise<void> {
 	const marker = output.length;
-	terminal.stdin.write("\x0b"); // Ctrl+K，保留原编辑区中的草稿。
-	await until("打开会话选择器", () => visibleSince(marker).includes("切换会话 / 查看子对话"));
+	terminal.stdin.write(tree ? "\x1bc" : "\x0b"); // Alt+C / Ctrl+K，保留原草稿。
+	await until("打开原生选择器", () => visibleSince(marker).includes(tree ? "Session Tree" : "切换会话 / 查看子对话"));
 	terminal.stdin.write(`conversation:${id}`);
-	await until("搜索词已显示", () => visibleSince(marker).includes(`查找 › conversation:${id}`));
+	await until("搜索词已显示", () => visibleSince(marker).includes(`conversation:${id}`));
 	terminal.stdin.write("\x1b[13u");
 	await until("进入只读成员子对话", () => visibleSince(marker).includes("正在只读查看子对话") && visibleSince(marker).includes("子对话 CID · 只读"));
 }
@@ -88,6 +88,9 @@ try {
 	const resetMarker = output.length;
 	send("/new");
 	await until("只读重置被拒绝", () => visibleSince(resetMarker).includes("先 /main 返回总控再执行控制命令"));
+	const modelMarker = output.length;
+	send("/model forbidden-model");
+	await until("只读模型切换被拒绝", () => visibleSince(modelMarker).includes("先 /main 返回总控再执行控制命令"));
 	assert.deepEqual((await json("/api/history")).items, originalHistory);
 	assert.deepEqual((await json("/api/state")).sessions, state.sessions);
 	assert.deepEqual(entries(state.storage, childId), childHistory);
@@ -99,7 +102,7 @@ try {
 	assert.equal(output.split("\x1b[?1049h").length - 1, 1, "查看子对话不得重建 TUI");
 	assert.equal(output.includes("\x1b[?1049l"), false, "查看子对话不得退出备用屏幕");
 	const reopenMarker = output.length;
-	await openChild(childId);
+	await openChild(childId, true);
 	assert.ok(!visibleSince(reopenMarker).includes(rejectedMessage), "再次打开子对话不得显示已拒绝消息");
 	assert.deepEqual(entries(state.storage, childId), childHistory);
 	check(true, "返回总控恢复原草稿，重新打开子对话不带入拒绝消息，终端和网页始终复用");
