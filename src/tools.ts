@@ -25,6 +25,7 @@ import { clip, JOB_REPORT_ENTRY, JOB_REQUEST_PREFIX, JobDone, jobReport, Jobs, t
 import { managedDispatch } from "./repair.ts";
 import { createLeadTool, LEAD_TOOL } from "./lead.ts";
 import { conversationIdentity, CONVERSATION_POLICY } from "./conversation.ts";
+import { createReadResultTool } from "./results.ts";
 
 export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
@@ -516,6 +517,7 @@ export function createLocalAgentsExtension(
 	const commands = new Map(agents.filter((a) => a.available).map((a) => [a.kind, a.command!] as const));
 	const jobTask = createJobTask(deps, commands);
 	const tools = [
+		createReadResultTool(),
 		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
 		...createJobTools(hub),
 		...createBoardTools(config, project, changes),
@@ -566,6 +568,7 @@ export function createLocalAgentsExtension(
 						"4. 选模型：按任务难度传 model。简单、机械的活用［经济］，日常开发用［标准］，复杂设计、跨模块改动、疑难问题才用［强力］。不确定就不传，用默认（角色配置里写了模型的优先用它）。",
 						"5. 成员完成后任务会变成「待验收」：对照验收标准核对（必要时派审查角色），用 update_task 标完成或打回并写明原因。",
 						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
+						"6a. 成员结果默认只带限长预览；全文按 result_id 持久保存。缺少证据时用 read_result 分页读取，不能把截断预览当全文。续接只发送变更和必要证据，避免重复复制整段历史。",
 						...(config.lead.enabled
 							? [
 									`6b. 子调度（${LEAD_TOOL}）：目标很大、能分成几块相对独立的子目标时（比如前端 / 后端 / 数据），把每块整个交给一个子调度：给出子目标、范围和验收标准，它会自己拆任务、派成员、验收后汇报给你。几个子调度可以在同一轮里并行。小任务直接派成员，不要用子调度。子调度汇报后，你仍要对照验收标准核对。`,

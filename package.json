@@ -2,6 +2,10 @@
   "name": "lemma",
   "version": "1.0.0",
   "description": "Lemma: durable local multi-agent orchestration with isolated conversations and verified repair",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangchneyu/Lemma-pi-durable.git"
+  },
   "scripts": {
     "start": "node --no-warnings src/main.ts --tui --real",
     "demo": "node --no-warnings src/main.ts --demo",
@@ -15,7 +19,8 @@
     "test:harness": "node --no-warnings test/sessions.ts && node --no-warnings test/repair.ts && node --no-warnings test/sessions-cli.ts",
     "test:conversations": "node --no-warnings test/conversations-web.ts && node --no-warnings test/admin-rebind.ts",
     "test:terminal": "node --no-warnings test/terminal.ts && node --no-warnings test/terminal-state.ts && node --no-warnings test/model-selection.ts && npm run test:metrics && node --no-warnings test/terminal-cli.ts && node --no-warnings test/terminal-child-view.ts && node --no-warnings test/terminal-model-selection.ts",
-    "test": "npm run test:dialogue && node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/steer.ts && node --no-warnings test/board.ts && node --no-warnings test/jobs.ts && node --no-warnings test/api-member.ts && node --no-warnings test/lead.ts && node --no-warnings test/conventions.ts && node --no-warnings test/web.ts && npm run test:terminal && npm run test:harness && npm run test:conversations"
+    "test": "npm run test:results && npm run test:dialogue && node --no-warnings test/smoke.ts && node --no-warnings test/crash.ts && node --no-warnings test/isolation.ts && node --no-warnings test/steer.ts && node --no-warnings test/board.ts && node --no-warnings test/jobs.ts && node --no-warnings test/api-member.ts && node --no-warnings test/lead.ts && node --no-warnings test/conventions.ts && node --no-warnings test/web.ts && npm run test:terminal && npm run test:harness && npm run test:conversations",
+    "test:results": "node --no-warnings test/result-retrieval.ts"
   },
   "keywords": [],
   "author": "",
@@ -26,11 +31,11 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@earendil-works/chord": "^1.6.0",
-    "@earendil-works/pi-ai": "^1.6.0",
+    "@earendil-works/chord": "1.6.0",
+    "@earendil-works/pi-ai": "1.6.0",
     "@earendil-works/pi-coding-agent": "1.6.0",
-    "@earendil-works/pi-durable": "^1.6.0",
-    "@earendil-works/pi-schema": "^1.6.0",
+    "@earendil-works/pi-durable": "1.6.0",
+    "@earendil-works/pi-schema": "1.6.0",
     "@earendil-works/pi-tui": "1.6.0"
   },
   "private": true,

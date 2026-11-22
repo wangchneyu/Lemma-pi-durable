@@ -15,6 +15,7 @@ import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
 import { addWorktree, commitAll, git, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
 import { Learning, relevantLessons } from "./learning.ts";
 import { summarizeResult } from "./result-summary.ts";
+import { storeResult } from "./results.ts";
 import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
 
 /** 子调度的提交前缀（和 lead.ts 一致；放在这里避免循环引用） */
@@ -511,8 +512,16 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		});
 	}
 	let body = parsed.text.trim() || "（没有文字输出）";
+	// Preserve the full member report before limiting what enters the controller context.
+	const resultId = `dispatch:${io.taskId}`;
+	await io.commit((tx) => storeResult(tx, io.conversationId, {
+		id: resultId, member: kind, conversationId: sessionId ?? "", submissionId: null, taskId: io.taskId,
+		status: parsed.isError ? "unanswered" : "done", text: body, createdAt: io.now(),
+	}));
 	const outputLimit = config.autonomy.enabled ? Math.min(agent.maxOutputChars, config.autonomy.resultMaxChars) : agent.maxOutputChars;
+	const truncated = body.length > outputLimit;
 	body = summarizeResult(body, outputLimit);
+	if (truncated) body += `\n\n[完整结果已保存；result_id: ${resultId}；需要省略部分时用 read_result 分页读取。]`;
 	const changeLine = finished
 		? finished.files.length
 			? `\n\n[改动 #${finished.id}：${finished.files.length} 个文件 +${finished.add} −${finished.del}，在分支 ${finished.branch}，还没有合并到主目录，等用户在终端确认（/apply ${finished.id}）]`
@@ -525,6 +534,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		: "";
 	const meta = [
 		`agent: ${kind}`,
+		`result_id: ${resultId}`,
 		usedModel ? `模型: ${usedModel}` : undefined,
 		sessionId && adapter.canResume ? `session_id: ${sessionId}` : undefined,
 		`耗时: ${Math.round(result.durationMs / 1000)}s`,
@@ -536,6 +546,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		isError: parsed.isError,
 		details: {
 			agent: kind,
+			resultId,
 			cwd,
 			sessionId: sessionId ?? null,
 			exitCode: result.exitCode,
@@ -553,7 +564,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 			costUsd: cost,
 			costEstimated: estimated !== undefined,
 			durationMs: result.durationMs,
-			body: `${body}${changeLine}${taskLine}`,
+			body: `${body}${changeLine}${taskLine}\n\n[result_id: ${resultId}]`,
 		},
 	};
 }
