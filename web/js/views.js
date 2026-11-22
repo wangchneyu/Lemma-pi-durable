@@ -494,7 +494,7 @@ function dispatches() {
 				</table></div>
 			</section>`;
 			const seg = root.querySelector('[data-n="agents"]');
-			seg.innerHTML = ["all", ...KINDS].map((k) => `<button type="button" data-k="${k}" style="--c:${k === "all" ? "var(--ink)" : agentColor(k)}">${k === "all" ? "全部" : AGENT_LABEL[k]}</button>`).join("");
+			seg.innerHTML = ["all", ...KINDS].map((k) => `<button type="button" data-k="${esc(k)}" style="--c:${k === "all" ? "var(--ink)" : agentColor(k)}">${k === "all" ? "全部" : esc(AGENT_LABEL[k] ?? k)}</button>`).join("");
 			seg.addEventListener("click", (e) => {
 				const b = e.target instanceof Element ? e.target.closest("button") : null;
 				if (!b) return;
@@ -518,7 +518,7 @@ function dispatches() {
 			this.update("all");
 		},
 		update(kind) {
-			if (kind === "state") return;
+			if (kind === "state") root.querySelector('[data-n="agents"]').innerHTML = ["all", ...KINDS].map((k) => `<button type="button" data-k="${esc(k)}" style="--c:${k === "all" ? "var(--ink)" : agentColor(k)}">${k === "all" ? "全部" : esc(AGENT_LABEL[k] ?? k)}</button>`).join("");
 			for (const b of root.querySelectorAll('[data-n="agents"] button')) b.classList.toggle("on", b.dataset.k === filter.agent);
 			const all = dispatchRows();
 			const rows = all.filter((d) => {
@@ -891,7 +891,8 @@ function agents() {
 							? [
 									["接入方式", `API 成员（Pi 子对话）· <code>${esc(a.api.type)}</code> · ${esc(a.api.host)}`],
 									["密钥", esc(a.api.keySource)],
-									["工具", `read / write / edit${a.api.bash === "off" ? "" : ` / bash（${a.api.bash === "all" ? "全部放行" : `白名单 ${a.api.bashAllow.length} 条`}）`}`],
+									["工具", esc((a.api.tools ?? []).join(" / ") || "未授予文件或命令工具")],
+									["工作方式", a.workspace === "none" ? "领域协作 · 无 Git 工作区" : "代码工作区"],
 								]
 							: []),
 						[
@@ -935,14 +936,14 @@ function sessions() {
 	let root;
 	let agent = "all";
 	return {
-		title: "CLI 会话",
+		title: "成员会话",
 		sub: "",
 		mount(r) {
 			root = r;
 			root.innerHTML = `<section class="card"><div class="toolbar"><div class="seg" data-n="agents"></div><span class="card-note" data-n="count"></span></div>
 				<div class="table-wrap"><table class="table"><thead><tr><th>成员</th><th>会话 ID</th><th>目录</th><th>最近使用</th><th class="num hide-sm">派工</th><th>续接命令</th></tr></thead><tbody data-n="rows"></tbody></table></div></section>`;
 			const seg = root.querySelector('[data-n="agents"]');
-			seg.innerHTML = ["all", ...KINDS].map((k) => `<button type="button" data-k="${k}" style="--c:${k === "all" ? "var(--ink)" : agentColor(k)}">${k === "all" ? "全部" : AGENT_LABEL[k]}</button>`).join("");
+			seg.innerHTML = ["all", ...KINDS].map((k) => `<button type="button" data-k="${esc(k)}" style="--c:${k === "all" ? "var(--ink)" : agentColor(k)}">${k === "all" ? "全部" : esc(AGENT_LABEL[k] ?? k)}</button>`).join("");
 			seg.addEventListener("click", (e) => {
 				const b = e.target instanceof Element ? e.target.closest("button") : null;
 				if (!b) return;
@@ -953,6 +954,7 @@ function sessions() {
 		},
 		update(kind) {
 			if (kind === "tick" || kind === "live") return;
+			if (kind === "state") root.querySelector('[data-n="agents"]').innerHTML = ["all", ...KINDS].map((k) => `<button type="button" data-k="${esc(k)}" style="--c:${k === "all" ? "var(--ink)" : agentColor(k)}">${k === "all" ? "全部" : esc(AGENT_LABEL[k] ?? k)}</button>`).join("");
 			for (const b of root.querySelectorAll('[data-n="agents"] button')) b.classList.toggle("on", b.dataset.k === agent);
 			const all = store.state?.sessions ?? [];
 			const list = all.filter((s) => agent === "all" || s.agent === agent);
@@ -1070,7 +1072,7 @@ function usage() {
 				</div>
 				<section class="card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">派工活动</h2><div class="card-sub"><span><b>${act.total}</b> 次 · ${mode === "day" ? "最近 24 小时，每小时" : "最近 14 天，每天"}</span></div></div>
-						<div class="act-legend">${KINDS.map((k) => `<span><i style="background:${agentColor(k)}"></i>${AGENT_LABEL[k]}</span>`).join("")}</div>
+						<div class="act-legend">${KINDS.map((k) => `<span><i style="background:${agentColor(k)}"></i>${esc(AGENT_LABEL[k] ?? k)}</span>`).join("")}</div>
 						<div class="seg" data-n="actMode">${segButtons([["day", "24 小时"], ["week", "14 天"]], mode)}</div></header>
 					<div class="card-body">${act.html}</div>
 				</section>
@@ -1164,7 +1166,7 @@ function config() {
 						.map((a) => {
 							const how = a.api ? `API · ${esc(a.api.type)} · ${esc(a.api.host)}<br><span class="muted">密钥：${esc(a.api.keySource)}</span>` : "本机 CLI";
 							const args = a.api
-								? `read / write / edit（只限工作副本）${a.api.bash === "off" ? "" : ` / bash（${a.api.bash === "all" ? "全部放行" : `白名单 ${a.api.bashAllow.length} 条`}）`}`
+								? esc((a.api.tools ?? []).join(" / ") || "未授予文件或命令工具")
 								: esc(a.extraArgs.join(" ") || "—");
 							return `<tr><td>${agentTag(a.kind)}</td><td class="nowrap">${a.available ? "可用" : `<span class="muted">${esc(a.reason)}</span>`}</td><td>${how}</td><td class="mono">${args}</td><td class="num mono">${a.timeoutMinutes}m</td><td class="num mono hide-sm">${num(a.maxOutputChars)}</td></tr>`;
 						})

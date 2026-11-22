@@ -2,7 +2,7 @@
 //   npm run check                    检查全部成员（用各自的默认模型）
 //   npm run check -- claude          只检查某一个
 //   npm run check -- --models        逐个检查配置清单里的每个模型（会多花一点钱）
-import { ADAPTERS } from "../src/agents.ts";
+import { agentAdapter } from "../src/agents.ts";
 import { cleanEnv, runCli } from "../src/cli-runner.ts";
 import { loadConfig, type AgentKind } from "../src/config.ts";
 import { detectAgents } from "../src/tools.ts";
@@ -49,7 +49,7 @@ for (const agent of detectAgents(config)) {
 		console.log(`○ ${agent.kind}: ${agent.reason}`);
 		continue;
 	}
-	const adapter = ADAPTERS[agent.kind];
+	const adapter = agentAdapter(agent.kind, config.agents[agent.kind]);
 	const command = agent.command!;
 	const c = config.agents[agent.kind];
 	if (c.api) {

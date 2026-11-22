@@ -8,15 +8,20 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createProvider, type Model, type MutableModels } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { AgentDoc, AssistantEntry, configure, defineExtension, hook, ToolTask, type EntryRecord, type Extension, type Harness } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, configure, defineDoc, defineExtension, hook, ToolTask, type EntryRecord, type Extension, type Harness } from "@earendil-works/pi-durable";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import type { ParsedResult, TokenUsage } from "./agents.ts";
 import type { AgentConfig, AgentKind, ApiMemberConfig, AppConfig } from "./config.ts";
 import type { DispatchIO } from "./dispatch.ts";
 import type { JobHub } from "./jobs.ts";
+import { readCredential } from "./credentials.ts";
 
 /** API 成员在模型目录里的 provider 名 */
 export const memberProvider = (kind: AgentKind) => `member-${kind}`;
+export const MemberIdentity = defineDoc<{ id: string; name: string }>({
+	kind: "lemma.member-identity", version: 1, scope: "conversation", history: "latest", fork: "current",
+	initial: () => ({ id: "", name: "" }), checkpointWhen: () => false,
+});
 
 /** 密钥：按顺序读环境变量（不打印） */
 export function memberKey(api: ApiMemberConfig): { key?: string; source: string } {
@@ -24,6 +29,8 @@ export function memberKey(api: ApiMemberConfig): { key?: string; source: string 
 		const value = process.env[name];
 		if (value) return { key: value, source: `环境变量 ${name}` };
 	}
+	const local = readCredential(api.credential);
+	if (local) return { key: local, source: "本机凭据文件" };
 	return { source: `未找到密钥（设置环境变量 ${api.apiKeyEnv.join(" / ")}）` };
 }
 
@@ -70,7 +77,7 @@ export function registerApiMembers(models: MutableModels, config: AppConfig): vo
 		models.setProvider(
 			createProvider({
 				id: memberProvider(kind),
-				name: kind,
+				name: agent.name ?? kind,
 				baseUrl: api.baseUrl,
 				auth: {
 					apiKey: {
@@ -117,10 +124,18 @@ export function pathRefusal(path: unknown, cwd: string): string | undefined {
 	return `路径 ${raw} 在工作目录之外。只能读写当前工作目录（你的隔离副本）里的文件，请用相对路径；临时文件也放在工作目录里，用完删掉。`;
 }
 
-/** API 成员的工具：读、写、改文件（只限工作目录内），加上按白名单放行的 bash */
+export function memberToolNames(api: ApiMemberConfig): string[] {
+	return [...new Set(api.tools ?? ["read", "write", "edit", ...(api.bash !== "off" ? ["bash"] : [])])].filter((name) => name !== "bash" || api.bash !== "off");
+}
+
+/** Tool grants are explicit for custom members; legacy coding members retain their existing default set. */
 export function createMemberTools(kind: AgentKind, api: ApiMemberConfig): Extension {
-	const tools: any[] = [createReadTool(), createWriteTool(), createEditTool()];
-	if (api.bash !== "off") {
+	const granted = new Set(memberToolNames(api));
+	const tools: any[] = [];
+	if (granted.has("read")) tools.push(createReadTool());
+	if (granted.has("write")) tools.push(createWriteTool());
+	if (granted.has("edit")) tools.push(createEditTool());
+	if (granted.has("bash") && api.bash !== "off") {
 		tools.push(
 			createBashTool({
 				prepare: (execution) => {
@@ -149,10 +164,18 @@ export function createMemberTools(kind: AgentKind, api: ApiMemberConfig): Extens
 }
 
 /** 给 API 成员的工作说明（相当于 CLI 自带的系统提示）；项目的共同规则也带上 */
-export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdir: string, label: string): string {
+export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdir: string, label: string, agent?: AgentConfig, domain?: string): string {
+	if (agent?.workspace === "none") return [
+		`你是 Lemma 协作团队的成员「${label}」（ID: ${kind}），在自己的独立会话中完成交付的任务。`,
+		domain ?? "", agent.description, agent.instructions ?? "",
+		"只处理本次任务和已有续接上下文；没有收到的资料不要声称已读取。明确区分事实、推断和缺失信息。",
+		`工具权限仅以实际提供的工具清单为准：${memberToolNames(api).join("、") || "未配置文件或命令工具"}。`,
+		"完成后简洁交付结论、依据、验收情况和未完成项；不能凭自述声称业务已经获批或外部操作已经完成。",
+	].filter(Boolean).join("\n");
 	const rulesFile = join(workdir, ".pi-agent", "RULES.md");
 	const rules = existsSync(rulesFile) ? readFileSync(rulesFile, "utf8").trim().slice(0, 6000) : "";
 	return [
+		domain ?? "", agent?.instructions ?? "",
 		`你是 Lemma 团队里的成员 ${label}（${kind}），由总调度派活。你在当前工作目录里完成交给你的任务。`,
 		"- 用 read 读文件，用 edit 精确修改，用 write 新建或整体重写文件。路径相对当前工作目录，只能读写工作目录里的文件（工作目录外的路径会被拒绝）；临时文件也放在工作目录里，用完删掉。",
 		api.bash === "off"
@@ -217,6 +240,7 @@ export async function runApiMember(o: {
 	kind: AgentKind;
 	api: ApiMemberConfig;
 	tools: Extension;
+	name?: string;
 	model: string;
 	cwd: string;
 	prompt: string;
@@ -239,13 +263,15 @@ export async function runApiMember(o: {
 			if (o.resumeId) {
 				const record = await tx.conversation(o.resumeId as any);
 				if (!record) throw new Error(`找不到会话 ${o.resumeId}`);
-				await configure(tx, record.id, { model: ref, cwd: o.cwd, instructions: o.instructions });
+				await configure(tx, record.id, { model: ref, cwd: o.cwd, instructions: o.instructions, extensions: [o.tools], maxTurns: o.api.maxTurns ?? 40 });
+				const identity = await tx.doc(MemberIdentity, record.id); identity.id = o.kind; identity.name = o.name ?? o.kind;
 				return String(record.id);
 			}
 			const existing = (await tx.scanConversations({ ownerTaskId: io.taskId as any }, 1)).items[0];
 			if (existing) return String(existing.id);
 			const created = await tx.createConversation({ ownership: { kind: "task", taskId: io.taskId as any } });
 			await configure(tx, created.id, { model: ref, extensions: [o.tools], instructions: o.instructions, cwd: o.cwd, maxTurns: o.api.maxTurns ?? 40 });
+			const identity = await tx.doc(MemberIdentity, created.id); identity.id = o.kind; identity.name = o.name ?? o.kind;
 			return String(created.id);
 		});
 	} catch (error) {
@@ -293,7 +319,7 @@ export async function runApiMember(o: {
 		const entries: EntryRecord[] = [];
 		let cursor: any;
 		do {
-			const page = await conversation.entries({ order: "ascending", minEntryId: settled.entry } as any, 500, cursor, ctx);
+			const page = await conversation.entries({ order: "ascending", minEntryId: settled.entry, ...(settled.answer ? { maxEntryId: settled.answer } : {}) } as any, 500, cursor, ctx);
 			entries.push(...page.items);
 			cursor = page.next;
 		} while (cursor);

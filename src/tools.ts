@@ -4,7 +4,7 @@
 import type { Context } from "@earendil-works/chord/context";
 import { defineExtension, defineTask, defineTool, section, type Extension, type JsonObject } from "@earendil-works/pi-durable";
 import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import { ADAPTERS } from "./agents.ts";
+import { agentAdapter } from "./agents.ts";
 import { createMemberTools, memberAvailability } from "./api-member.ts";
 import { Board, boardSummary, STATUS_LABEL, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeStore } from "./changes.ts";
@@ -31,23 +31,26 @@ export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
 export interface AgentAvailability {
 	kind: AgentKind;
+	label?: string;
+	transport?: "api" | "cli";
 	command?: string[];
 	available: boolean;
 	reason?: string;
 }
 
 export function detectAgents(config: AppConfig): AgentAvailability[] {
-	return (Object.keys(ADAPTERS) as AgentKind[]).map((kind) => {
+	return Object.keys(config.agents).map((kind): AgentAvailability => {
 		const agent = config.agents[kind];
-		if (!agent.enabled) return { kind, available: false, reason: "配置中已禁用" };
+		const identity = { kind, label: agentAdapter(kind, agent).label, transport: agent.api ? "api" as const : "cli" as const };
+		if (!agent.enabled) return { ...identity, available: false, reason: "配置中已禁用" };
 		// API 成员：不需要 CLI，看模型和密钥
 		if (agent.api) {
 			const a = memberAvailability(agent);
-			return { kind, command: [], available: a.available, reason: a.reason };
+			return { ...identity, command: [], available: a.available, reason: a.reason };
 		}
 		const command = resolveCommand(kind, agent);
-		if (!command) return { kind, available: false, reason: "本机未安装（未找到 CLI）" };
-		return { kind, command, available: true };
+		if (!command) return { ...identity, available: false, reason: "本机未安装（未找到 CLI）" };
+		return { ...identity, command, available: true };
 	});
 }
 
@@ -203,7 +206,7 @@ function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>) {
 
 function createAgentTool(kind: AgentKind, command: string[], deps: DispatchDeps, jobTask: ReturnType<typeof createJobTask>) {
 	const { config } = deps;
-	const adapter = ADAPTERS[kind];
+	const adapter = agentAdapter(kind, config.agents[kind]);
 	const agent = config.agents[kind];
 	const models = agent.models;
 	const resumeHint = adapter.canResume
@@ -216,8 +219,9 @@ function createAgentTool(kind: AgentKind, command: string[], deps: DispatchDeps,
 	return defineTool({
 		name: `ask_${kind}`,
 		description:
-			`把一个任务交给本机的 ${adapter.label} 去完成。${agent.description}\n` +
-			"它是一个完整的编码 agent，能在 cwd 目录里读写文件、执行命令。task 要写清楚目标、范围和期望的输出格式。" +
+			`把一个任务交给成员 ${adapter.label} 去完成。${agent.description}\n` +
+			(agent.workspace === "none" ? "这是独立会话的领域 Agent，只能使用配置中明确授予的工具，不创建 Git 改动。" : "这是编码成员，按配置使用工作目录、工具和代码隔离流程。") +
+			"task 要写清楚目标、范围、必要资料和验收标准。" +
 			"续接会话时会自动回到会话当初的目录，不必再传 cwd。" +
 			"background: true 时放到后台执行、立刻返回后台编号（Jn），结果之后自动发回或用 wait_jobs 收取；不传则等它做完再返回结果。" +
 			resumeHint +
@@ -532,7 +536,7 @@ export function createLocalAgentsExtension(
 			const models = c.models.length
 				? `\n  模型：${c.models.map((m) => `${m.id}［${TIER_LABEL[m.tier]}］${m.note ? ` ${m.note}` : ""}`).join("；")}；默认 ${c.defaultModel ?? "CLI 默认"}`
 				: "";
-			return `- ${a.kind}: 可用，工具 ask_${a.kind}。${c.description}${models}`;
+			return `- ${c.name ?? a.kind}（ID: ${a.kind}，${c.api ? "API" : "CLI"}）: 可用，工具 ask_${a.kind}。${c.description}${models}`;
 		})
 		.join("\n");
 	const roles = config.roles
@@ -543,6 +547,7 @@ export function createLocalAgentsExtension(
 		})
 		.join("\n");
 	const limit = config.budget.perRunUsd;
+	const hasCodeMembers = agents.some((a) => a.available && config.agents[a.kind].workspace !== "none");
 
 	const extension = defineExtension({
 		name: "local-agents",
@@ -555,7 +560,8 @@ export function createLocalAgentsExtension(
 				"team",
 				() =>
 					[
-						"需要执行项目任务时，Lemma 总调度相当于团队的项目负责人；子调度只负责自己的子目标。你自己不直接改代码，而是按任务需要派给下面这些本机 AI，再核对、汇总结果。普通聊天直接回答。",
+						"Lemma 总调度按职责协调团队成员；成员可以通过模型 API 或 CLI 执行。按任务需要交接工作、核对依据和汇总结果，简单任务直接回答。子调度只负责自己的子目标。",
+						config.collaboration?.instructions ?? "",
 						"",
 						"团队成员：",
 						roster,
@@ -575,9 +581,9 @@ export function createLocalAgentsExtension(
 								]
 							: []),
 						"7. 完成实际派工后，再用中文汇报：有任务编号时按编号说明成员、模型、结果、改动与未完成事项；没有派工的普通对话不套执行汇报模板。",
-						...(config.autonomy.enabled ? [
-							`自动验收与修复已启用：由执行层运行配置中的检查，失败时最多修复 ${config.autonomy.maxRepairAttempts} 次。收到“停止重试”时不要再派相同任务，汇报失败证据和下一步。`,
-							"节省上下文：工具结果已给出结论、验收摘要和改动编号，不要把完整历史反复转给成员；续接用 session_id，跨成员交接用 based_on。未通过的检查不能通过改测试标准或标 done 绕过。",
+						...(config.autonomy.enabled && hasCodeMembers ? [
+							`代码工作区成员启用配置验收与有限修复，最多修复 ${config.autonomy.maxRepairAttempts} 次。领域成员不执行代码检查或自动代码修复，需要按任务的业务验收标准核对证据。收到“停止重试”时不要再派相同任务。`,
+							"不要反复转发完整历史；续接用 session_id，跨成员交接传必要资料，代码改动才使用 based_on。未通过的检查不能通过改测试标准或标 done 绕过。",
 						] : []),
 						"",
 						"同步和异步：",
@@ -587,10 +593,10 @@ export function createLocalAgentsExtension(
 						"- 需要等结果才能往下走时调用 wait_jobs（mode any：做完一个就返回，先处理它；mode all：全部做完）。不要在同一轮里既开后台派工又调用 wait_jobs。",
 						"- 方向错了或不再需要的后台派工用 cancel_job 取消。所有任务都结束后再给用户最终汇报；中途可以简短告知进度。",
 						"",
-						...(config.isolation.enabled
+						...(config.isolation.enabled && hasCodeMembers
 							? [
 									"工作区隔离：",
-									"- 每次新派工都在一个独立的副本（git worktree）里干活，改动提交到独立分支，**不会自动进入用户的主目录**。结果末尾会写明「改动 #编号」。",
+									"- 仅代码工作区成员在 Git 仓库中创建独立 worktree，改动提交到独立分支，不自动进入主目录；workspace=none 的领域成员不创建代码分支。",
 									"- 改动要由用户在终端确认后才合并（/apply 编号）。所以并行派给不同成员的改动互不可见；汇报时列出每个改动编号和改了什么，方便用户决定合并哪些。",
 									"- 要让另一个成员审查或接着修改某次改动，调用时传 based_on: 改动编号，它会在那次改动的基础上开工。",
 									"- 续接会话（session_id）会回到同一个副本继续改。",

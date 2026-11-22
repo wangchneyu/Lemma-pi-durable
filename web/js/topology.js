@@ -141,7 +141,7 @@ export function topology() {
 		const width = Math.max(980, stage.clientWidth - 12);
 		const timeW = width - COL.time - 24;
 		// ---- 布局：成员分组，组内按会话最早开始时间排 ----
-		const members = ["lead", ...KINDS].map((k) => ({ kind: k, info: data.members.find((m) => m.kind === k), lanes: data.lanes.filter((l) => l.agent === k).sort((a, b) => a.first - b.first) })).filter(
+		const members = [...new Set(["lead", ...KINDS, ...data.members.map((m) => m.kind), ...data.lanes.map((lane) => lane.agent)])].map((k) => ({ kind: k, info: data.members.find((m) => m.kind === k), lanes: data.lanes.filter((l) => l.agent === k).sort((a, b) => a.first - b.first) })).filter(
 			(m) => m.lanes.length || m.info?.available,
 		);
 		let y = TOP;

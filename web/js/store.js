@@ -1,5 +1,5 @@
 // 数据层：SSE 实时同步对话条目和 pi.live，按需拉取状态、派工汇总和更早的历史。
-import { getJson, kindOf, setConversationScope } from "./util.js";
+import { getJson, kindOf, setConversationScope, setAgentLabels } from "./util.js";
 
 export const store = {
 	items: [], // 按 id 升序
@@ -54,6 +54,7 @@ export function refreshState(delay = 0) {
 	stateTimer = setTimeout(async () => {
 		try {
 			store.state = await getJson("/api/state");
+			setAgentLabels(store.state.agents);
 			if (Array.isArray(store.state.jobs)) setJobs(store.state.jobs);
 			emit("state");
 		} catch {

@@ -3,6 +3,7 @@ import {
 	CombinedAutocompleteProvider,
 	Container,
 	Editor,
+	Input,
 	getKeybindings,
 	matchesKey,
 	ProcessTerminal,
@@ -28,6 +29,9 @@ import type { TerminalConversationView, TerminalItem, TerminalTool } from "./ter
 import type { NativeModelCatalog } from "./model-selection.ts";
 export const TERMINAL_COMMANDS = [
 	["agents", "成员和模型"],
+	["agent", "add / edit / show / enable / disable / model / key 成员配置"],
+	["setup", "引导配置总控模型、接口与凭据"],
+	["help", "终端操作与成员配置命令"],
 	["web", "后台网页"],
 	["usage", "用量"],
 	["goal", "项目目标"],
@@ -63,6 +67,13 @@ export const TERMINAL_COMMANDS = [
 export const terminalText = cleanText;
 const plain = (text: unknown, limit = 20_000) => terminalText(String(text ?? "")).slice(0, limit);
 const selectTheme = getSelectListTheme();
+/** Reuse native editing/paste behavior; credentials never enter the rendered screen. */
+class SettingsInput extends Input {
+	secret = false;
+	override render(width: number): string[] {
+		return this.secret ? ["•".repeat(Math.min(Math.max(0, width - 2), this.getValue().length)) + "▏"] : super.render(width);
+	}
+}
 class Line implements Component {
 	private readonly value: () => string;
 	constructor(value: () => string) {
@@ -586,6 +597,24 @@ export class AgentTerminal {
 		this.picker = this.tui.showOverlay(picker, { width: "92%", maxHeight: "90%", anchor: "center", margin: 1 });
 		this.disposePicker = () => picker.dispose();
 		this.tui.requestRender();
+	}
+	question(options: { title: string; value?: string; secret?: boolean }): Promise<string> {
+		if (this.stopped) return Promise.reject(new Error("终端已关闭。"));
+		this.closePicker();
+		return new Promise((resolve, reject) => {
+			const input = new SettingsInput({ placeholder: options.value ? `留空保留：${plain(options.value, 180)}` : "请输入" });
+			input.secret = options.secret === true;
+			const panel = new Container();
+			panel.addChild(new Text(c.cyan(plain(options.title, 300)), 1, 1));
+			panel.addChild(input);
+			panel.addChild(new Text(c.dim("Enter 确认 · Esc / Ctrl+C 取消（不会发送给模型）"), 1, 1));
+			let settled = false;
+			input.onSubmit = (value) => { settled = true; input.setValue(""); this.closePicker(); resolve(value); };
+			input.onEscape = () => this.closePicker();
+			this.picker = this.tui.showOverlay(panel, { width: "88%", maxHeight: "85%", anchor: "center", margin: 1 });
+			this.disposePicker = () => { input.setValue(""); if (!settled) reject(new Error("配置已取消，未保存。")); };
+			this.tui.setFocus(input); this.tui.requestRender();
+		});
 	}
 	private closePicker(): void {
 		if (!this.picker) return;

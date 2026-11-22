@@ -6,7 +6,7 @@ import { Learning } from "./learning.ts";
 
 export async function managedDispatch(kind: AgentKind, command: string[], deps: DispatchDeps, args: DispatchArgs, io: DispatchIO, label?: string): Promise<DispatchResult> {
 	const policy = deps.config.autonomy;
-	if (!policy.enabled) return runDispatch(kind, command, deps, args, io, label);
+	if (!policy.enabled || deps.config.agents[kind].workspace === "none") return runDispatch(kind, command, deps, args, io, label);
 	const runKey = await io.commit(async (tx) => (await tx.doc(RunBudget)).runKey);
 	const fingerprint = createHash("sha256").update(args.task_id ?? args.task.replace(/\s+/g, " ").trim()).digest("hex").slice(0, 20);
 	const key = `${runKey}:${kind}:${fingerprint}`;

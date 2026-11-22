@@ -16,6 +16,8 @@ import type { AppConfig } from "./config.ts";
 import { createLocalAgentsExtension, type AgentAvailability } from "./tools.ts";
 
 export interface App {
+	/** Stage an idle-host update; applying retains the same Harness and conversation IDs. */
+	prepareMembers(config: AppConfig): () => void;
 	harness: Harness;
 	root: Conversation;
 	agents: AgentAvailability[];
@@ -73,7 +75,7 @@ export async function openApp(
 	const changes = new ChangeStore(`${config.storage}.changes.json`);
 	const project = new ProjectFiles(config.workdir, config.projectStateDir);
 	const jobs = new JobHub();
-	const { extension, agents, memberExtensions } = createLocalAgentsExtension(config, changes, project, jobs);
+	let { extension, agents, memberExtensions } = createLocalAgentsExtension(config, changes, project, jobs);
 	const registry = createRegistry();
 	registry.install(extension);
 	for (const ext of memberExtensions) registry.install(ext);
@@ -117,5 +119,17 @@ export async function openApp(
 		await root.configure({ maxTurns: config.orchestrator.maxTurns ?? 40, cwd: config.workdir }, context);
 	}
 	jobs.harness = harness;
-	return { harness, root, agents, changes, project, jobs };
+	return { harness, root, agents, changes, project, jobs, prepareMembers(next) {
+		const prepared = createLocalAgentsExtension(next, changes, project, jobs);
+		return () => {
+			for (const old of memberExtensions) registry.uninstall(old);
+			for (const [id, member] of Object.entries(config.agents)) if (member.api) orchestrator.models.deleteProvider(`member-${id}`);
+			registerApiMembers(orchestrator.models, next);
+			registry.install(prepared.extension);
+			for (const member of prepared.memberExtensions) registry.install(member);
+			extension = prepared.extension; memberExtensions = prepared.memberExtensions;
+			agents.splice(0, agents.length, ...prepared.agents);
+			Object.assign(config, next);
+		};
+	} };
 }

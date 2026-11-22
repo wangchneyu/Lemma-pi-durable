@@ -7,6 +7,7 @@ import { claudeSettingsEnv, type OrchestratorConfig } from "./config.ts";
 import { createHash } from "node:crypto";
 import { readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
+import { readCredential } from "./credentials.ts";
 
 export interface OrchestratorModel {
 	models: MutableModels;
@@ -21,6 +22,8 @@ function resolveKey(config: OrchestratorConfig): string | undefined {
 		const value = process.env[name];
 		if (value) return value;
 	}
+	const local = readCredential(config.credential);
+	if (local) return local;
 	if (config.apiKeyFromClaudeSettings) return claudeSettingsEnv().token;
 	return undefined;
 }
@@ -29,6 +32,7 @@ function resolveKey(config: OrchestratorConfig): string | undefined {
 function keySource(config: OrchestratorConfig): string {
 	if (config.type === "builtin") return `${config.provider ?? "?"} 的标准环境变量`;
 	for (const name of config.apiKeyEnv ?? []) if (process.env[name]) return `环境变量 ${name}`;
+	if (readCredential(config.credential)) return "本机凭据文件";
 	if (config.apiKeyFromClaudeSettings && claudeSettingsEnv().token) return "~/.claude/settings.json（与 Claude CLI 共用）";
 	return "未找到密钥";
 }

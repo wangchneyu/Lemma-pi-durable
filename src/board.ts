@@ -16,7 +16,7 @@ export type BoardTask = {
 	detail?: string;
 	/** 角色：架构 / 设计 / 编码 / 审查……（配置里的 roles） */
 	role?: string;
-	/** 负责的成员（claude / codex / gemini） */
+	/** 负责的成员 ID（自定义 API 角色或 CLI 成员） */
 	owner?: string;
 	status: TaskStatus;
 	deps: string[];

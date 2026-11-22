@@ -55,6 +55,8 @@ export function demoConfig(config: AppConfig): AppConfig {
 	const dataDir = join(config.storage, "..");
 	const workdir = ensureDemoWorkspace(join(dataDir, "demo-workspace"));
 	const demo: AppConfig = { ...config, workdir, storage: join(dataDir, "demo.sqlite"), agents: { ...config.agents } };
+	// Demo must never call real custom providers from the user's configuration.
+	for (const [id, member] of Object.entries(demo.agents)) demo.agents[id] = { ...member, enabled: false };
 	for (const kind of ["claude", "codex", "gemini"] as const) {
 		demo.agents[kind] = { ...config.agents[kind], enabled: true, command: [process.execPath, FAKE_AGENT, kind], extraArgs: [], ...DEMO_MODELS[kind] };
 	}

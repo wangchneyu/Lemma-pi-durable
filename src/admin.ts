@@ -7,8 +7,8 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord/context";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { ADAPTERS } from "./agents.ts";
-import { memberKey } from "./api-member.ts";
+import { agentAdapter } from "./agents.ts";
+import { memberKey, memberToolNames } from "./api-member.ts";
 import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
 import type { OrchestratorModel } from "./models.ts";
@@ -577,7 +577,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			now,
 			orchestrator: { model: controller.model?.modelId ?? config.orchestrator.modelId, busy: live.busy, turns: live.turns },
 			members: [
-				...agents.map((a) => ({ kind: a.kind, label: ADAPTERS[a.kind].label, available: a.available })),
+				...agents.map((a) => ({ kind: a.kind, label: agentAdapter(a.kind, config.agents[a.kind]).label, available: a.available })),
 				...(leads.size ? [{ kind: "lead", label: "子调度", available: true }] : []),
 			],
 			lanes: [...lanes.values()].map((l) => ({ ...l, known: l.session ? !!sessions[l.session] : false })),
@@ -632,7 +632,9 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 				const c = config.agents[a.kind];
 				return {
 					kind: a.kind,
-					label: ADAPTERS[a.kind].label,
+					label: agentAdapter(a.kind, c).label,
+					transport: c.api ? "api" : "cli",
+					workspace: c.workspace ?? "code",
 					available: a.available,
 					reason: a.reason,
 					enabled: c.enabled,
@@ -641,11 +643,11 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					extraArgs: c.extraArgs,
 					timeoutMinutes: c.timeoutMinutes,
 					maxOutputChars: c.maxOutputChars,
-					canResume: ADAPTERS[a.kind].canResume,
+					canResume: agentAdapter(a.kind, c).canResume,
 					models: c.models,
 					defaultModel: c.defaultModel ?? null,
 					api: c.api
-						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow }
+						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow, tools: memberToolNames(c.api) }
 						: null,
 				};
 			}),
@@ -662,7 +664,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					lastTask: s.lastTask ?? null,
 					model: s.model ?? null,
 					change: s.change ?? null,
-					resume: RESUME_COMMAND[s.agent as AgentKind]?.(id) ?? null,
+					resume: config.agents[s.agent]?.api ? "（Pi 子对话，由 Lemma 续接）" : RESUME_COMMAND[s.agent as AgentKind]?.(id) ?? null,
 				}))
 				.sort((a, b) => b.updatedAt - a.updatedAt),
 			// 只算总调度（含子调度）自己的模型；API 成员（member-*）的子对话用量已经算在成员花费里，不能再算一遍

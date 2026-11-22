@@ -5,7 +5,11 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 /** claude / codex / gemini 是本机 CLI；deepseek 是 Pi 原生的 API 成员（Pi Durable 子对话 + 内置读写工具） */
-export type AgentKind = "claude" | "codex" | "gemini" | "deepseek";
+export type BuiltinAgentKind = "claude" | "codex" | "gemini" | "deepseek";
+/** Stable member identity, independent of provider or execution transport. */
+export type AgentId = string;
+/** Compatibility alias for persisted records and existing adapters. */
+export type AgentKind = AgentId;
 /** 走本机 CLI 的成员 */
 export const CLI_KINDS = ["claude", "codex", "gemini"] as const;
 
@@ -14,6 +18,10 @@ export const CLI_KINDS = ["claude", "codex", "gemini"] as const;
  * 用内置的 read / write / edit / bash 工具在（隔离的）工作目录里干活。
  */
 export interface ApiMemberConfig {
+	/** Reference into the local credential store; never the secret itself. */
+	credential?: string;
+	/** Explicit file/shell grants. Custom API members default to no tools. */
+	tools?: ("read" | "write" | "edit" | "bash")[];
 	/** openai-compatible：OpenAI Chat Completions 协议（DeepSeek 官方、各种中转站）；anthropic-compatible：Anthropic Messages 协议 */
 	type: "openai-compatible" | "anthropic-compatible";
 	baseUrl: string;
@@ -49,6 +57,10 @@ export interface ModelOption {
 }
 
 export interface AgentConfig {
+	name?: string;
+	instructions?: string;
+	/** code: existing worktree/check flow; none: conversation and results only. */
+	workspace?: "code" | "none";
 	enabled: boolean;
 	/** 给总调度看的角色说明 */
 	description: string;
@@ -68,6 +80,7 @@ export interface AgentConfig {
 }
 
 export interface OrchestratorConfig {
+	credential?: string;
 	/**
 	 * anthropic-compatible：Anthropic Messages 协议（官方或中转站）
 	 * openai-compatible：OpenAI Chat Completions 协议（中转站、Ollama、DeepSeek 等）
@@ -118,6 +131,8 @@ export interface BudgetConfig {
 }
 
 export interface AppConfig {
+	/** Domain/controller guidance, shared by the terminal and web application. */
+	collaboration?: { instructions: string };
 	/** 命名会话的分工表目录；项目目标与规则仍从工作目录读取。 */
 	projectStateDir?: string;
 	autonomy: {
@@ -247,7 +262,7 @@ export const MODEL_FLAGS: Record<AgentKind, string[]> = {
 
 /** 去掉 extraArgs 里写死的模型参数，返回剩下的参数和其中的模型 */
 export function splitModelArgs(kind: AgentKind, args: string[]): { rest: string[]; model?: string } {
-	const flags = MODEL_FLAGS[kind];
+	const flags = MODEL_FLAGS[kind] ?? [];
 	const rest: string[] = [];
 	let model: string | undefined;
 	for (let i = 0; i < args.length; i++) {
@@ -263,15 +278,47 @@ export function splitModelArgs(kind: AgentKind, args: string[]): { rest: string[
 export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 	const file = resolve(path);
 	const raw = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Partial<AppConfig>) : {};
+	return normalizeConfig(raw, file);
+}
+
+/** Validate an in-memory candidate before writing any configuration file. */
+export function normalizeConfig(raw: Partial<AppConfig>, path = "pi-agent.config.json"): AppConfig {
+	const file = resolve(path);
 	const base = dirname(file);
-	const agents = { ...DEFAULTS.agents };
-	for (const kind of Object.keys(agents) as AgentKind[]) {
-		const merged = { ...DEFAULTS.agents[kind], ...(raw.agents?.[kind] ?? {}) };
-		if (DEFAULTS.agents[kind].api) merged.api = { ...DEFAULTS.agents[kind].api!, ...(raw.agents?.[kind]?.api ?? {}) };
+	const agents: Record<AgentKind, AgentConfig> = {};
+	for (const kind of new Set([...Object.keys(DEFAULTS.agents), ...Object.keys(raw.agents ?? {})])) {
+		if (!/^[a-z][a-z0-9_]{0,47}$/.test(kind) || ["__proto__", "constructor", "prototype", "lead", "all", "orchestrator"].includes(kind)) throw new Error(`无效成员 ID：${kind}（使用小写字母、数字和下划线，避开系统保留名）`);
+		const builtin = Object.hasOwn(DEFAULTS.agents, kind) ? DEFAULTS.agents[kind] : undefined;
+		const supplied = raw.agents?.[kind];
+		if (supplied !== undefined && (!supplied || typeof supplied !== "object" || Array.isArray(supplied))) throw new Error(`成员 ${kind} 需要配置对象。`);
+		const merged: AgentConfig = { enabled: true, description: kind, extraArgs: [], models: [], timeoutMinutes: 30, maxOutputChars: 4000, workspace: builtin ? "code" : "none", ...builtin, ...supplied };
+		if (builtin?.api || supplied?.api) {
+			merged.api = { type: "openai-compatible", baseUrl: "", apiKeyEnv: [], bash: "off", bashAllow: [], ...builtin?.api, ...supplied?.api };
+			if (!builtin) merged.api.tools ??= [];
+		}
+		if (!builtin && !merged.api) throw new Error(`自定义成员 ${kind} 需要 api 配置。`);
+		if (merged.workspace === "none" && !merged.api) throw new Error(`成员 ${kind} 的 workspace=none 只适用于 API 执行方式。`);
+		if (merged.api && merged.workspace === "none") merged.api.tools ??= [];
+		if (!["code", "none"].includes(merged.workspace!)) throw new Error(`成员 ${kind} 的 workspace 需要 code 或 none。`);
+		if (!Array.isArray(merged.models) || merged.models.some((m) => !m || typeof m.id !== "string" || !m.id.trim() || !["economy", "standard", "premium"].includes(m.tier))) throw new Error(`成员 ${kind} 的 models 需要有效模型 ID 和 tier。`);
+		if (typeof merged.enabled !== "boolean" || typeof merged.description !== "string" || !Array.isArray(merged.extraArgs) || merged.extraArgs.some((arg) => typeof arg !== "string")) throw new Error(`成员 ${kind} 的开关、说明或附加参数无效。`);
+		if (merged.defaultModel !== undefined && (typeof merged.defaultModel !== "string" || !merged.defaultModel.trim())) throw new Error(`成员 ${kind} 需要有效 defaultModel。`);
+		if (!Number.isFinite(merged.timeoutMinutes) || merged.timeoutMinutes <= 0 || !Number.isSafeInteger(merged.maxOutputChars) || merged.maxOutputChars < 1) throw new Error(`成员 ${kind} 的超时和结果长度需要为正数。`);
+		if (merged.api) {
+			const api = merged.api;
+			if (api.credential !== undefined && (typeof api.credential !== "string" || !/^local-[a-f0-9-]{36}$/.test(api.credential))) throw new Error(`成员 ${kind} 的本机凭据引用无效。`);
+			if (!["openai-compatible", "anthropic-compatible"].includes(api.type) || !["off", "allowlist", "all"].includes(api.bash)) throw new Error(`成员 ${kind} 的 API 协议或 bash 配置无效。`);
+			if (!Array.isArray(api.apiKeyEnv) || api.apiKeyEnv.some((key) => typeof key !== "string" || !key.trim()) || !Array.isArray(api.bashAllow) || api.bashAllow.some((entry) => typeof entry !== "string" || !entry.trim())) throw new Error(`成员 ${kind} 的 API 凭据与命令白名单需要字符串数组。`);
+			for (const [name, value] of [["maxTurns", api.maxTurns], ["maxTokens", api.maxTokens], ["contextWindow", api.contextWindow]] as const) if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new Error(`成员 ${kind} 的 api.${name} 需要正整数。`);
+			if (api.tools !== undefined && (!Array.isArray(api.tools) || api.tools.some((name) => !["read", "write", "edit", "bash"].includes(name)))) throw new Error(`成员 ${kind} 的 api.tools 无效。`);
+			let url: URL; try { url = new URL(api.baseUrl); } catch { throw new Error(`成员 ${kind} 需要有效的 api.baseUrl。`); }
+			if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error(`成员 ${kind} 的 api.baseUrl 需要 HTTP(S) 地址且不包含凭据。`);
+		}
 		// 兼容旧配置：extraArgs 里写死的 -m/--model 当作默认模型
 		const { rest, model } = splitModelArgs(kind, merged.extraArgs);
 		merged.extraArgs = rest;
 		merged.defaultModel ??= model;
+		if (merged.api) merged.defaultModel ??= merged.models[0]?.id;
 		if (merged.defaultModel && !merged.models.some((m) => m.id === merged.defaultModel)) {
 			merged.models = [{ id: merged.defaultModel, tier: "standard" }, ...merged.models];
 		}
@@ -286,10 +333,16 @@ export function loadConfig(path = "pi-agent.config.json"): AppConfig {
 		budget: { ...DEFAULTS.budget, ...(raw.budget ?? {}) },
 		autonomy: { ...DEFAULTS.autonomy, ...(raw.autonomy ?? {}) },
 		lead: { ...DEFAULTS.lead, ...(raw.lead ?? {}) },
-		roles: raw.roles ?? DEFAULTS.roles,
+		roles: raw.roles ?? (Object.values(agents).some((member) => member.enabled && member.workspace !== "none") ? DEFAULTS.roles : []),
 		web: { ...DEFAULTS.web, ...(raw.web ?? {}) },
 	};
+	if (config.collaboration && typeof config.collaboration.instructions !== "string") throw new Error("collaboration.instructions 需要为字符串。");
+	for (const [id, member] of Object.entries(agents)) {
+		if ((member.name !== undefined && (typeof member.name !== "string" || !member.name.trim())) || (member.instructions !== undefined && typeof member.instructions !== "string")) throw new Error(`成员 ${id} 的名称与指令需要为有效字符串。`);
+	}
+	if (!Array.isArray(config.roles) || config.roles.some((role) => !role || !role.name || !Object.hasOwn(agents, role.agent) || (role.fallback !== undefined && (!Array.isArray(role.fallback) || role.fallback.some((id) => !Object.hasOwn(agents, id)))))) throw new Error("roles 必须引用已配置的成员 ID。");
 	config.workdir = isAbsolute(config.workdir) ? config.workdir : resolve(base, config.workdir);
+	if (config.orchestrator.credential !== undefined && (typeof config.orchestrator.credential !== "string" || !/^local-[a-f0-9-]{36}$/.test(config.orchestrator.credential))) throw new Error("总控的本机凭据引用无效。");
 	if (config.orchestrator.modelIds !== undefined && (!Array.isArray(config.orchestrator.modelIds) || config.orchestrator.modelIds.some((id) => typeof id !== "string" || !id.trim() || id.length > 200))) throw new Error("orchestrator.modelIds 需要是非空模型 ID 的数组。");
 	if (config.orchestrator.discoverModels !== undefined && typeof config.orchestrator.discoverModels !== "boolean") throw new Error("orchestrator.discoverModels 需要为布尔值。");
 	config.storage = isAbsolute(config.storage) ? config.storage : resolve(base, config.storage);

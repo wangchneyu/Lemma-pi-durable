@@ -6,7 +6,7 @@ import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, LiveDoc, type ConversationId, type Extension, type JsonObject, type Tx } from "@earendil-works/pi-durable";
-import { ADAPTERS, type TokenUsage } from "./agents.ts";
+import { agentAdapter, type TokenUsage } from "./agents.ts";
 import { Board, taskBrief, type BoardState, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeRecord, ChangeStore } from "./changes.ts";
 import { cleanEnv, runCli } from "./cli-runner.ts";
@@ -159,7 +159,8 @@ export async function checkBudget(io: DispatchIO, config: AppConfig): Promise<st
 
 /** 开工前能查出来的错误（后台派工要在返回之前就报出来） */
 export async function validateDispatch(kind: AgentKind, deps: DispatchDeps, args: DispatchArgs, io: DispatchIO): Promise<string | undefined> {
-	const adapter = ADAPTERS[kind];
+	const adapter = agentAdapter(kind, deps.config.agents[kind]);
+	if (deps.config.agents[kind].workspace === "none" && args.based_on) return "该成员不使用代码工作区，不能传 based_on；请通过任务说明和 read_result 交接资料。";
 	const models = deps.config.agents[kind].models;
 	if (args.model && models.length && !models.some((m) => m.id === args.model)) {
 		return `${adapter.label} 没有配置模型 ${args.model}。可选：${models.map((m) => m.id).join("、")}。`;
@@ -226,7 +227,7 @@ const fail = (text: string): DispatchResult => ({ text, isError: true });
 
 export async function runDispatch(kind: AgentKind, command: string[], deps: DispatchDeps, args: DispatchArgs, io: DispatchIO, label: string = kind): Promise<DispatchResult> {
 	const { config, changes, project, hub } = deps;
-	const adapter = ADAPTERS[kind];
+	const adapter = agentAdapter(kind, config.agents[kind]);
 	const agent = config.agents[kind];
 	const models = agent.models;
 
@@ -254,8 +255,9 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	}
 
 	// ---- 隔离：新会话在独立的 worktree 里干活 ----
-	let change: ChangeRecord | undefined = changes.byPath(cwd);
-	if (!known && config.isolation.enabled) {
+	const codeWorkspace = agent.workspace !== "none";
+	let change: ChangeRecord | undefined = codeWorkspace ? changes.byPath(cwd) : undefined;
+	if (codeWorkspace && !known && config.isolation.enabled) {
 		const root = await repoRoot(cwd);
 		if (root) {
 			// 随机编号（memo 保证崩溃重放时拿回同一个），避免重建会话存储后和旧分支撞名
@@ -347,7 +349,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 
 	let resumeId: string | undefined = args.session_id;
 	let prompt = `${brief}${args.task}`;
-	if (config.autonomy.enabled) {
+	if (codeWorkspace && config.autonomy.enabled) {
 		const lessons = await io.commit(async (tx) => JSON.parse(JSON.stringify((await tx.doc(Learning)).lessons)) as import("./learning.ts").VerifiedLesson[]);
 		const relevant = relevantLessons(lessons, args.task);
 		if (relevant) prompt = `【相关已验证记录，仅供参考】\n${relevant}\n\n${prompt}`;
@@ -396,12 +398,13 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 				hub,
 				kind,
 				api: agent.api,
+				name: adapter.label,
 				tools,
 				model,
 				cwd,
 				prompt,
 				resumeId,
-				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label),
+				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label, agent, config.collaboration?.instructions),
 				io,
 				timeoutMs: agent.timeoutMinutes * 60_000,
 				onSession: noteSession,

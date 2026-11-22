@@ -8,6 +8,7 @@
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
+import { Writable } from "node:stream";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { LiveDoc, type Conversation } from "@earendil-works/pi-durable";
 import { startAdmin, type AdminServer } from "./admin.ts";
@@ -15,11 +16,13 @@ import { Board, boardTasks, STATUS_LABEL, type BoardState } from "./board.ts";
 import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-ops.ts";
 import { initRules, scanConventions, syncRules } from "./conventions.ts";
 import { openApp } from "./app.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, type AppConfig } from "./config.ts";
+import { memberSettingsCommand, MEMBER_HELP, type SettingQuestion } from "./member-settings.ts";
+import type { SettingsDraft } from "./settings.ts";
 import { clip, Jobs, type JobRecord, type JobsState } from "./jobs.ts";
 import { demoConfig, demoOrchestrator, installDemoMember } from "./demo.ts";
 import { createOrchestratorModel } from "./models.ts";
-import { controllerModels, nativeModelCatalog, selectControllerModel } from "./model-selection.ts";
+import { controllerModels, nativeModelCatalog, selectControllerModel, restoreControllerModel } from "./model-selection.ts";
 import { colors as c, follow, setOutputSink, writeLine as log } from "./printer.ts";
 import { AgentSessions, RunBudget } from "./dispatch.ts";
 import { Learning } from "./learning.ts";
@@ -82,6 +85,51 @@ let admin: AdminServer | undefined;
 let webPort: number | undefined;
 let closing = false;
 let switchingSession = false;
+let configuring = false;
+let plainQuestion: { resolve(value: string): void; reject(error: Error): void; secret: boolean } | undefined;
+
+async function assertConfigIdle(): Promise<void> {
+	if (demo) throw new Error("演示模式不保存真实配置，请使用 npm start。");
+	if (closing || switchingSession) throw new Error("正在切换或退出，请稍后配置。");
+	if (terminalConversation && String(terminalConversation.id) !== String(root.id)) throw new Error("请先 /main 返回总控再配置成员。");
+	for (const runtime of sessions.values()) {
+		const state = await runtime.app.harness.inspect(context);
+		if (state.tasks.length || state.submissions.length) throw new Error("有会话正在执行任务，请先等待完成或 /abort all，再修改团队配置。");
+	}
+}
+async function settingQuestion(input: SettingQuestion): Promise<string> {
+	if (terminalUI) return terminalUI.question(input);
+	if (!rl) throw new Error("请在交互终端中执行配置命令。");
+	if (input.secret && !process.stdin.isTTY) throw new Error("密钥输入需要交互终端；请用 npm start，或预先设置凭据环境变量。");
+	log(`${input.title}${input.value ? `（留空保留：${input.value}）` : ""}`);
+	return new Promise((resolve, reject) => { plainQuestion = { resolve, reject, secret: !!input.secret }; });
+}
+async function commitSettings(draft: SettingsDraft, next: AppConfig, controller: boolean): Promise<void> {
+	await assertConfigIdle();
+	// Stage registry/model changes first; no Harness or session database is replaced.
+	const targets = [...sessions.values()].map((runtime) => {
+		const candidate = { ...runtime.config, agents: next.agents, roles: next.roles, collaboration: next.collaboration, ...(controller ? { orchestrator: next.orchestrator } : {}) };
+		const model = controller ? createOrchestratorModel(next.orchestrator, `${runtime.config.storage}.models.json`) : undefined;
+		return { runtime, candidate, model, apply: runtime.app.prepareMembers(candidate) };
+	});
+	draft.save();
+	for (const target of targets) {
+		if (target.model) {
+			// Keep the original Models object referenced by Harness and native selectors.
+			const provider = target.model.models.getProvider(target.model.ref.provider);
+			if (!provider) throw new Error("总控模型目录未注册。");
+			target.runtime.orchestrator.models.setProvider(provider);
+			Object.assign(target.runtime.orchestrator, { ...target.model, models: target.runtime.orchestrator.models });
+			await restoreControllerModel(target.runtime.app.harness, target.runtime.app.root, target.runtime.orchestrator.models, target.model.ref, context);
+		}
+		target.apply();
+	}
+	Object.assign(baseConfig, next);
+	({ app, config, orchestrator } = sessions.get(sessionId)!);
+	({ harness, root, agents } = app);
+	await startWeb();
+	if (controller) terminalUI?.setModel(`${orchestrator.ref.provider}/${orchestrator.ref.modelId}`);
+}
 
 async function conversationList() {
 	return Promise.all(sessionCatalog.list().map(async (info) => {
@@ -103,7 +151,7 @@ async function startWeb() {
 		session: { id: sessionId, title: sessionCatalog.get(sessionId).title, controllerId: String(root.id) },
 		conversations: {
 			list: conversationList,
-			busy: () => switchingSession || closing || activeTerminalCommands > 0,
+			busy: () => switchingSession || configuring || closing || activeTerminalCommands > 0,
 			async create(title: string) {
 				const label = title.trim() || `新对话 ${new Date().toLocaleString("zh-CN")}`;
 				if (label.length > 120) throw new Error("对话标题不能超过 120 个字符");
@@ -125,6 +173,7 @@ async function startWeb() {
 }
 
 async function sessionCommand(line: string) {
+	if (configuring) throw new Error("正在配置，请完成或取消配置后再切换会话。");
 	const [, action = "list", suppliedId = "", ...rest] = line.split(/\s+/);
 	const id = action === "new" && !suppliedId ? `s-${Date.now().toString(36)}` : suppliedId;
 	if (action === "list" || !action) {
@@ -190,15 +239,16 @@ async function sessionCommand(line: string) {
 
 async function printBanner() {
 	const controller = await root.agent(context);
-	log(c.green(`Lemma · 引理 · 本机多 Agent 协作（Pi Durable）${demo ? c.yellow("  [演示模式]") : ""}`));
+	log(c.green(`Lemma · 引理 · 多 Agent 协作（Pi Durable）${demo ? c.yellow("  [演示模式]") : ""}`));
 	log(c.dim(`总调度模型：${orchestrator.info?.type ?? (demo ? "演示" : config.orchestrator.type)} · ${controller.model ? `${controller.model.provider}/${controller.model.modelId}` : orchestrator.describe}`));
 	log(c.cyan(`会话：${sessionId} · ${sessionCatalog.get(sessionId).title}（/sessions 管理与切换）`));
 	log(c.cyan(`当前输入 → 总控对话 ${root.id}；成员各用独立 session_id（/conversation 查看隔离边界）`));
 	log(c.dim(`工作目录：${config.workdir}`));
 	log(c.dim(`会话存储：${config.storage}`));
+	log(c.dim("/setup 配置总控 · /agent add 添加成员 · /agents 查看成员 · /help 操作帮助"));
 	if (admin) log(`${c.dim("后台网页：")}${c.cyan(admin.url)}`);
 	for (const a of agents) {
-		log(`  ${a.available ? c.green("●") : c.red("○")} ${a.kind}${a.available ? "" : c.dim(` — ${a.reason}`)}`);
+		log(`  ${a.available ? c.green("●") : c.red("○")} ${a.label ?? a.kind}${a.label && a.label !== a.kind ? ` (${a.kind})` : ""} · ${a.transport ?? (config.agents[a.kind].api ? "api" : "cli")}${a.available ? "" : c.dim(` — ${a.reason}`)}`);
 	}
 }
 
@@ -232,6 +282,7 @@ async function shutdown(code = 0): Promise<void> {
 const CONTEXT_BLOCKED = /violate .*(terms|usage polic)|blocked as it seems|content (policy|filter)|safety (system|filter)|内容(安全|审核|政策)/i;
 
 async function ask(text: string, whenBusy: "steer" | "followUp" = "followUp") {
+	if (configuring) throw new Error("正在配置，请完成或取消后再发送任务。");
 	const target = root;
 	const id = sessionId;
 	const submission = await target.submit({ type: "input", content: text, whenBusy }, context);
@@ -410,6 +461,13 @@ async function changeCommand(line: string): Promise<boolean> {
 }
 
 async function command(line: string): Promise<boolean> {
+	if (line === "/help") { log(MEMBER_HELP); log("/sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); return true; }
+	if (/^\/(?:agent|setup)(?:\s|$)/.test(line)) {
+		if (configuring) throw new Error("配置正在进行中。");
+		configuring = true;
+		try { return await memberSettingsCommand(line, { path: configPath, config: () => config, question: settingQuestion, assertIdle: assertConfigIdle, commit: commitSettings, log }); }
+		finally { configuring = false; }
+	}
 	if (/^\/sessions?(?:\s|$)/.test(line)) { await sessionCommand(line); return true; }
 	if (line === "/conversations") { await showTerminalConversations(); return true; }
 	if (line === "/tree") { await showTerminalConversations(true); return true; }
@@ -440,7 +498,7 @@ async function command(line: string): Promise<boolean> {
 	if (line === "/members") {
 		const records = (await harness.snapshot(AgentSessions, context))?.sessions ?? {};
 		log(`所属会话：${sessionId} · 总控 conversation_id=${root.id}；成员 ID 只可在所属会话续接。`);
-		for (const [id, record] of Object.entries(records)) log(`${record.agent} · session_id=${id} · 总控=${record.controllerId ?? String(root.id)} · ${record.model ?? "默认模型"} · ${record.rounds ?? 0} 轮 · ${record.lastTask ?? ""}`);
+		for (const [id, record] of Object.entries(records)) log(`${config.agents[record.agent]?.name ?? record.agent} · session_id=${id} · 总控=${record.controllerId ?? String(root.id)} · ${record.model ?? "默认模型"} · ${record.rounds ?? 0} 轮 · ${record.lastTask ?? ""}`);
 		if (!Object.keys(records).length) log("当前会话还没有成员上下文；任务派工后会显示在这里。");
 		return true;
 	}
@@ -538,6 +596,7 @@ async function command(line: string): Promise<boolean> {
 			return true;
 		case "/agents":
 			await printBanner();
+			log(MEMBER_HELP);
 			return true;
 		case "/web":
 			log(admin ? `后台网页：${c.cyan(admin.url)}` : c.dim("后台网页没有开启（--no-web 或配置 web.enabled=false）"));
@@ -584,12 +643,14 @@ async function startRepl() {
 		printChanges(false);
 		log();
 	}
-	const repl = createInterface({ input: process.stdin, output: process.stdout, prompt: `${c.cyan("你 ›")} ` });
+	const terminalOutput = new Writable({ write(chunk, _encoding, callback) { if (!plainQuestion?.secret) process.stdout.write(chunk); callback(); } });
+	const repl = createInterface({ input: process.stdin, output: terminalOutput, terminal: !!process.stdin.isTTY && !!process.stdout.isTTY, prompt: `${c.cyan("你 ›")} ` });
 	rl = repl;
 	let busy = 0;
 	replIdle = () => busy === 0 && !closing;
 
 	repl.on("SIGINT", async () => {
+		if (plainQuestion) { const question = plainQuestion; plainQuestion = undefined; question.reject(new Error("配置已取消，未保存。")); return; }
 		if (busy === 0) return shutdown(0);
 		log(c.yellow("\n正在中止本轮…"));
 		await root.abort(context);
@@ -601,6 +662,7 @@ async function startRepl() {
 	let commands = Promise.resolve();
 	const immediate = new Set(["/abort", "/abort all", "/exit", "/quit"]);
 	repl.on("line", async (raw) => {
+		if (plainQuestion) { const question = plainQuestion; plainQuestion = undefined; if (question.secret && "history" in repl) (repl as Interface & { history: string[] }).history.splice(0); log(); question.resolve(raw); return; }
 		const line = raw.trim();
 		if (!line) return repl.prompt();
 		if (line.startsWith("/")) {
@@ -650,12 +712,13 @@ async function startRepl() {
 		}
 	});
 
-	repl.on("close", () => void shutdown(0));
+	repl.on("close", () => { plainQuestion?.reject(new Error("终端已关闭，配置未保存。")); plainQuestion = undefined; void shutdown(0); });
 	repl.prompt();
 }
 
 /** 选择器只读取已有会话；查看成员不会复制历史，也不会触发模型。 */
 async function showTerminalConversations(tree = false) {
+	if (configuring) throw new Error("请先完成或取消配置。");
 	if (!terminalUI) { await sessionCommand("/sessions"); return; }
 	if (closing || switchingSession) return;
 	const activeId = sessionId;
@@ -685,6 +748,7 @@ async function showTerminalConversations(tree = false) {
 
 /** Model catalogs are views; only Durable commits change the selected controller model. */
 async function modelCommand(id = "") {
+	if (configuring) throw new Error("请先完成或取消配置。");
 	if (closing || switchingSession) throw new Error("正在切换会话，请稍后。");
 	if (terminalConversation && String(terminalConversation.id) !== String(root.id)) throw new Error("子对话为只读查看；请先 /main 返回总控再切换模型。");
 	const target = root, targetHarness = harness, models = orchestrator.models, provider = orchestrator.ref.provider;

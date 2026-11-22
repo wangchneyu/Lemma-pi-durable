@@ -366,6 +366,26 @@ try {
 	assert.equal(faux.state.callCount, 0);
 	check(true, "实际原生会话、关系树和模型选择器可导航，切换时取消刷新并保留输入草稿");
 
+	const settingsDraft = ui.editor.getExpandedText();
+	const submittedBeforeSettings = submissions.length;
+	const question = ui.question({ title: "成员名称", value: "原名称" });
+	assert(frame().includes("成员名称"));
+	terminal.input("新名称"); terminal.input("\r");
+	assert.equal(await question, "新名称");
+	assert.equal(ui.editor.getExpandedText(), settingsDraft);
+	const secretQuestion = ui.question({ title: "密钥", secret: true });
+	terminal.input("SECRET_TERMINAL_FIXTURE");
+	assert(!frame().includes("SECRET_TERMINAL_FIXTURE"));
+	assert(!terminal.output.includes("SECRET_TERMINAL_FIXTURE"));
+	terminal.input("\r"); assert.equal(await secretQuestion, "SECRET_TERMINAL_FIXTURE");
+	assert.equal(submissions.length, submittedBeforeSettings);
+	assert.equal(ui.editor.getExpandedText(), settingsDraft);
+	const cancelQuestion = ui.question({ title: "取消设置" });
+	const cancelled = assert.rejects(cancelQuestion, /取消/);
+	terminal.input("\x1b"); await cancelled;
+	assert.equal(ui.editor.getExpandedText(), settingsDraft);
+	check(true, "配置向导复用原生输入，隐藏密钥、不提交聊天，确认与取消均保留原草稿");
+
 	terminal.input("\x03");
 	assert.equal(interrupts, 1);
 	ui.editor.setText("");

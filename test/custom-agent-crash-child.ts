@@ -1,0 +1,14 @@
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { openApp } from "../src/app.ts";
+import { loadConfig } from "../src/config.ts";
+import { fauxOrchestrator } from "./helpers.ts";
+const file = process.argv[2]!;
+const orchestrator = fauxOrchestrator();
+orchestrator.faux.setResponses([() => fauxAssistantMessage([fauxToolCall("ask_analyst", { task: "CRASH_RECOVERY_TASK" }, { id: "crash-domain" })], { stopReason: "toolUse" })]);
+const app = await openApp(loadConfig(file), orchestrator, BACKGROUND_CONTEXT);
+const submission = await app.root.submit({ type: "input", content: "Start recoverable domain work" }, BACKGROUND_CONTEXT);
+writeFileSync(join(dirname(file), "crash-submission.txt"), String(submission.id));
+await submission.wait(BACKGROUND_CONTEXT);

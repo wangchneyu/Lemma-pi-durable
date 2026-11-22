@@ -1,5 +1,5 @@
-// 三个本机 CLI 的适配器：怎么拼参数、怎么续接会话、怎么从输出里取最终答案和进度。
-import type { AgentKind } from "./config.ts";
+// 成员执行适配器：保留 CLI 协议，API 成员通过独立的 Durable 子会话执行。
+import type { AgentConfig, AgentKind, BuiltinAgentKind } from "./config.ts";
 
 export interface Invocation {
 	/** 新会话时预先指定的会话 ID（仅 Claude 支持） */
@@ -238,4 +238,11 @@ const deepseek: AgentAdapter = {
 	parse: (stdout) => ({ text: stdout, isError: false }),
 };
 
-export const ADAPTERS: Record<AgentKind, AgentAdapter> = { claude, codex, gemini, deepseek };
+export const ADAPTERS: Record<BuiltinAgentKind, AgentAdapter> = { claude, codex, gemini, deepseek };
+
+export function agentAdapter(kind: AgentKind, config: AgentConfig): AgentAdapter {
+	if (config.api) return { ...deepseek, kind, label: config.name ?? (kind === "deepseek" ? "DeepSeek" : kind) };
+	const adapter = Object.hasOwn(ADAPTERS, kind) ? ADAPTERS[kind as BuiltinAgentKind] : undefined;
+	if (!adapter) throw new Error(`成员 ${kind} 没有可用的执行适配器。`);
+	return config.name ? { ...adapter, label: config.name } : adapter;
+}

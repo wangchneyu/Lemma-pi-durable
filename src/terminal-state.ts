@@ -5,6 +5,7 @@ import { ConversationTranscript } from "@earendil-works/pi-durable";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { toViewItem, toViewLive, type ViewItem, type ViewLive } from "./view.ts";
 import { transcriptSummary } from "./digest.ts";
+import { MemberIdentity } from "./api-member.ts";
 
 export type TerminalItem = ViewItem & { message?: Message };
 export type TerminalTool = ViewLive["tools"][number] & { args?: Record<string, unknown>; argsComplete?: boolean; isError?: boolean };
@@ -133,11 +134,11 @@ export async function listNativeConversations(harness: Harness, root: Conversati
 	const summaries = await Promise.all(records.map(async (record): Promise<NativeConversationSummary | undefined> => {
 		const child = await harness.conversation(record.id, context);
 		if (!child) return undefined;
-		const [agent, stats] = await Promise.all([child.agent(context), transcriptSummary(harness, child)]);
+		const [agent, stats, identity] = await Promise.all([child.agent(context), transcriptSummary(harness, child), harness.snapshot(MemberIdentity, child.id, context)]);
 		const summary = stats.first?.slice(0, 100) ?? "尚无消息";
 		const isRoot = String(record.id) === String(root.id);
 		return {
-			id: String(record.id), title: isRoot ? "总调度" : summary,
+			id: String(record.id), title: isRoot ? "总调度" : identity?.name ? `${identity.name} · ${summary}` : summary,
 			parentId: isRoot ? undefined : String(record.owner?.conversationId ?? record.parent?.conversationId ?? root.id),
 			workdir: agent.cwd,
 			createdAt: stats.firstAt, lastAt: stats.lastAt, messageCount: stats.messageCount, searchText: stats.text,

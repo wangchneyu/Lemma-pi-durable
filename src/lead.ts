@@ -100,7 +100,7 @@ export function createLeadTool(deps: DispatchDeps): ToolRegistration {
 				const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId as any } });
 				// 和总调度同一个模型和派工工具，只是不能再开子调度
 				await configure(tx, created.id, {
-					instructions: leadInstructions(name, args.goal, args.scope, args.task_id),
+					instructions: [config.collaboration?.instructions, leadInstructions(name, args.goal, args.scope, args.task_id)].filter(Boolean).join("\n\n"),
 					tools: { remove: [tool] },
 					maxTurns: config.orchestrator.maxTurns ?? 40,
 				});
