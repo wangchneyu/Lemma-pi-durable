@@ -1,7 +1,9 @@
 // 工作区只读代码感知工具：目录浏览（list_files）、代码检索（search_code）、改动差异（git_diff）。
 // 仅对编码工作区（workspace !== "none"）且具备 read 权限的 API 成员开放；严格限制在子对话 cwd 内，不修改任何文件或 Git 状态。
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, posix, relative, resolve, sep } from "node:path";
+import { stripTypeScriptTypes } from "node:module";
+import { extname, join, posix, relative, resolve, sep } from "node:path";
+import vm from "node:vm";
 import { AgentDoc, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { bool, int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import type { ChangeStore } from "./changes.ts";
@@ -299,4 +301,44 @@ export function createCodeReadTools(
 	});
 
 	return [listFiles, searchCode, gitDiff, outlineFile, findSymbol];
+}
+
+/**
+ * 编辑后即时零成本语法/JSON 诊断：在 write/edit 刚落盘时立即捕获语法错误，
+ * 避免 API 成员直到派工结束跑 autonomy.checks 才发现低级语法问题而浪费整轮返工。
+ */
+export function checkFileSyntax(cwd: string, rawPath: string): string | undefined {
+	const full = resolve(cwd, rawPath.trim());
+	const ext = extname(full).toLowerCase();
+	if (![".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", ".json"].includes(ext)) return undefined;
+	let content: string;
+	try {
+		const st = statSync(full);
+		if (!st.isFile() || st.size > MAX_FILE_BYTES) return undefined;
+		content = readFileSync(full, "utf8");
+	} catch {
+		return undefined;
+	}
+	if (ext === ".json") {
+		try {
+			JSON.parse(content);
+			return undefined;
+		} catch (error) {
+			return `JSON 语法错误：${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
+	try {
+		if (ext === ".tsx") {
+			// stripTypeScriptTypes 支持 ts/mts/cts；tsx 跳过 JSX 误报仅做基础校验
+			return undefined;
+		}
+		const js = [".ts", ".mts", ".cts"].includes(ext) ? stripTypeScriptTypes(content, { mode: "strip" }) : content;
+		// 用 vm.Script 校验普通 JS 语法；若含 import/export（ESM）则跳过 vm.Script（stripTypeScriptTypes 已校验 TS 语法）
+		if (!/^\s*(?:import|export)\b/m.test(js)) {
+			new vm.Script(js, { filename: rawPath });
+		}
+		return undefined;
+	} catch (error) {
+		return `语法检查未通过：${error instanceof Error ? error.message : String(error)}`;
+	}
 }

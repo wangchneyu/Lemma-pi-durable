@@ -439,7 +439,8 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	if (args.structured) prompt += '\n\n【交付格式】最终回答仅输出 JSON：{"format":"lemma.delivery.v1","conclusion":"结论","data":{},"evidence":[{"source":"实际来源","excerpt":"必要依据"}],"artifacts":[{"path":"已有产物引用","description":"说明"}],"incomplete":["未完成项"]}。不虚构来源或文件，空集合用 []；产物引用不代表系统已验证其存在。';
 	if (codeWorkspace && config.autonomy.enabled) {
 		const lessons = await io.commit(async (tx) => JSON.parse(JSON.stringify((await tx.doc(Learning)).lessons)) as import("./learning.ts").VerifiedLesson[]);
-		const relevant = relevantLessons(lessons, args.task);
+		const targetFiles = [...(taskScope?.allow ?? []), ...(change?.files.map((f) => f.path) ?? [])];
+		const relevant = relevantLessons(lessons, args.task, targetFiles);
 		if (relevant) prompt = `【相关已验证记录，仅供参考】\n${relevant}\n\n${prompt}`;
 	}
 	// API 成员的子对话本身是持久的：重放时按同一个提交接着等，不需要「中断后续接」的提示

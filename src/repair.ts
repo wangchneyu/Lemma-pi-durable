@@ -71,7 +71,7 @@ export async function managedDispatch(kind: AgentKind, command: string[], deps: 
 		if (!result.isError && change?.verification?.passed && change.verification.head === change.head) {
 			await io.commit(async (tx) => {
 				const state = await tx.doc(Learning);
-				if (!state.lessons.some((l) => l.key === key)) state.lessons.push({ key, task: args.task.slice(0, 200), checks: change.verification!.checks, repairs: attempts, at: io.now(), failure: firstFailure, resolution: result.summary?.body.slice(0, 800) ?? "", changeId: change.id, head: change.head });
+				if (!state.lessons.some((l) => l.key === key)) state.lessons.push({ key, kind: "repair", task: args.task.slice(0, 200), files: change.files.map((f) => f.path).slice(0, 20), checks: change.verification!.checks, repairs: attempts, at: io.now(), failure: firstFailure, resolution: result.summary?.body.slice(0, 800) ?? "", changeId: change.id, head: change.head });
 				state.lessons = state.lessons.slice(-50);
 			});
 		}

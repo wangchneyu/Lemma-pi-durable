@@ -18,7 +18,7 @@ import { readCredential } from "./credentials.ts";
 import { createBusinessTools } from "./business-tools.ts";
 import { Operations, unresolved } from "./operations.ts";
 import { createMcpTools, mcpToolName } from "./mcp-tools.ts";
-import { createCodeReadTools } from "./code-tools.ts";
+import { createCodeReadTools, checkFileSyntax } from "./code-tools.ts";
 import type { ChangeStore } from "./changes.ts";
 import { scopeViolation, type TaskScope } from "./scope.ts";
 
@@ -134,16 +134,46 @@ export function memberToolNames(api: ApiMemberConfig): string[] {
 	return [...new Set(api.tools ?? ["read", "write", "edit", ...(api.bash !== "off" ? ["bash"] : [])])].filter((name) => name !== "bash" || api.bash !== "off");
 }
 
+function withPostEditDiagnostics(tool: any): any {
+	const origExecute = tool.execute.bind(tool);
+	return {
+		...tool,
+		execute: async (args: any, api: any, context: any) => {
+			const res = await origExecute(args, api, context);
+			if (res && !res.isError && typeof args?.path === "string") {
+				const agent = (await api.snapshot(AgentDoc, api.conversationId, context)) as { cwd?: string } | undefined;
+				if (agent?.cwd) {
+					const diag = checkFileSyntax(agent.cwd, args.path);
+					if (diag && Array.isArray(res.output)) {
+						res.output = [
+							...res.output,
+							{ type: "text" as const, text: `\n⚠ [即时语法诊断] ${args.path}: ${diag}。请在继续前立即修正。` },
+						];
+					}
+				}
+			}
+			return res;
+		},
+	};
+}
+
 /** Tool grants are explicit for custom members; legacy coding members retain their existing default set. */
 export function createMemberTools(kind: AgentKind, api: ApiMemberConfig, options?: { workspace?: "code" | "none"; changes?: ChangeStore }): Extension {
 	const granted = new Set(memberToolNames(api));
+	const coding = options?.workspace === "code";
 	const tools: any[] = [...createBusinessTools(kind, api.httpTools), ...createMcpTools(api.mcpServers)];
 	if (granted.has("read")) {
 		tools.push(createReadTool());
-		if (options?.workspace === "code") tools.push(...createCodeReadTools(pathRefusal, options?.changes));
+		if (coding) tools.push(...createCodeReadTools(pathRefusal, options?.changes));
 	}
-	if (granted.has("write")) tools.push(createWriteTool());
-	if (granted.has("edit")) tools.push(createEditTool());
+	if (granted.has("write")) {
+		const w = createWriteTool();
+		tools.push(coding ? withPostEditDiagnostics(w) : w);
+	}
+	if (granted.has("edit")) {
+		const e = createEditTool();
+		tools.push(coding ? withPostEditDiagnostics(e) : e);
+	}
 	if (granted.has("bash") && api.bash !== "off") {
 		tools.push(
 			createBashTool({

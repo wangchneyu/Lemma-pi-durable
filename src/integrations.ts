@@ -12,6 +12,7 @@ import { addWorktree, linkIgnoredDirs, numstat } from "./git.ts";
 import { cleanEnv, runCli } from "./cli-runner.ts";
 import { findConflictMarkers, integrationGit, integrationStale, mergeIntegrationSource, workspaceTree } from "./integration-git.ts";
 import { Jobs, type JobRecord } from "./jobs.ts";
+import { Learning, relevantLessons } from "./learning.ts";
 
 export const Integrations = defineDoc<{ records: Record<string, ChangeRecord>; byKey: Record<string, string> }>({ kind: "lemma.integrations", version: 1, scope: "session", initial: () => ({ records: {}, byKey: {} }), checkpointWhen: () => false });
 type Checkpoint = { phase: "prepare" | "merge" | "repair" | "test"; index: number };
@@ -142,6 +143,9 @@ export function createIntegrations(deps: DispatchDeps, hooks: IntegrationHooks =
 						: "";
 					const failBrief = rep.previousFailure ? `\n前次集成失败证据：\n${rep.previousFailure.slice(-3000)}` : "";
 					const checkBrief = record.integration!.checks.map((c) => `${c.name}: ${c.command} ${c.args.join(" ")}`).join("；");
+					const lessons = (await runtime.snapshot(Learning, context))?.lessons ?? [];
+					const sourceFiles = [...new Set([...(record.integration!.conflicts ?? []), ...record.integration!.sources.flatMap((s) => changes.get(s.id)?.files.map((f) => f.path) ?? [])])];
+					const relevant = relevantLessons(lessons, `${record.task}\n${failBrief}`, sourceFiles);
 					const prompt = [
 						`联合集成修复 #${record.id}（源自失败集成 #${rep.fromId}）。`,
 						"你在独立修复工作副本中工作，原始来源分支与主目录均不会受影响。",
@@ -149,6 +153,7 @@ export function createIntegrations(deps: DispatchDeps, hooks: IntegrationHooks =
 						sourceBrief,
 						conflictBrief,
 						failBrief,
+						relevant ? `\n相关历史修复经验（仅参考，以当前代码和检查为准）：\n${relevant}` : "",
 						rep.note ? `\n补充修复要求：${rep.note}` : "",
 						`\n联合验收将自动重跑全量检查（${checkBrief}）。请最小化修改解决冲突或跨模块接口/类型/测试不兼容问题，禁止删除正常功能或弱化测试标准。`,
 					].filter(Boolean).join("\n");
@@ -207,6 +212,29 @@ export function createIntegrations(deps: DispatchDeps, hooks: IntegrationHooks =
 			}
 			if (record.integration!.reports.length !== record.integration!.checks.length || record.integration!.reports.some((report) => !report.passed)) { await finish("failed", "联合检查结果不完整。"); return; }
 			record.verification = { head: record.head, passed: true, at: runtime.now(), checks: record.integration!.checks.map((check) => check.name) };
+			if (record.integration!.repair) {
+				const rep = record.integration!.repair;
+				const lessonKey = `integration:${record.id}`;
+				await runtime.commit(async (tx: Tx) => {
+					const learning = await tx.doc(Learning);
+					if (!learning.lessons.some((l) => l.key === lessonKey)) {
+						learning.lessons.push({
+							key: lessonKey,
+							kind: "integration",
+							task: record.task.slice(0, 200),
+							files: record.files.map((f) => f.path).slice(0, 20),
+							checks: record.verification!.checks,
+							repairs: 1,
+							at: runtime.now(),
+							failure: rep.previousFailure?.slice(-1200),
+							resolution: `由 ${rep.member} 在独立修复副本解决后通过联合检查`,
+							changeId: record.id,
+							head: record.head,
+						});
+						learning.lessons = learning.lessons.slice(-50);
+					}
+				}, context);
+			}
 			await finish("passed", record.integration!.repair ? "冲突/联调问题已在独立副本修复并通过全量联合检查；等待用户 /apply 确认。" : "多成员改动已联合验证通过；等待用户 /apply 确认，不自动修改主目录。");
 		} catch (error) { if (!runtime.signal.aborted && !hub.closing) await finish("failed", error instanceof Error ? error.message : String(error)); }
 	}

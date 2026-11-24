@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { localBenchmarkRuntime, runCollaborationBenchmark } from "../src/collaboration-benchmark.ts";
+import { localBenchmarkRuntime, localCodingBenchmarkRuntime, runCodingCollaborationBenchmark, runCollaborationBenchmark } from "../src/collaboration-benchmark.ts";
 import { check, testConfig } from "./helpers.ts";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 const oldKey = process.env.LEMMA_COLLABORATION_BENCH_KEY; process.env.LEMMA_COLLABORATION_BENCH_KEY = "preserve-fixture";
@@ -10,3 +10,9 @@ const failures = await runCollaborationBenchmark({ base: testConfig(), runtime: 
 assert.equal(failures.length, 6); assert(failures.every((run) => !run.success && run.sourceRequests === 0 && run.tokens === null));
 if (oldKey === undefined) delete process.env.LEMMA_COLLABORATION_BENCH_KEY; else process.env.LEMMA_COLLABORATION_BENCH_KEY = oldKey;
 check(true, "完整任务对照使用生产派工、结构化交接、数据查询与验收，失败计入样本，模拟不伪造成本或人工介入数据");
+const codingRuns = await runCodingCollaborationBenchmark({ base: testConfig(), runtime: localCodingBenchmarkRuntime, simulated: true });
+assert.equal(codingRuns.length, 2);
+assert(codingRuns.every((run) => run.success), JSON.stringify(codingRuns));
+const teamRun = codingRuns.find((run) => run.arm === "team")!;
+assert(teamRun.scopeEnforced && teamRun.blindReviewCaught && teamRun.integrationPassed);
+check(true, "多文件 Coding 协作对照验证路径契约、盲审抓缺陷返工与多分支联合集成全流程");

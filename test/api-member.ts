@@ -190,5 +190,32 @@ check(!!inspectResults[3]?.isError && inspectResults[3]!.text.includes("工作�
 check(!inspectResults[4]?.isError && inspectResults[4]!.text.includes("hello.ts") && inspectResults[4]!.text.includes("L1: export const hello"), "outline_file 返回代码结构大纲与行号");
 check(!inspectResults[5]?.isError && inspectResults[5]!.text.includes("【定义处") && inspectResults[5]!.text.includes("hello.ts:1:"), "find_symbol 定位符号定义与引用");
 
+// ---- 5. 编辑后即时语法诊断（write/edit 写入错误 TS/JSON 语法时立即反馈，无需等到收尾检查） ----
+let syntaxDiagMsg = "";
+let jsonDiagMsg = "";
+ds.setResponses([
+	() => fauxAssistantMessage([
+		fauxToolCall("write", { path: "broken.ts", content: "export const bad: number = ;\n" }, { id: "syn1" }),
+		fauxToolCall("write", { path: "bad.json", content: "{ invalid json" }, { id: "syn2" }),
+	], { stopReason: "toolUse" }),
+	(ctx: any) => {
+		const res = toolResults(ctx).slice(-2);
+		syntaxDiagMsg = res[0]?.text ?? "";
+		jsonDiagMsg = res[1]?.text ?? "";
+		return fauxAssistantMessage([
+			fauxToolCall("write", { path: "broken.ts", content: "export const bad: number = 1;\n" }, { id: "syn3" }),
+			fauxToolCall("write", { path: "bad.json", content: "{\"ok\":true}\n" }, { id: "syn4" }),
+		], { stopReason: "toolUse" });
+	},
+	() => fauxAssistantMessage(fauxText("SYNTAX_FIXED")),
+]);
+orch.faux.setResponses([
+	() => fauxAssistantMessage([fauxToolCall("ask_deepseek", { task: "测试编辑后即时语法诊断", session_id: sid! }, { id: "d5" })], { stopReason: "toolUse" }),
+	() => fauxAssistantMessage(fauxText("好")),
+]);
+await (await root.submit({ type: "input", content: "即时语法诊断测试" }, context)).wait(context);
+check(syntaxDiagMsg.includes("即时语法诊断") && syntaxDiagMsg.includes("broken.ts"), "write 写入 TS 语法错误时立即返回即时语法诊断");
+check(jsonDiagMsg.includes("即时语法诊断") && jsonDiagMsg.includes("JSON 语法错误"), "write 写入无效 JSON 时立即返回 JSON 诊断");
+
 await harness.close(context);
 console.log("\nAPI 成员测试通过 ✅");

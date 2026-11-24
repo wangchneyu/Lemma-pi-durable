@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -108,4 +109,206 @@ export function localBenchmarkRuntime() {
 	};
 	controller.setResponses(Array.from({ length: 40 }, () => controllerReply));
 	return { models, ref: { provider: "benchmark-local", modelId: "fixture" } };
+}
+
+export type CodingBenchmarkRun = {
+	fixture: string;
+	arm: "single" | "team";
+	success: boolean;
+	durationMs: number;
+	requests: number;
+	scopeEnforced: boolean;
+	blindReviewCaught: boolean;
+	integrationPassed: boolean;
+	tokens: number | null;
+	costUsd: number | null;
+	error?: string;
+};
+
+/**
+ * 真实多文件 Coding 协作对照：
+ * - single：单 Agent 直接修改实现与测试；
+ * - team：L2 契约分流（implementer 限 src/ + tester 限 test/）+ 代码盲审（blind: true）+ 多 worktree 联合集成测试。
+ */
+export async function runCodingCollaborationBenchmark(options: {
+	base: AppConfig;
+	runtime(): { models: MutableModels; ref: { provider: string; modelId: string } };
+	simulated: boolean;
+	signal?: AbortSignal;
+}): Promise<CodingBenchmarkRun[]> {
+	const key = options.simulated ? "local-fixture-only" : resolveOrchestratorKey(options.base.orchestrator);
+	if (!key) throw new Error("真实对照缺少总控凭据，请先 /setup。");
+	const keyEnv = "LEMMA_COLLABORATION_BENCH_KEY", oldKey = process.env[keyEnv]; process.env[keyEnv] = key;
+	const runs: CodingBenchmarkRun[] = [];
+	try {
+		for (const arm of ["single", "team"] as const) {
+			options.signal?.throwIfAborted();
+			const repo = mkdtempSync(join(tmpdir(), `lemma-coding-bench-${arm}-`));
+			const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { stdio: "pipe", windowsHide: true }).toString().trim();
+			git("init", "-q");
+			writeFileSync(join(repo, ".gitignore"), "*.sqlite*\nworktrees/\ncalls.jsonl\n.pi-agent/\n");
+			writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "bench-fixture", type: "module" }));
+			git("add", ".");
+			git("-c", "user.name=bench", "-c", "user.email=bench@local", "-c", "commit.gpgsign=false", "commit", "-qm", "init");
+
+			let requests = 0;
+			const observations: Usage[] = [], pending: Promise<void>[] = [];
+			const runtime = options.runtime();
+			const models = new Proxy(runtime.models, {
+				get(target, prop) {
+					if (prop === "streamSimple") return (model: any, input: any, settings: any) => {
+						if (requests >= 40) throw new Error("该样本达到 40 次模型请求上限");
+						requests++;
+						const stream = target.streamSimple(model, input, { ...settings, maxTokens: 1024, temperature: 0, maxRetries: 0 });
+						pending.push(stream.result().then((message) => { observations.push(message.usage); }, () => {}));
+						return stream;
+					};
+					const value = Reflect.get(target, prop);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+			const o = options.base.orchestrator;
+			const apiBase = { type: o.type === "anthropic-compatible" ? "anthropic-compatible" as const : "openai-compatible" as const, baseUrl: options.simulated ? "http://fixture.invalid" : runtime.models.getModel(runtime.ref.provider, runtime.ref.modelId)!.baseUrl, apiKeyEnv: [keyEnv], bash: "off" as const, bashAllow: [], maxTurns: 12 };
+			const coderMember = { enabled: true, description: "实现 src/ 模块代码", workspace: "code" as const, extraArgs: [], models: [{ id: runtime.ref.modelId, tier: "standard" as const, ...(o.price ? { price: o.price } : {}) }], defaultModel: runtime.ref.modelId, timeoutMinutes: 1, maxOutputChars: 12000, api: { ...apiBase, tools: ["read" as const, "write" as const, "edit" as const] } };
+			const reviewerMember = { enabled: true, description: "只读代码盲审成员", workspace: "code" as const, extraArgs: [], models: [{ id: runtime.ref.modelId, tier: "standard" as const, ...(o.price ? { price: o.price } : {}) }], defaultModel: runtime.ref.modelId, timeoutMinutes: 1, maxOutputChars: 12000, api: { ...apiBase, tools: ["read" as const] } };
+			const config = normalizeConfig({
+				workdir: repo,
+				storage: join(repo, "bench.sqlite"),
+				orchestrator: { ...o, maxTurns: 16 },
+				isolation: { enabled: arm === "team", linkDirs: [] },
+				autonomy: { enabled: false, maxRepairAttempts: 0, resultMaxChars: 4000, checks: [{ name: "unit-test", command: "node", args: ["test/discount.test.mjs"], timeoutSeconds: 30 }] },
+				budget: { perRunUsd: options.simulated ? null : options.base.budget.perRunUsd },
+				lead: { enabled: false },
+				web: { enabled: false, port: 0 },
+				roles: [],
+				agents: {
+					...Object.fromEntries(["claude", "codex", "gemini", "deepseek"].map((id) => [id, { enabled: false }])),
+					...(arm === "team" ? { implementer: coderMember, tester: { ...coderMember, description: "独立编写 test/ 单元测试" }, reviewer: reviewerMember } : { solo: coderMember }),
+				},
+			} as Partial<AppConfig>);
+			const simulatedIds = arm === "team" ? ["implementer", "tester", "reviewer"] : ["solo"];
+			const simulatedProviders = options.simulated ? simulatedIds.map((id) => runtime.models.getProvider(`member-${id}`)).filter((p) => p !== undefined) : [];
+			const app = await openApp(config, { models, ref: runtime.ref }, BACKGROUND_CONTEXT, { settings: { retry: { enabled: false, maxRetries: 0 }, stream: { timeoutMs: 30000, maxRetries: 0, cacheRetention: "none" }, compaction: { enabled: false }, afterFailedRun: "keep" } });
+			for (const p of simulatedProviders) models.setProvider(p);
+			const started = performance.now();
+			let error: string | undefined;
+			let success = false;
+			let scopeEnforced = false;
+			let blindReviewCaught = false;
+			let integrationPassed = false;
+			try {
+				if (arm === "single") {
+					await (await app.root.submit({ type: "input", content: "SOLO_DISCOUNT: 让 solo 在 src/discount.mjs 实现 applyDiscount(price, pct)，并在 test/discount.test.mjs 写测试。" }, BACKGROUND_CONTEXT)).wait(withAbortSignal(AbortSignal.timeout(20000), BACKGROUND_CONTEXT));
+					const targetDir = app.changes.list().find((c) => c.agent === "solo")?.path ?? repo;
+					try {
+						execFileSync(process.execPath, ["test/discount.test.mjs"], { cwd: targetDir, stdio: "pipe", windowsHide: true });
+						success = existsSync(join(targetDir, "src/discount.mjs")) && existsSync(join(targetDir, "test/discount.test.mjs"));
+					} catch {}
+				} else {
+					await (await app.root.submit({ type: "input", content: "TEAM_DISCOUNT: 拆分为 T1(implementer 限 src/, 禁用 test/, 盲审返工)、T2(tester 限 test/, 禁用 src/) 与 T3(联合集成)。" }, BACKGROUND_CONTEXT)).wait(withAbortSignal(AbortSignal.timeout(20000), BACKGROUND_CONTEXT));
+					const end = Date.now() + 20000;
+					while ((await app.harness.snapshot(Board, BACKGROUND_CONTEXT))?.tasks.T3?.status !== "done" && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
+					const board = await app.harness.snapshot(Board, BACKGROUND_CONTEXT);
+					const t1 = board?.tasks.T1, t2 = board?.tasks.T2, t3 = board?.tasks.T3;
+					const integrated = t3?.integrationId ? app.changes.get(t3.integrationId) : undefined;
+					integrationPassed = integrated?.integration?.status === "passed";
+					blindReviewCaught = (t1?.checksByMember?.some((c) => c.status === "rework") ?? false) && (t1?.checksByMember?.at(-1)?.status === "accepted");
+					scopeEnforced = t1?.scope?.forbid?.includes("test/") === true && existsSync(join(integrated?.path ?? "", "src/discount.mjs")) && existsSync(join(integrated?.path ?? "", "test/discount.test.mjs"));
+					success = t3?.status === "done" && integrationPassed && blindReviewCaught && scopeEnforced;
+					if (!success) error = JSON.stringify({ t1: t1?.status, t2: t2?.status, t3, integration: integrated?.integration?.status });
+				}
+			} catch (err) {
+				error = err instanceof Error ? err.message : String(err);
+			} finally {
+				await Promise.all(pending);
+				await app.harness.close(BACKGROUND_CONTEXT);
+			}
+			const measured = !options.simulated && requests > 0 && observations.length === requests && observations.every((v) => v.totalTokens > 0);
+			const usage = measured ? observations.reduce((sum, v) => sum + v.totalTokens, 0) : null;
+			const costUsd = measured && o.price ? observations.reduce((sum, v) => sum + v.cost.total, 0) : null;
+			runs.push({ fixture: "discount-module", arm, success, durationMs: Math.round(performance.now() - started), requests, scopeEnforced, blindReviewCaught, integrationPassed, tokens: usage, costUsd, ...(error ? { error } : {}) });
+		}
+		return runs;
+	} finally {
+		if (oldKey === undefined) delete process.env[keyEnv]; else process.env[keyEnv] = oldKey;
+	}
+}
+
+export function localCodingBenchmarkRuntime() {
+	const models = createModels();
+	const controller = fauxProvider({ provider: "coding-bench-local", models: [{ id: "fixture" }], tokensPerSecond: 100000 });
+	models.setProvider(controller.provider);
+	const results = (ctx: any) => ctx.messages.filter((m: any) => m.role === "toolResult").map((m: any) => ({ name: m.toolName, text: m.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("") }));
+
+	// solo：写实现与测试
+	const solo = fauxProvider({ provider: "member-solo", models: [{ id: "fixture" }], tokensPerSecond: 100000 });
+	solo.setResponses([
+		() => fauxAssistantMessage([
+			fauxToolCall("write", { path: "src/discount.mjs", content: "export const applyDiscount = (p, pct) => p * (1 - pct / 100);\n" }, { id: "s1" }),
+			fauxToolCall("write", { path: "test/discount.test.mjs", content: "import assert from 'node:assert/strict';\nimport { applyDiscount } from '../src/discount.mjs';\nassert.equal(applyDiscount(100, 20), 80);\n" }, { id: "s2" }),
+		], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("SOLO_DONE")),
+	]);
+	models.setProvider(solo.provider);
+
+	// implementer：第1轮故意越界写 test/ 被拦且少写了边界校验 -> 盲审触发 rework -> 第2轮修好
+	const impl = fauxProvider({ provider: "member-implementer", models: [{ id: "fixture" }], tokensPerSecond: 100000 });
+	impl.setResponses([
+		() => fauxAssistantMessage([
+			fauxToolCall("write", { path: "test/discount.test.mjs", content: "// cheat\n" }, { id: "i0" }),
+			fauxToolCall("write", { path: "src/discount.mjs", content: "export const applyDiscount = (p, pct) => p * (1 - pct / 100);\n" }, { id: "i1" }),
+		], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("完美无缺")),
+		() => fauxAssistantMessage([
+			fauxToolCall("write", { path: "src/discount.mjs", content: "export const applyDiscount = (p, pct) => { if (pct < 0 || pct > 100) throw new RangeError('pct'); return p * (1 - pct / 100); };\n" }, { id: "i2" }),
+		], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("已补充边界校验")),
+		() => fauxAssistantMessage([
+			fauxToolCall("write", { path: "src/index.mjs", content: "export { applyDiscount } from './discount.mjs';\n" }, { id: "i3" }),
+		], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("已集成汇总导出")),
+	]);
+	models.setProvider(impl.provider);
+
+	// tester：只写 test/，不碰 src/
+	const tester = fauxProvider({ provider: "member-tester", models: [{ id: "fixture" }], tokensPerSecond: 100000 });
+	tester.setResponses([
+		() => fauxAssistantMessage([
+			fauxToolCall("write", { path: "test/discount.test.mjs", content: "import assert from 'node:assert/strict';\nimport { applyDiscount } from '../src/discount.mjs';\nassert.equal(applyDiscount(100, 20), 80);\nassert.throws(() => applyDiscount(100, 150));\n" }, { id: "t1" }),
+		], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("测试已独立完成")),
+	]);
+	models.setProvider(tester.provider);
+
+	// reviewer：盲审模式下用 git_diff 抓边界缺陷并打回，修复后及测试分支均通过
+	const reviewer = fauxProvider({ provider: "member-reviewer", models: [{ id: "fixture" }], tokensPerSecond: 100000 });
+	reviewer.setResponses(Array.from({ length: 12 }, () => (ctx: any) => {
+		const diffs = results(ctx).filter((r: any) => r.name === "git_diff");
+		const userText = ctx.messages.filter((m: any) => m.role === "user").map((m: any) => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n");
+		const rid = userText.match(/(dispatch:[^"\\\s\]]+)/)?.[1];
+		if (!diffs.length) return fauxAssistantMessage([fauxToolCall("git_diff", {}, { id: `r-${Math.random().toString(36).slice(2, 7)}` })], { stopReason: "toolUse" });
+		const diff = diffs.at(-1)!.text;
+		const ok = diff.includes("RangeError") || diff.includes("discount.test.mjs") || diff.includes("index.mjs");
+		return fauxAssistantMessage(fauxText(JSON.stringify(ok ? { verdict: "accept", result_id: rid, evidence: "git_diff 核对实现或测试符合验收标准" } : { verdict: "rework", result_id: rid, evidence: "缺少 pct 边界校验" })));
+	}));
+	models.setProvider(reviewer.provider);
+
+	controller.setResponses(Array.from({ length: 20 }, () => (ctx: any) => {
+		const user = JSON.stringify(ctx.messages);
+		const done = results(ctx);
+		if (user.includes("SOLO_DISCOUNT")) {
+			return done.length ? fauxAssistantMessage(fauxText("SOLO_OK")) : fauxAssistantMessage([fauxToolCall("ask_solo", { task: "实现并测试折扣函数" })], { stopReason: "toolUse" });
+		}
+		if (!done.length) {
+			return fauxAssistantMessage([fauxToolCall("plan_tasks", {
+				tasks: [
+					{ title: "实现折扣逻辑", scope: { allow: ["src/"], forbid: ["test/"] }, automation: { member: "implementer", maxReworks: 1 }, reviewer: { member: "reviewer", blind: true } },
+					{ title: "编写独立单测", scope: { allow: ["test/"], forbid: ["src/"] }, automation: { member: "tester" }, reviewer: { member: "reviewer", blind: true } },
+					{ title: "集成汇总验证", deps: ["+1", "+2"], scope: { allow: ["src/"], forbid: ["test/"] }, automation: { member: "implementer" }, reviewer: { member: "reviewer", blind: true } },
+				],
+			})], { stopReason: "toolUse" });
+		}
+		return fauxAssistantMessage(fauxText("TEAM_OK"));
+	}));
+	return { models, ref: { provider: "coding-bench-local", modelId: "fixture" } };
 }
