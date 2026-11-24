@@ -47,6 +47,7 @@ function render() {
 		["方式", roleLabel + (d.job && !roleLabel.includes(d.job) ? ` · <code>${esc(d.job)}</code>` : "")],
 		["分工任务", d.taskId ? `${esc(d.taskId)}${boardTask ? ` · ${esc(boardTask.title)}` : ""}` : "—"],
 		...(scopeText ? [["路径契约", scopeText]] : []),
+		...(boardTask?.reviewer ? [["独立复核", `${esc(boardTask.reviewer.member)}${boardTask.reviewer.blind ? " · 🕶 盲审模式（已剥离执行自述，仅审需求与 git_diff）" : ""}`]] : []),
 		["模型", d.model ? `<code>${esc(d.model)}</code>` : "CLI 默认"],
 		["派工时间", stamp(d.at)],
 		["结束时间", d.endAt ? stamp(d.endAt) : "—"],

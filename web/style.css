@@ -3841,3 +3841,377 @@ pre {
 .table td.nowrap {
 	white-space: nowrap;
 }
+
+/* ---------- 操作栏、按钮与弹窗表单 ---------- */
+.page-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-bottom: 14px;
+	padding: 10px 14px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+	font-size: 12.5px;
+}
+.row-actions,
+.task-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+.task-actions {
+	margin-top: 8px;
+}
+.primary-btn {
+	border: 1px solid color-mix(in srgb, var(--signal) 55%, var(--line));
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--signal) 18%, var(--panel-2));
+	color: var(--ink);
+	padding: 6px 12px;
+	font-size: 12.5px;
+	font-weight: 600;
+	cursor: pointer;
+}
+.primary-btn:hover:not(:disabled) {
+	border-color: var(--signal);
+	background: color-mix(in srgb, var(--signal) 28%, var(--panel-2));
+}
+.primary-btn.tiny {
+	padding: 3px 9px;
+	font-size: 11.5px;
+}
+.primary-btn:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+.danger-btn {
+	border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+	background: color-mix(in srgb, var(--danger) 18%, var(--panel-2));
+}
+.linkish.tiny {
+	font-size: 11px;
+	margin-left: 6px;
+}
+.task-card.flash {
+	outline: 2px solid var(--signal);
+	outline-offset: 2px;
+}
+
+.edit-dialog {
+	margin: auto;
+	width: min(560px, calc(100vw - 24px));
+	max-height: calc(100vh - 32px);
+	padding: 0;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius);
+	background: var(--panel);
+	color: var(--ink);
+	box-shadow: var(--shadow);
+}
+.edit-dialog::backdrop {
+	background: rgba(0, 0, 0, 0.58);
+}
+.edit-form {
+	display: flex;
+	flex-direction: column;
+	max-height: calc(100vh - 36px);
+}
+.edit-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--line);
+}
+.edit-head h3 {
+	margin: 0;
+	font: 600 15px var(--font-display);
+}
+.edit-body {
+	padding: 14px 16px;
+	overflow: auto;
+	display: grid;
+	gap: 12px;
+}
+.edit-note {
+	margin: 0;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	line-height: 1.5;
+}
+.edit-error {
+	margin: 0 16px 10px;
+	padding: 8px 10px;
+	border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--danger) 12%, transparent);
+	color: var(--danger);
+	font-size: 12.5px;
+}
+.edit-foot {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 12px 16px;
+	border-top: 1px solid var(--line);
+}
+.field {
+	display: grid;
+	gap: 5px;
+	font-size: 12px;
+	color: var(--ink-2);
+}
+.field input,
+.field select,
+.field textarea {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 7px 10px;
+	border: 1px solid var(--line-strong);
+	border-radius: 7px;
+	background: var(--panel-2);
+	color: var(--ink);
+	font: inherit;
+}
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+	outline: none;
+	border-color: var(--signal);
+}
+.field-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+	gap: 10px;
+}
+.check-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+.check-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 10px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: var(--panel-2);
+	cursor: pointer;
+}
+.check-chip input {
+	width: auto;
+}
+.check-list {
+	display: grid;
+	gap: 8px;
+	max-height: 260px;
+	overflow: auto;
+}
+.check-item {
+	display: grid;
+	grid-template-columns: auto auto auto minmax(0, 1fr);
+	align-items: center;
+	gap: 8px;
+	padding: 7px 10px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: var(--panel-2);
+	font-size: 12.5px;
+}
+.check-item input {
+	width: auto;
+}
+
+/* ---------- 多 Agent 协作 DAG、Scope 隔离与盲审环 ---------- */
+.tier-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 4px 10px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--signal) 45%, var(--line));
+	background: color-mix(in srgb, var(--signal) 12%, transparent);
+	color: var(--signal);
+	font: 600 12px var(--font-mono);
+	white-space: nowrap;
+}
+.dag-stage {
+	overflow-x: auto;
+}
+.dag-svg {
+	display: block;
+	max-width: 100%;
+	height: auto;
+}
+.dag-col-label {
+	font: 600 11px var(--font-mono);
+	fill: var(--muted);
+}
+.dag-edge {
+	fill: none;
+	stroke-width: 1.6;
+}
+.dag-edge.done {
+	stroke: var(--ok);
+	opacity: 0.7;
+}
+.dag-edge.blocking {
+	stroke: var(--signal);
+	stroke-dasharray: 4 3;
+}
+.dag-edge.int {
+	stroke: var(--lead);
+	stroke-dasharray: 5 3;
+}
+.dag-arrow-dep {
+	fill: var(--muted);
+}
+.dag-arrow-int {
+	fill: var(--lead);
+}
+.dag-node {
+	cursor: pointer;
+}
+.dag-node .box {
+	fill: var(--panel-2);
+	stroke: var(--line-strong);
+	stroke-width: 1.2;
+}
+.dag-node.s-done .box {
+	stroke: color-mix(in srgb, var(--ok) 60%, var(--line));
+}
+.dag-node.s-doing .box,
+.dag-node.s-review .box {
+	stroke: color-mix(in srgb, var(--run) 70%, var(--line));
+}
+.dag-node.s-blocked .box {
+	stroke: color-mix(in srgb, var(--danger) 75%, var(--line));
+}
+.dag-node.integration .box {
+	fill: color-mix(in srgb, var(--lead) 10%, var(--panel-2));
+	stroke: var(--lead);
+}
+.dag-node:hover .box,
+.dag-node:focus-visible .box {
+	stroke: var(--ink);
+	stroke-width: 1.8;
+}
+.dag-node .bar {
+	fill: var(--c, var(--orch));
+}
+.dag-node .nid {
+	font: 700 11px var(--font-mono);
+	fill: var(--ink);
+}
+.dag-node .nstat {
+	font: 600 10.5px var(--font-mono);
+	fill: var(--muted);
+}
+.dag-node .ntitle {
+	font: 600 12px var(--font-body);
+	fill: var(--ink);
+}
+.dag-node .nmeta {
+	font: 10.5px var(--font-mono);
+	fill: var(--muted);
+}
+
+.scope-warn {
+	margin: 10px 16px 0;
+	padding: 8px 12px;
+	border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--danger) 10%, transparent);
+	color: var(--danger);
+	font-size: 12px;
+}
+.scope-warn p {
+	margin: 2px 0;
+}
+.scope-allow {
+	color: var(--ok);
+	background: color-mix(in srgb, var(--ok) 12%, transparent);
+	padding: 2px 6px;
+	border-radius: 5px;
+}
+.scope-forbid {
+	color: var(--danger);
+	background: color-mix(in srgb, var(--danger) 12%, transparent);
+	padding: 2px 6px;
+	border-radius: 5px;
+}
+
+.review-loop-list {
+	display: grid;
+	gap: 10px;
+}
+.review-loop-row {
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--panel-2);
+	display: grid;
+	gap: 8px;
+}
+.review-loop-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.blind-badge {
+	margin-left: auto;
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--gemini) 50%, var(--line));
+	background: color-mix(in srgb, var(--gemini) 14%, transparent);
+	color: var(--gemini);
+	font-size: 11px;
+	font-weight: 600;
+}
+.loop-steps {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	font-size: 12px;
+}
+.loop-step {
+	padding: 3px 9px;
+	border-radius: 6px;
+	border: 1px solid var(--line);
+	background: var(--panel);
+	color: var(--muted);
+}
+.loop-step.done {
+	border-color: color-mix(in srgb, var(--ok) 55%, var(--line));
+	color: var(--ok);
+}
+.loop-step.run {
+	border-color: color-mix(in srgb, var(--run) 55%, var(--line));
+	color: var(--run);
+}
+.loop-step.err {
+	border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+	color: var(--danger);
+}
+.loop-sep {
+	color: var(--muted);
+}
+.loop-history {
+	display: grid;
+	gap: 4px;
+	padding-left: 10px;
+	border-left: 2px solid var(--line-strong);
+	font-size: 12px;
+}
+.loop-round {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+}

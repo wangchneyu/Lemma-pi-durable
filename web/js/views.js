@@ -1,6 +1,8 @@
 // 后台各页面。每个页面：mount(root, params) 渲染，update(kind, payload) 响应数据变化，unmount() 清理。
 import { openDispatch } from "./drawer.js";
-import { METRICS, RANGES, Sankey } from "./sankey.js";
+import { bindDagPanelEvents, classifyTopology, renderReviewLoopPanel, renderScopeMatrix, renderTaskDag } from "./dag.js";
+import { openCreateIntegrationDialog, openLimitsEditor, openMemberEditor, openOrchestratorEditor, openRecoverDialog, openRepairIntegrationDialog, openResolveOperationDialog, runControlAction } from "./editors.js";
+import { METRICS, MODES, RANGES, Sankey } from "./sankey.js";
 import { buildRuns, callInfo, dispatchRows, isDispatch, loadEarlier, pendingChanges, runningJobs, store } from "./store.js";
 import { topology } from "./topology.js";
 import { Ticket, slotStart } from "./ticket.js";
@@ -36,16 +38,18 @@ function agentTag(kind) {
 	return `<span class="agent-tag" style="--c:${agentColor(kind)}"><i></i>${esc(AGENT_LABEL[kind] ?? kind)}</span>`;
 }
 const TIER = { economy: "经济", standard: "标准", premium: "强力" };
-/** 成员可选的模型：档位、默认、用了多少次 */
+/** 成员可选的模型：档位、默认、用了多少次，支持一键设为默认 */
 function modelList(agent) {
 	if (!agent.models?.length) return `<div class="model-list"><span class="muted">没有配置模型清单，使用 CLI 自己的默认模型</span></div>`;
 	const stats = (store.state?.modelStats ?? []).filter((m) => m.agent === agent.kind);
+	const canEdit = store.state?.canEditSettings;
 	return `<div class="model-list">${agent.models
 		.map((m) => {
 			const st = stats.find((x) => x.model === m.id);
+			const isDef = m.id === agent.defaultModel;
 			return `<div class="model-row" data-tier="${m.tier}">
 				<span class="tier">${TIER[m.tier] ?? m.tier}</span>
-				<span class="model-id mono">${esc(m.id)}${m.id === agent.defaultModel ? `<em>默认</em>` : ""}</span>
+				<span class="model-id mono">${esc(m.id)}${isDef ? `<em>默认</em>` : canEdit ? `<button type="button" class="linkish tiny" data-set-model="${esc(agent.kind)}" data-model="${esc(m.id)}">设为默认</button>` : ""}</span>
 				<span class="mono muted">${st ? `${st.total} 次 · ${money(st.cost)}${st.estimated ? "≈" : ""}` : "未使用"}</span>
 				<span class="model-note">${esc(m.note ?? "")}</span>
 			</div>`;
@@ -79,9 +83,9 @@ function totals() {
 const PREF_KEY = "pi-agent-routes-view";
 function loadPrefs() {
 	try {
-		return { metric: "count", range: "all", ...JSON.parse(localStorage.getItem(PREF_KEY) ?? "{}") };
+		return { mode: "member", metric: "count", range: "all", ...JSON.parse(localStorage.getItem(PREF_KEY) ?? "{}") };
 	} catch {
-		return { metric: "count", range: "all" };
+		return { mode: "member", metric: "count", range: "all" };
 	}
 }
 function savePrefs(prefs) {
@@ -144,6 +148,7 @@ function overview() {
 			routes.innerHTML = `<header class="card-head">
 					<div class="card-heading"><h2 class="card-title">路由分配</h2><div class="card-sub" data-n="routeSum"></div></div>
 					<div class="route-controls">
+						<div class="seg" data-n="mode" title="统计维度">${segButtons(Object.entries(MODES).map(([k, m]) => [k, m.label]), prefs.mode)}</div>
 						<div class="seg" data-n="metric" title="带子宽度按什么算">${segButtons(Object.entries(METRICS).map(([k, m]) => [k, m.label]), prefs.metric)}</div>
 						<div class="seg" data-n="range" title="时间范围">${segButtons(Object.entries(RANGES).map(([k, m]) => [k, m.label]), prefs.range)}</div>
 					</div>
@@ -151,6 +156,7 @@ function overview() {
 				<div class="card-body chart-body"></div>`;
 			const body = routes.querySelector(".chart-body");
 			sankey = new Sankey();
+			sankey.mode = prefs.mode in MODES ? prefs.mode : "member";
 			sankey.metric = prefs.metric in METRICS ? prefs.metric : "count";
 			sankey.range = prefs.range in RANGES ? prefs.range : "all";
 			body.append(sankey.node);
@@ -293,7 +299,8 @@ function taskCard(t, all, readinessMap) {
 	const waiting = deps.filter((dependency) => dependency.status !== "done");
 	const readiness = readinessMap?.get(t.id);
 	const waitReasons = t.status === "todo" && readiness && !readiness.ready ? readiness.reasons : [];
-	return `<article class="task-card" data-s="${t.status}">
+	const recoverable = ["todo", "blocked"].includes(t.status) && t.lastAttempt;
+	return `<article class="task-card" data-task-id="${esc(t.id)}" data-s="${t.status}">
 		${waiting.length ? `<p class="task-note">等待前置验收：${waiting.map((dependency) => esc(dependency.id)).join("、")}</p>` : waitReasons.length ? `<p class="task-note">${esc(waitReasons.join("；"))}</p>` : ""}
 		<header><span class="mono task-id">${esc(t.id)}</span>${t.role ? `<span class="role-chip">${esc(t.role)}</span>` : ""}${t.owner ? agentTag(t.owner) : ""}</header>
 		<h3>${esc(t.title)}</h3>
@@ -307,7 +314,7 @@ function taskCard(t, all, readinessMap) {
 		${t.integrationId ? `<p class="task-note">前置联合集成 ${changeLink(t.integrationId)}</p>` : ""}
 		${t.latestResult ? `<p class="task-note mono" title="${esc(t.latestResult)}">结果 ${esc(t.latestResult)}</p>` : ""}
 		${t.recoveries?.length ? `<p class="task-note">恢复 ${esc(t.recoveries.at(-1).action)} → ${esc(t.recoveries.at(-1).member)} · ${esc(t.recoveries.at(-1).status)}</p>` : ""}
-		${["todo", "blocked"].includes(t.status) && t.lastAttempt ? `<p class="task-note mono">终端 /task inspect ${esc(t.id)} 查看失败证据与恢复入口</p>` : ""}
+		${recoverable ? `<div class="task-actions"><button type="button" class="ghost-btn tiny" data-recover-task="${esc(t.id)}">恢复 / 交接</button><button type="button" class="copy-cmd mono" data-copy="/task inspect ${esc(t.id)}" title="复制终端诊断命令">/task inspect ${esc(t.id)}</button></div>` : ""}
 		${
 			deps.length || t.changes.length
 				? `<footer>${deps.map((d) => `<span class="dep" data-s="${d.status}" title="${esc(d.title)}">← ${esc(d.id)}</span>`).join("")}${t.changes.map((c) => changeLink(c)).join("")}</footer>`
@@ -324,6 +331,65 @@ function project() {
 		sub: "",
 		mount(r) {
 			root = r;
+			root.addEventListener("click", async (e) => {
+				const target = e.target instanceof Element ? e.target : null;
+				if (!target) return;
+				const wfBtn = target.closest("[data-wf-action]");
+				if (wfBtn) {
+					wfBtn.disabled = true;
+					try {
+						const act = wfBtn.dataset.wfAction;
+						await runControlAction("/api/workflow", { action: act }, act === "pause" ? "自动协作已暂停" : "自动协作已恢复");
+					} catch (err) { toast(err.message); wfBtn.disabled = false; }
+					return;
+				}
+				const recBtn = target.closest("[data-recover-task]");
+				if (recBtn) {
+					const task = (store.state?.project?.tasks ?? []).find((x) => x.id === recBtn.dataset.recoverTask);
+					if (task) openRecoverDialog(task, store.state?.agents ?? []);
+					return;
+				}
+				if (target.closest("[data-create-int]")) {
+					openCreateIntegrationDialog(store.changes);
+					return;
+				}
+				const rerunBtn = target.closest("[data-int-rerun]");
+				if (rerunBtn) {
+					rerunBtn.disabled = true;
+					try { await runControlAction(`/api/integrations/${encodeURIComponent(rerunBtn.dataset.intRerun)}/rerun`, {}, "已重跑联合集成检查"); }
+					catch (err) { toast(err.message); rerunBtn.disabled = false; }
+					return;
+				}
+				const repairBtn = target.closest("[data-int-repair]");
+				if (repairBtn) {
+					const it = (store.state?.integrations ?? []).find((x) => x.id === repairBtn.dataset.intRepair);
+					if (it) openRepairIntegrationDialog(it, store.state?.agents ?? []);
+					return;
+				}
+				const applyIntBtn = target.closest("[data-int-apply]");
+				if (applyIntBtn) {
+					const id = applyIntBtn.dataset.intApply;
+					if (!confirm(`确认将联合集成 #${id} 合并到主目录？操作只写工作区文件，不自动 commit。`)) return;
+					applyIntBtn.disabled = true;
+					try { await runControlAction(`/api/changes/${encodeURIComponent(id)}/apply`, {}, `联合集成 #${id} 已应用到主目录`); }
+					catch (err) { toast(err.message); applyIntBtn.disabled = false; }
+					return;
+				}
+				const cancelIntBtn = target.closest("[data-int-cancel]");
+				if (cancelIntBtn) {
+					const id = cancelIntBtn.dataset.intCancel;
+					if (!confirm(`确认取消联合集成 #${id}？来源分支改动会保留。`)) return;
+					cancelIntBtn.disabled = true;
+					try { await runControlAction(`/api/integrations/${encodeURIComponent(id)}/cancel`, {}, `已取消联合集成 #${id}`); }
+					catch (err) { toast(err.message); cancelIntBtn.disabled = false; }
+					return;
+				}
+				const opBtn = target.closest("[data-resolve-op]");
+				if (opBtn) {
+					const op = (store.state?.operations ?? []).find((x) => x.id === opBtn.dataset.resolveOp);
+					if (op) openResolveOperationDialog(op);
+				}
+			});
 			this.update("all");
 		},
 		update(kind) {
@@ -345,16 +411,20 @@ function project() {
 			const readinessMap = new Map(readinessList.map((r) => [r.id, r]));
 			const readyList = readinessList.filter((r) => r.ready);
 			const activeIntegrations = (store.state.integrations ?? []).filter((it) => !it.supersededBy && it.changeStatus !== "dropped");
+			const canCreateInt = store.changes.filter((c) => !c.integration && ["pending", "conflict"].includes(c.status)).length >= 2;
+			const topoInfo = classifyTopology(tasks, activeIntegrations);
 			root.innerHTML = `
-				<section class="card"><header class="card-head"><h2 class="card-title">执行与协作推进</h2><span class="card-note">${wfPaused ? "自动推进已暂停（/workflow resume）" : "自动推进运行中"} · 就绪 ${readyList.length} 项 · ${resources.running.length} 运行 · ${resources.queued.length} 排队 · 预留 $${Number(resources.reservedUsd).toFixed(4)}（估计）</span></header><div class="card-body">${resources.queued.map((claim) => `<p>${esc(claim.member)} · ${esc(claim.reason ?? "等待资源")}</p>`).join("") || (readyList.length ? `<p class="muted">当前就绪任务：${readyList.map((r) => `<span class="mono">${esc(r.id)}</span>`).join("、")}（终端 <span class="mono">/ready</span> 查看详情）</p>` : "当前没有排队任务")}</div></section>
-				${activeIntegrations.length ? `<section class="card"><header class="card-head"><h2 class="card-title">多分支联合集成与联调</h2><span class="card-note">终端：/integrate create|rerun|repair|show|cancel</span></header><div class="card-body">${activeIntegrations.slice(0, 6).map((it) => {
+				<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">执行与协作推进</h2><div class="card-sub">${wfPaused ? "自动推进已暂停" : "自动推进运行中"} · 就绪 ${readyList.length} 项 · ${resources.running.length} 运行 · ${resources.queued.length} 排队 · 预留 $${Number(resources.reservedUsd).toFixed(4)}（估计）</div></div><button type="button" class="${wfPaused ? "primary-btn" : "ghost-btn"} tiny" data-wf-action="${wfPaused ? "resume" : "pause"}">${wfPaused ? "恢复自动协作" : "暂停自动协作"}</button></header><div class="card-body">${resources.queued.map((claim) => `<p>${esc(claim.member)} · ${esc(claim.reason ?? "等待资源")}</p>`).join("") || (readyList.length ? `<p class="muted">当前就绪任务：${readyList.map((r) => `<span class="mono">${esc(r.id)}</span>`).join("、")}</p>` : "当前没有排队任务")}</div></section>
+				${activeIntegrations.length || canCreateInt ? `<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">多分支联合集成与联调</h2><div class="card-sub">合并多个隔离分支并运行全套检查 · 冲突时可直接派成员修现场</div></div>${canCreateInt ? `<button type="button" class="ghost-btn tiny" data-create-int="1">+ 发起联合集成</button>` : ""}</header><div class="card-body">${activeIntegrations.length ? activeIntegrations.slice(0, 6).map((it) => {
 					const st = it.status ?? it.changeStatus;
 					const pillState = st === "passed" || it.changeStatus === "applied" ? "done" : ["preparing", "merging", "repairing", "testing"].includes(st) ? "running" : st === "cancelled" ? "aborted" : "error";
 					const srcs = (it.sources ?? []).map((s) => `<a href="#/changes/${esc(s.id)}">#${esc(s.id)}</a>`).join(" + ");
-					const cmd = it.changeStatus === "applied" ? "" : st === "passed" ? `/apply ${it.id}` : ["conflict", "failed"].includes(st) ? `/integrate repair ${it.id} ` : `/integrate show ${it.id}`;
-					return `<div class="job-row"><a class="mono" href="#/changes/${esc(it.id)}">#${esc(it.id)}</a><span class="pill" data-s="${pillState}">${esc(it.changeStatus === "applied" ? "已合并" : st)}</span><span class="job-task">来源 ${srcs}${it.repair ? ` · 修复自 #${esc(it.repair.fromId)}（${esc(it.repair.member)}）` : ""}${it.conflicts?.length ? ` · 冲突：${esc(it.conflicts.join("、"))}` : ""}${it.message ? ` · <span class="muted">${esc(short(it.message, 80))}</span>` : ""}</span>${cmd ? `<button type="button" class="copy-cmd mono" data-copy="${esc(cmd)}" title="复制终端命令">${esc(cmd.trim())}</button>` : `<span></span>`}</div>`;
-				}).join("")}</div></section>` : ""}
-				${uncertain.length ? `<section class="card"><header class="card-head"><h2 class="card-title err-t">外部操作待核对</h2></header><div class="card-body">${uncertain.map((operation) => `<p><span class="mono">${esc(operation.id)}</span> · ${esc(operation.member)}/${esc(operation.tool)} · ${esc(operation.failure?.message ?? "请求已发出但尚无确定回执")}</p>`).join("")}<p>查询远端流水后，在终端使用 /operations resolve 记录核对依据；核对前禁止重复提交同一接口。</p></div></section>` : ""}
+					const runningInt = ["preparing", "merging", "repairing", "testing"].includes(st);
+					const canApply = st === "passed" && it.changeStatus !== "applied";
+					const canRepair = ["conflict", "failed"].includes(st);
+					return `<div class="job-row int-row"><a class="mono" href="#/changes/${esc(it.id)}">#${esc(it.id)}</a><span class="pill" data-s="${pillState}">${esc(it.changeStatus === "applied" ? "已合并" : st)}</span><span class="job-task">来源 ${srcs}${it.repair ? ` · 修复自 #${esc(it.repair.fromId)}（${esc(it.repair.member)}）` : ""}${it.conflicts?.length ? ` · 冲突：${esc(it.conflicts.join("、"))}` : ""}${it.message ? ` · <span class="muted">${esc(short(it.message, 80))}</span>` : ""}</span><div class="row-actions">${canApply ? `<button type="button" class="primary-btn tiny" data-int-apply="${esc(it.id)}">应用到主目录</button>` : ""}${canRepair ? `<button type="button" class="ghost-btn tiny" data-int-repair="${esc(it.id)}">派人修复</button>` : ""}${!runningInt && it.changeStatus !== "applied" ? `<button type="button" class="ghost-btn tiny" data-int-rerun="${esc(it.id)}">重跑检查</button>` : ""}${runningInt ? `<button type="button" class="ghost-btn tiny" data-int-cancel="${esc(it.id)}">取消</button>` : ""}</div></div>`;
+				}).join("") : `<p class="muted">当前有多个待处理分支改动，可点击右上角「+ 发起联合集成」进行联合验证。</p>`}</div></section>` : ""}
+				${uncertain.length ? `<section class="card"><header class="card-head"><h2 class="card-title err-t">外部操作待核对</h2></header><div class="card-body">${uncertain.map((operation) => `<div class="job-row"><span class="mono">${esc(operation.id)}</span><span>${esc(operation.member)}/${esc(operation.tool)}</span><span class="job-task">${esc(operation.failure?.message ?? "请求已发出但尚无确定回执")}</span><button type="button" class="ghost-btn tiny" data-resolve-op="${esc(operation.id)}">人工核对</button></div>`).join("")}<p class="muted">核对远端状态前禁止重复提交同一接口。</p></div></section>` : ""}
 				<section class="card goal-card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">最终目标</h2><div class="card-sub"><span class="mono">${esc(p.goalPath)}</span></div></div>
 						${p.goal && /待你确认/.test(p.goal) ? `<span class="pill" data-s="pending">总调度起草 · 待你确认</span>` : ""}</header>
@@ -364,6 +434,7 @@ function project() {
 							: `<div class="empty-inline"><span class="dot"></span>还没有 GOAL.md。可以自己写，或者把项目目标告诉总调度，让它起草（会标明待你确认）。成员每次派工都会拿到这份目标。</div>`
 					}</div>
 				</section>
+				${tasks.length ? `<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">协作结构图（DAG）</h2><div class="card-sub">${esc(topoInfo.detail)}</div></div><span class="tier-badge">${esc(topoInfo.title)}</span></header><div class="card-body dag-stage" data-n="projectDag"></div></section>` : ""}
 				<section class="card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">分工表</h2>
 						<div class="card-sub">${tasks.length ? `<span><b>${done}</b>/${tasks.length} 完成</span><span><b>${count("doing")}</b> 进行中</span><span><b>${count("review")}</b> 待验收</span>${count("blocked") ? `<span class="err-t"><b>${count("blocked")}</b> 受阻</span>` : ""}` : "<span>还没有任务</span>"}</div></div>
@@ -380,6 +451,8 @@ function project() {
 						}
 					</div>
 				</section>
+				${renderScopeMatrix(p.tasks)}
+				<div data-n="reviewLoopWrap">${renderReviewLoopPanel(p.tasks, store.dispatches)}</div>
 				<section class="card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">角色分工</h2><div class="card-sub">规划任务时给每项定角色，派工时按角色找成员；首选不可用时依次用后面的（在 pi-agent.config.json 的 roles 里改）</div></div></header>
 					<div class="table-wrap"><table class="table"><thead><tr><th>角色</th><th>成员（首选 → 备选）</th><th class="hide-sm">模型</th><th>负责</th><th class="num">任务</th></tr></thead>
@@ -395,6 +468,22 @@ function project() {
 						})
 						.join("")}</tbody></table></div>
 				</section>`;
+			const dagEl = root.querySelector('[data-n="projectDag"]');
+			if (dagEl) {
+				renderTaskDag(dagEl, {
+					tasks: p.tasks,
+					integrations: activeIntegrations,
+					readinessMap,
+					onSelectTask(t) {
+						const card = root.querySelector(`.task-card[data-task-id="${CSS.escape(t.id)}"]`);
+						card?.scrollIntoView({ behavior: "smooth", block: "center" });
+						card?.classList.add("flash");
+						setTimeout(() => card?.classList.remove("flash"), 1200);
+					},
+				});
+			}
+			const loopWrap = root.querySelector('[data-n="reviewLoopWrap"]');
+			if (loopWrap) bindDagPanelEvents(loopWrap);
 		},
 	};
 }
@@ -633,7 +722,7 @@ function changes() {
 			selected = params[0] ?? null;
 			root.innerHTML = `<div class="runs-layout changes-layout">
 				<section class="card run-list"><header class="card-head"><h2 class="card-title">改动</h2>
-					<div class="seg" data-n="filter">${segButtons([["active", "待处理"], ["all", "全部"]], filter)}</div></header>
+					<div class="row-actions"><button type="button" class="ghost-btn tiny" data-clean-changes="1" title="删除已合并或空改动的 worktree">清理 worktree</button><div class="seg" data-n="filter">${segButtons([["active", "待处理"], ["all", "全部"]], filter)}</div></div></header>
 					<div class="run-scroll" data-n="list"></div></section>
 				<section class="card run-detail" data-n="detail"></section>
 			</div>`;
@@ -643,6 +732,51 @@ function changes() {
 				filter = b.dataset.k;
 				for (const x of root.querySelectorAll('[data-n="filter"] button')) x.classList.toggle("on", x === b);
 				this.update("all");
+			});
+			root.addEventListener("click", async (e) => {
+				const target = e.target instanceof Element ? e.target : null;
+				if (!target) return;
+				const cleanBtn = target.closest("[data-clean-changes]");
+				if (cleanBtn) {
+					if (!confirm("清理所有已合并（applied）或无改动的 worktree 和分支？")) return;
+					cleanBtn.disabled = true;
+					try { await runControlAction("/api/changes/clean", {}); }
+					catch (err) { toast(err.message); }
+					finally { cleanBtn.disabled = false; }
+					return;
+				}
+				const applyBtn = target.closest("[data-apply-change]");
+				if (applyBtn) {
+					const cid = applyBtn.dataset.applyChange;
+					const rec = store.changes.find((x) => x.id === cid);
+					if (!confirm(`确认将改动 #${cid}（${rec?.files?.length ?? 0} 个文件，+${rec?.add ?? 0} -${rec?.del ?? 0}）合并到主工作目录？不自动 commit。`)) return;
+					applyBtn.disabled = true;
+					try { await runControlAction(`/api/changes/${encodeURIComponent(cid)}/apply`, {}); }
+					catch (err) { toast(err.message); applyBtn.disabled = false; }
+					return;
+				}
+				const dropBtn = target.closest("[data-drop-change]");
+				if (dropBtn) {
+					const cid = dropBtn.dataset.dropChange;
+					if (!confirm(`确认丢弃改动 #${cid}？对应的 worktree 和未合并分支将被删除！`)) return;
+					dropBtn.disabled = true;
+					try { await runControlAction(`/api/changes/${encodeURIComponent(cid)}/drop`, {}); }
+					catch (err) { toast(err.message); dropBtn.disabled = false; }
+					return;
+				}
+				const rerunBtn = target.closest("[data-int-rerun]");
+				if (rerunBtn) {
+					rerunBtn.disabled = true;
+					try { await runControlAction(`/api/integrations/${encodeURIComponent(rerunBtn.dataset.intRerun)}/rerun`, {}, "已重跑联合集成检查"); }
+					catch (err) { toast(err.message); rerunBtn.disabled = false; }
+					return;
+				}
+				const repairBtn = target.closest("[data-int-repair]");
+				if (repairBtn) {
+					const cid = repairBtn.dataset.intRepair;
+					const it = (store.state?.integrations ?? []).find((x) => x.id === cid) ?? store.changes.find((x) => x.id === cid)?.integration;
+					if (it) openRepairIntegrationDialog({ ...it, id: cid }, store.state?.agents ?? []);
+				}
 			});
 			this.update("all");
 		},
@@ -695,14 +829,15 @@ function changes() {
 				<div class="detail-scroll">
 					${
 						actionable
-							? `<div class="apply-hint"><span>在终端里确认：</span>
-								<button type="button" class="copy-cmd mono" data-copy="${cmd("apply")}" title="复制">${cmd("apply")}</button>
-								<button type="button" class="copy-cmd mono" data-copy="${cmd("drop")}" title="复制">${cmd("drop")}</button>
+							? `<div class="apply-hint">
+								<button type="button" class="primary-btn tiny" data-apply-change="${esc(c.id)}">合并到主目录</button>
+								<button type="button" class="ghost-btn tiny" data-drop-change="${esc(c.id)}">丢弃改动</button>
+								<button type="button" class="copy-cmd mono" data-copy="${cmd("apply")}" title="复制终端命令">${cmd("apply")}</button>
 								<span class="muted">合并只改工作区、不提交；冲突时不会动你的文件。</span></div>`
 							: ""
 					}
 					${c.message ? `<div class="change-msg${c.status === "conflict" ? " err" : ""}">${esc(c.message)}</div>` : ""}
-					${c.integration ? `<div class="change-msg"><strong>联合集成 · ${esc(c.integration.status)}${c.integration.supersededBy ? `（已被 #${esc(c.integration.supersededBy)} 替代）` : ""}</strong><p>来源：${c.integration.sources.map((source) => `<a href="#/changes/${esc(source.id)}">#${esc(source.id)}</a> <span class="mono">${esc(source.head.slice(0, 12))}</span>`).join(" + ")}</p>${c.integration.repair ? `<p>修复：来自 <a href="#/changes/${esc(c.integration.repair.fromId)}">#${esc(c.integration.repair.fromId)}</a> · 成员 ${esc(c.integration.repair.member)}${c.integration.repair.changeId ? ` · 副本 <a href="#/changes/${esc(c.integration.repair.changeId)}">#${esc(c.integration.repair.changeId)}</a>` : ""}</p>` : ""}${c.integration.conflicts?.length ? `<p>冲突：${c.integration.conflicts.map(esc).join("、")}</p>` : ""}${c.integration.reports.map((report) => `<details><summary>${esc(report.name)} · ${report.passed ? "通过" : "失败"} · exit ${esc(String(report.exitCode))}</summary><pre>${esc(report.output || "没有输出")}</pre></details>`).join("")}<p class="mono">${["conflict", "failed"].includes(c.integration.status) ? `/integrate repair ${esc(c.id)} &lt;成员ID&gt; 或 /integrate rerun ${esc(c.id)}` : `/integrate show ${esc(c.id)}`}</p></div>` : ""}
+					${c.integration ? `<div class="change-msg"><strong>联合集成 · ${esc(c.integration.status)}${c.integration.supersededBy ? `（已被 #${esc(c.integration.supersededBy)} 替代）` : ""}</strong><p>来源：${c.integration.sources.map((source) => `<a href="#/changes/${esc(source.id)}">#${esc(source.id)}</a> <span class="mono">${esc(source.head.slice(0, 12))}</span>`).join(" + ")}</p>${c.integration.repair ? `<p>修复：来自 <a href="#/changes/${esc(c.integration.repair.fromId)}">#${esc(c.integration.repair.fromId)}</a> · 成员 ${esc(c.integration.repair.member)}${c.integration.repair.changeId ? ` · 副本 <a href="#/changes/${esc(c.integration.repair.changeId)}">#${esc(c.integration.repair.changeId)}</a>` : ""}</p>` : ""}${c.integration.conflicts?.length ? `<p>冲突：${c.integration.conflicts.map(esc).join("、")}</p>` : ""}${c.integration.reports.map((report) => `<details><summary>${esc(report.name)} · ${report.passed ? "通过" : "失败"} · exit ${esc(String(report.exitCode))}</summary><pre>${esc(report.output || "没有输出")}</pre></details>`).join("")}${!c.integration.supersededBy && c.status !== "applied" && c.status !== "dropped" ? `<div class="row-actions">${["conflict", "failed"].includes(c.integration.status) ? `<button type="button" class="primary-btn tiny" data-int-repair="${esc(c.id)}">派成员修复</button>` : ""}${!["preparing", "merging", "repairing", "testing"].includes(c.integration.status) ? `<button type="button" class="ghost-btn tiny" data-int-rerun="${esc(c.id)}">重跑集成检查</button>` : ""}</div>` : ""}</div>` : ""}
 					<h3 class="eyebrow">改了哪些文件 <span class="eyebrow-note">${c.files.length} 个 · +${c.add} −${c.del}</span></h3>
 					<div class="file-list">${
 						c.files.length
@@ -891,6 +1026,40 @@ function agents() {
 		sub: "",
 		mount(r) {
 			root = r;
+			root.addEventListener("click", async (e) => {
+				const target = e.target instanceof Element ? e.target : null;
+				if (!target) return;
+				if (target.closest("[data-add-agent]")) {
+					openMemberEditor(null);
+					return;
+				}
+				const editBtn = target.closest("[data-edit-agent]");
+				if (editBtn) {
+					const a = (store.state?.agents ?? []).find((x) => x.kind === editBtn.dataset.editAgent);
+					if (a) openMemberEditor(a);
+					return;
+				}
+				const toggleBtn = target.closest("[data-toggle-agent]");
+				if (toggleBtn) {
+					const kind = toggleBtn.dataset.toggleAgent;
+					const a = (store.state?.agents ?? []).find((x) => x.kind === kind);
+					if (!a) return;
+					toggleBtn.disabled = true;
+					try {
+						await runControlAction(`/api/agents/${encodeURIComponent(kind)}`, { quick: true, enabled: !a.enabled }, `${a.label} 已${a.enabled ? "停用" : "启用"}`);
+					} catch (err) { toast(err.message); toggleBtn.disabled = false; }
+					return;
+				}
+				const modelBtn = target.closest("[data-set-model]");
+				if (modelBtn) {
+					const kind = modelBtn.dataset.setModel;
+					const modelId = modelBtn.dataset.model;
+					modelBtn.disabled = true;
+					try {
+						await runControlAction(`/api/agents/${encodeURIComponent(kind)}`, { quick: true, defaultModel: modelId }, `已切换默认模型为 ${modelId}`);
+					} catch (err) { toast(err.message); modelBtn.disabled = false; }
+				}
+			});
 			this.update("all");
 		},
 		update(kind) {
@@ -900,9 +1069,13 @@ function agents() {
 				root.innerHTML = empty("加载中…");
 				return;
 			}
+			const canEdit = !!store.state?.canEditSettings;
 			const stats = store.state.agentStats ?? {};
 			const busy = new Set(store.live.tools.filter((t) => t.status === "running").map((t) => kindOf(t.name)));
-			root.innerHTML = `<div class="agent-grid">${list
+			const anyBusy = !!store.live.busy || runningJobs().length > 0;
+			root.innerHTML = `
+				${canEdit ? `<div class="page-toolbar"><span class="muted">支持在线启停、切换默认模型与新增/修改 API 成员（密钥仅写不回显；有运行中任务时请先完成或中止）。</span><button type="button" class="primary-btn tiny" data-add-agent="1"${anyBusy ? ` disabled title="有任务正在运行，请先等待结束或中止"` : ""}>+ 新增 API 成员</button></div>` : ""}
+				<div class="agent-grid">${list
 				.map((a) => {
 					const s = stats[a.kind] ?? { total: 0, done: 0, error: 0, aborted: 0, open: 0, durationMs: 0, timed: 0, cost: 0 };
 					const state = !a.available ? "off" : busy.has(a.kind) ? "busy" : "idle";
@@ -942,7 +1115,7 @@ function agents() {
 					];
 					return `<section class="card agent-card" data-state="${state}" style="--c:${agentColor(a.kind)}">
 						<header class="agent-head"><span class="lamp"></span><h2>${esc(a.label)}</h2>
-							<span class="pill" data-s="${state === "busy" ? "running" : state === "off" ? "error" : "done"}">${state === "busy" ? "执行中" : state === "off" ? "不可用" : "可用"}</span></header>
+							<div class="row-actions">${canEdit ? `<button type="button" class="ghost-btn tiny" data-toggle-agent="${esc(a.kind)}">${a.enabled ? "停用" : "启用"}</button><button type="button" class="ghost-btn tiny" data-edit-agent="${esc(a.kind)}">编辑</button>` : ""}<span class="pill" data-s="${state === "busy" ? "running" : state === "off" ? "error" : "done"}">${state === "busy" ? "执行中" : state === "off" ? "不可用" : "可用"}</span></div></header>
 						<p class="agent-desc">${esc(a.available ? a.description : a.reason)}</p>
 						<div class="figures">${figures.map(([k, v]) => `<div><span>${k}</span><strong>${esc(v)}</strong></div>`).join("")}</div>
 						${segBar([
@@ -1162,6 +1335,12 @@ function config() {
 		sub: "",
 		mount(r) {
 			root = r;
+			root.addEventListener("click", (e) => {
+				const target = e.target instanceof Element ? e.target : null;
+				if (!target || !store.state) return;
+				if (target.closest("[data-edit-orch]")) openOrchestratorEditor(store.state.orchestrator);
+				else if (target.closest("[data-edit-limits]")) openLimitsEditor(store.state);
+			});
 			this.update("all");
 		},
 		update(kind) {
@@ -1171,7 +1350,9 @@ function config() {
 				root.innerHTML = empty("加载中…");
 				return;
 			}
+			const canEdit = !!s.canEditSettings;
 			const o = s.orchestrator;
+			const ex = s.execution ?? { maxConcurrent: 8, perMember: 4, perService: 8 };
 			const dl = (rows) => `<dl class="kvs wide">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
 			const code = (v) => `<code>${esc(v)}</code>`;
 			root.innerHTML = `
@@ -1183,7 +1364,7 @@ function config() {
 						["历史条目", num(s.entries)],
 						["进程", `pid ${s.pid} · 已运行 ${duration(Date.now() - s.startedAt)}`],
 					])}</div></section>
-				<section class="card"><header class="card-head"><h2 class="card-title">总调度</h2></header>
+				<section class="card"><header class="card-head"><h2 class="card-title">总调度</h2>${canEdit ? `<button type="button" class="ghost-btn tiny" data-edit-orch="1">编辑总控</button>` : ""}</header>
 					<div class="card-body">${dl([
 						["协议", code(o.type)],
 						["模型", code(o.modelId)],
@@ -1191,7 +1372,7 @@ function config() {
 						["密钥来源", esc(o.keySource)],
 						["最多轮数", o.maxTurns],
 					])}</div></section>
-				<section class="card"><header class="card-head"><h2 class="card-title">成员</h2></header>
+				<section class="card"><header class="card-head"><h2 class="card-title">成员</h2><a class="ghost-btn tiny" href="#/agents">前往成员管理</a></header>
 					<div class="table-wrap"><table class="table"><thead><tr><th>成员</th><th>状态</th><th>接入方式</th><th>参数 / 工具</th><th class="num">超时</th><th class="num hide-sm">输出上限</th></tr></thead>
 					<tbody>${s.agents
 						.map((a) => {
@@ -1202,11 +1383,13 @@ function config() {
 							return `<tr><td>${agentTag(a.kind)}</td><td class="nowrap">${a.available ? "可用" : `<span class="muted">${esc(a.reason)}</span>`}</td><td>${how}</td><td class="mono">${args}</td><td class="num mono">${a.timeoutMinutes}m</td><td class="num mono hide-sm">${num(a.maxOutputChars)}</td></tr>`;
 						})
 						.join("")}</tbody></table></div></section>
-				<section class="card"><header class="card-head"><h2 class="card-title">工作区隔离与预算</h2></header>
+				<section class="card"><header class="card-head"><h2 class="card-title">工作区隔离、并发与预算</h2>${canEdit ? `<button type="button" class="ghost-btn tiny" data-edit-limits="1">编辑并发与预算</button>` : ""}</header>
 					<div class="card-body">${dl([
-						["工作区隔离", s.isolation?.enabled ? "开启：每次新派工在独立的 git worktree 里干活，改动在终端 /apply 后才合并" : "关闭：成员直接在工作目录里改文件"],
+						["工作区隔离", s.isolation?.enabled ? "开启：每次新派工在独立的 git worktree 里干活，合并后才进主目录" : "关闭：成员直接在工作目录里改文件"],
 						["挂进 worktree 的目录", (s.isolation?.linkDirs ?? []).map((d) => code(d)).join(" ") || "—"],
+						["并发上限", `团队 ${ex.maxConcurrent} 路 · 单成员 ${ex.perMember} 路 · 同服务 ${ex.perService} 路`],
 						["单次运行花费上限", s.budget?.perRunUsd != null ? `${money(s.budget.perRunUsd)}（超过后不再派工）` : "不限"],
+						["每次派工预留", s.budget?.reservePerDispatchUsd ? `${money(s.budget.reservePerDispatchUsd)}（估计）` : "关闭"],
 						["总调度单价", s.orchestrator.price ? `输入 $${s.orchestrator.price.input} · 输出 $${s.orchestrator.price.output} / 百万 tokens` : "未配置（总调度花费显示为 —）"],
 					])}</div></section>
 				<section class="card"><header class="card-head"><h2 class="card-title">子调度与自动验收</h2></header>

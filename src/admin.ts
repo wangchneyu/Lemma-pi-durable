@@ -2,6 +2,7 @@
 // 网页只看 + 控制（中止本轮、开始新上下文），任务只从终端下发。
 // 只监听 127.0.0.1：这个进程能驱动 agent 改文件、执行命令，绝不能暴露给局域网。
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,16 +10,20 @@ import type { Context } from "@earendil-works/chord/context";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { agentAdapter } from "./agents.ts";
 import { memberKey, memberToolNames } from "./api-member.ts";
-import { Operations, operationList } from "./operations.ts";
+import { applyChange, cleanChanges, dropChange } from "./change-ops.ts";
+import { Operations, operationList, resolveOperation } from "./operations.ts";
 import { CostLedger, Resources, resourceSnapshot } from "./resources.ts";
 import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
+import { applyApiMemberDraft, applyLimitsDraft, applyOrchestratorDraft, applyQuickMemberDraft } from "./member-settings.ts";
 import type { OrchestratorModel } from "./models.ts";
 import { Board, boardTasks, type BoardState } from "./board.ts";
 import { readConvention, scanConventions } from "./conventions.ts";
 import { diffText } from "./git.ts";
 import { Jobs, type JobRecord, type JobsState } from "./jobs.ts";
 import { LEAD_TOOL } from "./lead.ts";
+import { editSettings, type SettingsDraft } from "./settings.ts";
+import { prepareRecovery, type RecoveryRequest } from "./task-recovery.ts";
 import { AgentSessions, RunBudget } from "./tools.ts";
 import { Learning } from "./learning.ts";
 import { Integrations, integrationSummary } from "./integrations.ts";
@@ -36,6 +41,12 @@ export interface AdminOptions {
 		select(id: string): Promise<void>;
 		rename(id: string, title: string): Promise<void>;
 		busy(): boolean;
+	};
+	settings?: {
+		path: string;
+		config(): AppConfig;
+		assertIdle(): Promise<void>;
+		commit(draft: SettingsDraft, next: AppConfig, controller: boolean): Promise<void>;
 	};
 	session?: { id: string; title: string; controllerId?: string };
 	app: App;
@@ -682,6 +693,9 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			lanes: [...lanes.values()].map((l) => ({ ...l, known: l.session ? !!sessions[l.session] : false })),
 			bars,
 			links,
+			tasks: boardTasks(boardDoc),
+			readyTasks: boardDoc ? readyTasks(boardDoc, String(root.id)) : [],
+			integrations: integrationRecords.map((r) => integrationSummary(changes.get(r.id) ?? r)),
 			stats: { running: bars.filter((b) => b.running).length, peak, async: bars.filter((b) => b.mode === "async").length, total: bars.length },
 		};
 	}
@@ -698,6 +712,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		const workflowDoc = await harness.snapshot(Workflow, context);
 		const integrationsDoc = await harness.snapshot(Integrations, context);
 		return {
+			canEditSettings: !!options.settings,
 			workflow: { paused: workflowDoc?.controllers[String(root.id)]?.paused ?? false },
 			readyTasks: boardDoc ? readyTasks(boardDoc, String(root.id)) : [],
 			integrations: Object.values(integrationsDoc?.records ?? {})
@@ -713,14 +728,17 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			conversation: { ...(options.session ?? { id: "default", title: "默认会话" }), controllerId: String(root.id) },
 			autonomy: { ...config.autonomy, learning: await harness.snapshot(Learning, context) },
 			lead: config.lead,
+			execution: { maxConcurrent: 8, perMember: 4, perService: 8, ...config.execution },
 			entries: entryCount,
 			jobs: jobList(),
 			orchestrator: {
 				describe: controller.model ? `${controller.model.provider}/${controller.model.modelId}` : orchestrator.describe,
 				type: orchestrator.info?.type ?? o.type,
 				modelId: controller.model?.modelId ?? o.modelId,
+				baseUrl: o.baseUrl ?? null,
 				host: orchestrator.info?.host,
 				keySource: orchestrator.info?.keySource ?? "",
+				hasCredential: !!o.credential,
 				maxTurns: o.maxTurns ?? 40,
 				price: o.price ?? null,
 			},
@@ -749,6 +767,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					reason: a.reason,
 					enabled: c.enabled,
 					description: c.description,
+					instructions: c.instructions ?? "",
 					command: a.command ?? c.command ?? null,
 					extraArgs: c.extraArgs,
 					timeoutMinutes: c.timeoutMinutes,
@@ -759,8 +778,11 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					api: c.api
 						? {
 								type: c.api.type,
+								baseUrl: c.api.baseUrl,
 								host: hostOf(c.api.baseUrl),
 								keySource: memberKey(c.api).source,
+								hasCredential: !!c.api.credential,
+								builtinTools: memberToolNames(c.api),
 								bash: c.api.bash,
 								bashAllow: c.api.bashAllow,
 								tools: [...memberToolNames(c.api), ...(c.api.httpTools ?? []).map((tool) => tool.id), ...(c.api.mcpServers ?? []).flatMap((grant) => grant.tools.map((tool) => `mcp_${grant.id}_${tool.name}`))],
@@ -839,18 +861,54 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
 		res.end(JSON.stringify(body));
 	};
-	async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+	class HttpError extends Error {
+		readonly status: number;
+		constructor(status: number, message: string) {
+			super(message);
+			this.status = status;
+		}
+	}
+	async function readJson(req: IncomingMessage, maxBytes = 4096): Promise<Record<string, unknown>> {
 		let size = 0;
 		const chunks: Buffer[] = [];
 		for await (const chunk of req) {
 			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 			size += bytes.length;
-			if (size > 4096) throw new Error("请求内容过长");
+			if (size > maxBytes) throw new HttpError(400, "请求内容过长");
 			chunks.push(bytes);
 		}
-		const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-		if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("需要 JSON 对象");
+		let value: unknown;
+		try { value = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); } catch { throw new HttpError(400, "需要有效的 JSON"); }
+		if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpError(400, "需要 JSON 对象");
 		return value as Record<string, unknown>;
+	}
+	async function readControlBody(req: IncomingMessage, maxBytes = 4096): Promise<Record<string, unknown>> {
+		const body = await readJson(req, maxBytes);
+		if (disposed) throw new HttpError(409, "对话已切换，未执行操作");
+		if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) throw new HttpError(409, "对话已切换，未执行操作");
+		return body;
+	}
+	let configuring = false;
+	async function mutateSettings(req: IncomingMessage, controller: boolean, fn: (body: Record<string, unknown>, draft: SettingsDraft, current: AppConfig) => { next: AppConfig; notify: string; result?: unknown }) {
+		if (!options.settings) throw new HttpError(503, "当前运行入口不支持在网页修改配置");
+		const body = await readControlBody(req, 32768);
+		if (configuring) throw new HttpError(409, "正在保存其他配置，请稍后重试");
+		configuring = true;
+		try {
+			try { await options.settings.assertIdle(); } catch (error) { throw new HttpError(409, error instanceof Error ? error.message : String(error)); }
+			const draft = editSettings(options.settings.path);
+			const current = options.settings.config();
+			const { next, notify, result } = fn(body, draft, current);
+			await options.settings.commit(draft, next, controller);
+			options.notify?.(notify);
+			return { ok: true, ...(result && typeof result === "object" ? result : {}) };
+		} catch (error) {
+			if (error instanceof HttpError) throw error;
+			const msg = error instanceof Error ? error.message : String(error);
+			throw new HttpError(/正在执行|请先|切换|退出/.test(msg) ? 409 : /没有成员/.test(msg) ? 404 : 400, msg);
+		} finally {
+			configuring = false;
+		}
 	}
 	const afterResponse = (res: ServerResponse, id: string) => {
 		// 先响应再切换数据绑定；HTTP 监听器始终保留。
@@ -977,18 +1035,181 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					return sendJson(res, 200, { text: "", truncated: false, error: error instanceof Error ? error.message : String(error) });
 				}
 			}
+			if (url.pathname === "/api/agents" && req.method === "POST") {
+				const out = await mutateSettings(req, false, (body, draft, current) => {
+					const { id, member, next } = applyApiMemberDraft(draft, options.settings!.path, current, {
+						mode: "add",
+						id: String(body.id ?? ""),
+						name: typeof body.name === "string" ? body.name : undefined,
+						description: typeof body.description === "string" ? body.description : undefined,
+						instructions: typeof body.instructions === "string" ? body.instructions : undefined,
+						enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
+						workspace: body.workspace === "none" || body.workspace === "code" ? body.workspace : undefined,
+						type: typeof body.type === "string" ? body.type : undefined,
+						baseUrl: typeof body.baseUrl === "string" ? body.baseUrl : undefined,
+						defaultModel: typeof body.defaultModel === "string" ? body.defaultModel : undefined,
+						tools: Array.isArray(body.tools) ? body.tools.map(String) : undefined,
+						bashAllow: Array.isArray(body.bashAllow) ? body.bashAllow.map(String) : undefined,
+						secret: typeof body.secret === "string" ? body.secret : undefined,
+					});
+					return { next, notify: `后台网页：已新增成员 ${member.name ?? id}（${id}）`, result: { id } };
+				});
+				return sendJson(res, 200, out);
+			}
+			const agentEdit = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+			if (agentEdit && req.method === "POST") {
+				const id = decodeURIComponent(agentEdit[1]!);
+				const out = await mutateSettings(req, false, (body, draft, current) => {
+					const existing = current.agents[id];
+					if (!existing) throw new Error(`没有成员 ${id}`);
+					const fullEdit = existing.api && body.quick !== true && ["name", "description", "instructions", "workspace", "type", "baseUrl", "tools", "bashAllow"].some((k) => body[k] !== undefined);
+					const { next, member } = fullEdit
+						? applyApiMemberDraft(draft, options.settings!.path, current, {
+							mode: "edit",
+							id,
+							name: typeof body.name === "string" ? body.name : undefined,
+							description: typeof body.description === "string" ? body.description : undefined,
+							instructions: typeof body.instructions === "string" ? body.instructions : undefined,
+							enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
+							workspace: body.workspace === "none" || body.workspace === "code" ? body.workspace : undefined,
+							type: typeof body.type === "string" ? body.type : undefined,
+							baseUrl: typeof body.baseUrl === "string" ? body.baseUrl : undefined,
+							defaultModel: typeof body.defaultModel === "string" ? body.defaultModel : undefined,
+							tools: Array.isArray(body.tools) ? body.tools.map(String) : undefined,
+							bashAllow: Array.isArray(body.bashAllow) ? body.bashAllow.map(String) : undefined,
+							secret: typeof body.secret === "string" ? body.secret : undefined,
+						})
+						: applyQuickMemberDraft(draft, current, id, {
+							enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
+							defaultModel: typeof body.defaultModel === "string" ? body.defaultModel : undefined,
+							secret: typeof body.secret === "string" ? body.secret : undefined,
+						});
+					return { next, notify: `后台网页：已更新成员 ${member.name ?? id}（${id}）`, result: { id } };
+				});
+				return sendJson(res, 200, out);
+			}
+			if (url.pathname === "/api/limits" && req.method === "POST") {
+				const out = await mutateSettings(req, false, (body, draft, current) => ({
+					next: applyLimitsDraft(draft, current, {
+						maxConcurrent: body.maxConcurrent === undefined ? undefined : Number(body.maxConcurrent),
+						perMember: body.perMember === undefined ? undefined : Number(body.perMember),
+						perService: body.perService === undefined ? undefined : Number(body.perService),
+						perRunUsd: body.perRunUsd === null || body.perRunUsd === "" ? null : body.perRunUsd === undefined ? undefined : Number(body.perRunUsd),
+						reservePerDispatchUsd: body.reservePerDispatchUsd === undefined ? undefined : Number(body.reservePerDispatchUsd),
+					}),
+					notify: "后台网页：已更新并发与预算配额",
+				}));
+				return sendJson(res, 200, out);
+			}
+			if (url.pathname === "/api/orchestrator" && req.method === "POST") {
+				const out = await mutateSettings(req, true, (body, draft, current) => ({
+					next: applyOrchestratorDraft(draft, current, {
+						type: typeof body.type === "string" ? body.type : "",
+						baseUrl: typeof body.baseUrl === "string" ? body.baseUrl : "",
+						modelId: typeof body.modelId === "string" ? body.modelId : "",
+						secret: typeof body.secret === "string" ? body.secret : undefined,
+					}),
+					notify: `后台网页：已更新总控模型为 ${String(body.modelId ?? "").trim()}`,
+				}));
+				return sendJson(res, 200, out);
+			}
+			if (url.pathname === "/api/workflow" && req.method === "POST") {
+				const body = await readControlBody(req);
+				if (body.action !== "pause" && body.action !== "resume") throw new HttpError(400, "action 需要为 pause 或 resume");
+				const wf = await app.workflow(body.action, context);
+				broadcast("project", null);
+				options.notify?.(`后台网页：${wf.paused ? "已暂停自动协作" : "已恢复自动协作"}`);
+				return sendJson(res, 200, { ok: true, ...wf });
+			}
+			if (url.pathname === "/api/changes/clean" && req.method === "POST") {
+				await readControlBody(req);
+				const r = await cleanChanges(changes);
+				options.notify?.(`后台网页：${r.message}`);
+				return sendJson(res, r.ok ? 200 : 409, r);
+			}
+			const changeAction = url.pathname.match(/^\/api\/changes\/([^/]+)\/(apply|drop)$/);
+			if (changeAction && req.method === "POST") {
+				await readControlBody(req);
+				const id = decodeURIComponent(changeAction[1]!);
+				const r = changeAction[2] === "apply" ? await applyChange(changes, id) : await dropChange(changes, id);
+				if (!r.ok) throw new HttpError(r.message.startsWith("找不到") ? 404 : 409, r.message);
+				options.notify?.(`后台网页：${r.message}`);
+				return sendJson(res, 200, r);
+			}
+			if (url.pathname === "/api/integrations" && req.method === "POST") {
+				const body = await readControlBody(req);
+				const changeIds = Array.isArray(body.changeIds) ? body.changeIds.map((x) => String(x).trim()).filter(Boolean) : [];
+				if (changeIds.length < 2) throw new HttpError(400, "联合集成至少需要选择 2 个改动 ID");
+				const record = await app.integrate(root.id, changeIds, context);
+				options.notify?.(`后台网页：已发起联合集成 #${record.id}（${changeIds.map((x) => `#${x}`).join(" + ")}）`);
+				return sendJson(res, 200, { ok: true, integration: integrationSummary(record) });
+			}
+			const integrationAction = url.pathname.match(/^\/api\/integrations\/([^/]+)\/(rerun|repair|cancel)$/);
+			if (integrationAction && req.method === "POST") {
+				const body = await readControlBody(req);
+				const id = decodeURIComponent(integrationAction[1]!);
+				const act = integrationAction[2]!;
+				if (act === "cancel") {
+					await app.cancelIntegration(root.id, id, context);
+					options.notify?.(`后台网页：已取消集成 #${id}`);
+					return sendJson(res, 200, { ok: true });
+				}
+				if (act === "rerun") {
+					const record = await app.rerunIntegration(root.id, id, context);
+					options.notify?.(`后台网页：已重跑集成检查 #${record.id}`);
+					return sendJson(res, 200, { ok: true, integration: integrationSummary(record) });
+				}
+				const member = typeof body.member === "string" ? body.member.trim() : "";
+				if (!member) throw new HttpError(400, "需要指定修复成员 ID");
+				const note = typeof body.note === "string" ? body.note.trim() || undefined : undefined;
+				const record = await app.repairIntegration(root.id, id, member, note, context);
+				options.notify?.(`后台网页：已派 ${member} 修复集成 #${record.id}`);
+				return sendJson(res, 200, { ok: true, integration: integrationSummary(record) });
+			}
+			const taskRecover = url.pathname.match(/^\/api\/tasks\/([^/]+)\/recover$/);
+			if (taskRecover && req.method === "POST") {
+				const body = await readControlBody(req, 16384);
+				const id = decodeURIComponent(taskRecover[1]!);
+				const action = body.action;
+				if (!["resume", "supply", "reassign", "cancel"].includes(String(action))) throw new HttpError(400, "action 需要为 resume、supply、reassign 或 cancel");
+				const args: RecoveryRequest = {
+					id,
+					action: action as RecoveryRequest["action"],
+					note: typeof body.note === "string" ? body.note : "",
+					...(typeof body.member === "string" && body.member.trim() ? { member: body.member.trim() } : {}),
+				};
+				if (args.action === "cancel") {
+					const board = await harness.commit(async (tx) => {
+						await prepareRecovery(tx, root.id, config, changes, args, randomUUID(), Date.now());
+						return JSON.parse(JSON.stringify(await tx.doc(Board))) as BoardState;
+					}, context);
+					try { app.project.writeAssign(board); } catch {}
+					options.notify?.(`后台网页：已取消任务 ${id} 的恢复计划`);
+					return sendJson(res, 200, { ok: true, cancelled: true });
+				}
+				const job = await app.recoverTask(root.id, args, randomUUID(), context);
+				options.notify?.(`后台网页：恢复任务 ${id} 已交给 ${job.agent}（后台 ${job.id}）`);
+				return sendJson(res, 200, { ok: true, jobId: job.id, agent: job.agent });
+			}
+			const opResolve = url.pathname.match(/^\/api\/operations\/([^/]+)\/resolve$/);
+			if (opResolve && req.method === "POST") {
+				const body = await readControlBody(req, 8192);
+				const id = decodeURIComponent(opResolve[1]!);
+				const outcome = body.outcome;
+				if (outcome !== "succeeded" && outcome !== "not_applied") throw new HttpError(400, "outcome 需要为 succeeded 或 not_applied");
+				const evidence = typeof body.evidence === "string" ? body.evidence : "";
+				const message = await harness.commit((tx) => resolveOperation(tx, id, outcome, evidence, Date.now()), context);
+				options.notify?.(`后台网页：已核对外部操作 ${id}（${outcome}）`);
+				return sendJson(res, 200, { ok: true, message });
+			}
 			if (url.pathname === "/api/abort" && req.method === "POST") {
-				const body = await readJson(req);
-				if (disposed) return sendJson(res, 409, { error: "对话已切换，未执行中止" });
-				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行中止" });
+				await readControlBody(req);
 				await root.abort(context);
 				options.notify?.("后台网页：已中止本轮");
 				return sendJson(res, 200, { ok: true });
 			}
 			if (url.pathname === "/api/reset" && req.method === "POST") {
-				const body = await readJson(req);
-				if (disposed) return sendJson(res, 409, { error: "对话已切换，未执行重置" });
-				if (body.expectedSession !== undefined && body.expectedSession !== (options.session?.id ?? "default")) return sendJson(res, 409, { error: "对话已切换，未执行重置" });
+				await readControlBody(req);
 				await root.reset(undefined, context);
 				options.notify?.("后台网页：已开始新的上下文");
 				return sendJson(res, 200, { ok: true });
@@ -997,7 +1218,10 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			if (req.method === "GET") return serveStatic(url.pathname, res);
 			sendJson(res, 405, { error: "method not allowed" });
 		} catch (error) {
-			sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+			if (error instanceof HttpError) return sendJson(res, error.status, { error: error.message });
+			const message = error instanceof Error ? error.message : String(error);
+			const status = /找不到|没有这个/.test(message) ? 404 : /仍在运行|已有恢复计划|已暂停|busy|冲突/i.test(message) ? 409 : /需要|无效|不能|不可用|不能为空/.test(message) ? 400 : 500;
+			sendJson(res, status, { error: message });
 		}
 	};
 	return { handle, dispose };

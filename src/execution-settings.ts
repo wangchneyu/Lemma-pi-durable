@@ -1,5 +1,5 @@
 import { editSettings } from "./settings.ts";
-import type { MemberSettingsHost } from "./member-settings.ts";
+import { applyLimitsDraft, type MemberSettingsHost } from "./member-settings.ts";
 
 export const EXECUTION_HELP = "/limits  查看并发与预算；/limits edit 引导配置团队/成员/服务并发、每轮预算和每次派工预留";
 export async function executionSettingsCommand(line: string, host: MemberSettingsHost): Promise<boolean> {
@@ -13,6 +13,6 @@ export async function executionSettingsCommand(line: string, host: MemberSetting
 	const perService = await askNumber("同一服务地址同时执行上限（1–64）", current.execution?.perService ?? 8);
 	const amount = (await host.question({ title: "每轮成员预算美元（unlimited 不限）", value: String(current.budget.perRunUsd ?? "unlimited") })).trim() || String(current.budget.perRunUsd ?? "unlimited");
 	const reservePerDispatchUsd = await askNumber("每次成员派工预留美元（估计值，0 关闭预留）", current.budget.reservePerDispatchUsd ?? 0);
-	const next = draft.apply((raw) => { raw.execution = { maxConcurrent, perMember, perService }; raw.budget = { ...current.budget, perRunUsd: amount === "unlimited" ? null : Number(amount), reservePerDispatchUsd }; });
+	const next = applyLimitsDraft(draft, current, { maxConcurrent, perMember, perService, perRunUsd: amount === "unlimited" ? null : Number(amount), reservePerDispatchUsd });
 	await host.commit(draft, next, false); host.log("并发与预算配置已保存并生效；历史保持。"); return true;
 }

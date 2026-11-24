@@ -25,11 +25,30 @@ function elapsed(d) {
 	return started ? Date.now() - started : 0;
 }
 
+export const MODES = {
+	member: { label: "按成员" },
+	role: { label: "按协作角色" },
+};
 export const METRICS = {
 	count: { label: "次数", value: () => 1, fmt: (v) => `${Math.round(v)} 次` },
 	time: { label: "耗时", value: elapsed, fmt: (v) => duration(v) },
 	cost: { label: "花费", value: (d) => d.cost ?? 0, fmt: (v) => money(v) },
 };
+const COLLAB_ROLES = [
+	{ id: "exec", label: "直接执行交付", color: "var(--claude)" },
+	{ id: "workflow", label: "Durable 依赖推进", color: "var(--signal)" },
+	{ id: "checker", label: "独立盲审 / 复核", color: "var(--gemini)" },
+	{ id: "repair", label: "集成联调修复", color: "var(--lead)" },
+	{ id: "recovery", label: "受阻任务恢复", color: "var(--codex)" },
+];
+function roleOfDispatch(d) {
+	const cid = String(d.callId ?? "");
+	if (cid.startsWith("checker:")) return COLLAB_ROLES[2];
+	if (cid.startsWith("integration-repair:")) return COLLAB_ROLES[3];
+	if (cid.startsWith("recovery:")) return COLLAB_ROLES[4];
+	if (cid.startsWith("workflow:")) return COLLAB_ROLES[1];
+	return COLLAB_ROLES[0];
+}
 export const RANGES = {
 	all: { label: "全部", ms: Infinity },
 	day: { label: "24h", ms: 86_400_000 },
@@ -37,7 +56,7 @@ export const RANGES = {
 };
 const COLUMNS = [
 	{ col: 1, label: "调度" },
-	{ col: 2, label: "成员" },
+	{ col: 2, label: "成员 / 角色" },
 	{ col: 3, label: "结果" },
 ];
 
@@ -46,6 +65,7 @@ let uid = 0;
 export class Sankey {
 	constructor() {
 		this.id = `sk${++uid}`;
+		this.mode = "member";
 		this.metric = "count";
 		this.range = "all";
 		this.node = el("div", "sankey");
@@ -105,14 +125,18 @@ export class Sankey {
 			else if (outcome.id === "done") totals.done++;
 			else if (outcome.id === "error") totals.error++;
 			else if (outcome.id === "aborted") totals.aborted++;
-			const a = `a:${d.agent}`;
+			const roleMode = this.mode === "role";
+			const role = roleMode ? roleOfDispatch(d) : null;
+			const a = roleMode ? `r:${role.id}` : `a:${d.agent}`;
 			const o = `o:${outcome.id}`;
-			node("orch", "总调度", "var(--orch)", 1, "#/dispatches");
-			node(a, AGENT_LABEL[d.agent] ?? d.agent, agentColor(d.agent), 2, `#/dispatches/${d.agent}`);
+			const srcId = roleMode && ["workflow", "checker", "repair"].includes(role.id) ? "durable" : "orch";
+			node(srcId, srcId === "durable" ? "Durable 自动流转" : "总调度", srcId === "durable" ? "var(--signal)" : "var(--orch)", 1, "#/dispatches");
+			node(a, roleMode ? role.label : AGENT_LABEL[d.agent] ?? d.agent, roleMode ? role.color : agentColor(d.agent), 2, roleMode ? "#/dispatches" : `#/dispatches/${d.agent}`);
 			node(o, outcome.label, outcome.color, 3, `#/dispatches/all/${outcome.id}`);
-			for (const n of ["orch", a, o]) tally(nodes.get(n).stats, d);
-			link("orch", a, agentColor(d.agent), d, v);
-			link(a, o, agentColor(d.agent), d, v);
+			for (const n of [srcId, a, o]) tally(nodes.get(n).stats, d);
+			const edgeColor = roleMode ? role.color : agentColor(d.agent);
+			link(srcId, a, edgeColor, d, v);
+			link(a, o, edgeColor, d, v);
 		}
 		for (const [id, l] of links) if (l.value <= 0) links.delete(id);
 		for (const l of links.values()) {
@@ -123,7 +147,7 @@ export class Sankey {
 			n.value = Math.max(n.inV, n.outV);
 			if (n.value <= 0) nodes.delete(id);
 		}
-		const order = (n) => (n.col === 2 ? KINDS.indexOf(n.id.slice(2)) : n.col === 3 ? OUTCOMES.findIndex((o) => `o:${o.id}` === n.id) : 0);
+		const order = (n) => (n.col === 1 ? (n.id === "orch" ? 0 : 1) : n.col === 2 ? (this.mode === "role" ? COLLAB_ROLES.findIndex((r) => `r:${r.id}` === n.id) : KINDS.indexOf(n.id.slice(2))) : n.col === 3 ? OUTCOMES.findIndex((o) => `o:${o.id}` === n.id) : 0);
 		const list = [...nodes.values()].sort((x, y) => x.col - y.col || order(x) - order(y));
 		const grand = list.filter((n) => n.col === 1).reduce((s, n) => s + n.value, 0);
 		for (const n of list) n.share = grand ? n.value / grand : 0;

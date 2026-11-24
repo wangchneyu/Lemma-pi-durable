@@ -1,5 +1,6 @@
 // 协作拓扑：总调度 → 成员 → 会话（泳道）→ 每次派工（时间条）。
 // 同一个成员的多条泳道 = 它开过的多个会话；时间条重叠 = 并行；虚线框 = 后台派工；虚线箭头 = 基于另一次改动开工。
+import { classifyTopology, renderTaskDag } from "./dag.js";
 import { openDispatch } from "./drawer.js";
 import { runningJobs, store } from "./store.js";
 import { AGENT_LABEL, KINDS, agentColor, duration, esc, getJson, money, post, short, stamp, toast } from "./util.js";
@@ -135,6 +136,29 @@ export function topology() {
 	function render() {
 		if (!root || !data) return;
 		stats();
+		const dagCard = root.querySelector('[data-n="dagCard"]');
+		const dagBox = root.querySelector('[data-n="dag"]');
+		const dagSub = root.querySelector('[data-n="dagSub"]');
+		const tierBadge = root.querySelector('[data-n="dagTier"]');
+		const tasks = data.tasks ?? store.state?.project?.tasks ?? [];
+		const ints = data.integrations ?? store.state?.integrations ?? [];
+		const readyMap = new Map((data.readyTasks ?? store.state?.readyTasks ?? []).map((r) => [r.id, r]));
+		const topoInfo = classifyTopology(tasks, ints);
+		if (tierBadge) tierBadge.textContent = topoInfo.title;
+		if (dagSub) dagSub.textContent = topoInfo.detail;
+		if (dagCard) dagCard.hidden = !tasks.some((t) => t.status !== "dropped");
+		if (dagBox && !dagCard.hidden) {
+			renderTaskDag(dagBox, {
+				tasks,
+				integrations: ints,
+				readinessMap: readyMap,
+				onSelectTask(t) {
+					const bar = data.bars.filter((b) => b.taskId === t.id).at(-1);
+					if (bar) openDispatch(bar.key);
+					else location.hash = "#/project";
+				},
+			});
+		}
 		const stage = root.querySelector('[data-n="stage"]');
 		if (!data.bars.length) {
 			stage.innerHTML = `<div class="empty-inline"><span class="dot"></span>还没有派工。总调度派活后，这里会显示谁在哪个会话里、什么时候、和谁并行。</div>`;
@@ -371,6 +395,16 @@ export function topology() {
 		mount(r) {
 			root = r;
 			root.innerHTML = `<div class="topo-stats" data-n="stats"></div>
+				<section class="card dag-card" data-n="dagCard" hidden>
+					<header class="card-head">
+						<div class="card-heading">
+							<h2 class="card-title">多 Agent 任务依赖与自适应拓扑（DAG）</h2>
+							<div class="card-sub" data-n="dagSub"></div>
+						</div>
+						<span class="tier-badge" data-n="dagTier"></span>
+					</header>
+					<div class="card-body dag-stage" data-n="dag"></div>
+				</section>
 				<section class="card topo-card">
 					<header class="card-head">
 						<div class="card-heading"><h2 class="card-title">拓扑与时间线</h2><div class="card-sub">点时间条看这次派工的详情</div></div>

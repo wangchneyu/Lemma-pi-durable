@@ -158,6 +158,12 @@ async function startWeb() {
 	const options = {
 		app, config, configPath, orchestrator, port, context,
 		session: { id: sessionId, title: sessionCatalog.get(sessionId).title, controllerId: String(root.id) },
+		settings: {
+			path: configPath,
+			config: () => config,
+			assertIdle: assertConfigIdle,
+			commit: commitSettings,
+		},
 		conversations: {
 			list: conversationList,
 			busy: () => switchingSession || configuring || closing || activeTerminalCommands > 0,
