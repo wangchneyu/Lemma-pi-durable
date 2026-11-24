@@ -472,7 +472,7 @@ npm test
 用模拟 CLI（`scripts/fake-agent.mjs`）和 pi-ai 的 faux 模型做测试，不调用真实 API：
 
 - `npm run test:settings`：终端成员配置的新增、启停、模型与凭据变更即时生效；配置持久化、取消、忙碌保护和外部编辑冲突检测
-- `npm run test:collaboration`：结构化字段交接、并发与预算原子准入、后台排队重启恢复和取消、同服务限流、MCP 分页授权/定义变更、单 Agent/团队完整流程模拟对照；已纳入 `npm test`
+- `npm run test:collaboration`：多分支联合集成与重验/修复、Durable 自动依赖推进、独立复核与代码盲审、路径契约（`scope`）拦截、任务恢复、结构化字段交接、并发与预算原子准入、同服务限流、MCP 授权与完整流程模拟对照；已纳入 `npm test`
 - `npm run test:custom-agents`：固定响应的本机 HTTP 服务验证不同 API 协议成员并行、隔离、后台、续接、取消、进程恢复，以及真实终端的配置向导与网页同步；不调用付费模型
 
 - `npm run test:dialogue` / `test/conversation.ts`：检查实际发给模型的身份、模型配置与对话历史，验证追问、纠正、重启、重置和独立会话；检查普通对话无项目写入副作用、授权后执行工具仍可用，模拟回答不作为真实模型质量证明
@@ -485,7 +485,7 @@ npm test
 - `test/jobs.ts`：后台派工立刻返回；`wait_jobs` 的 all / any；没人等时结果自动发回并触发总调度继续；后台结果触发的运行不重置花费；总调度取消、任务退回待办；同一个会话不能同时被两次派工续接
 - `test/steer.ts`：插话在同一次运行里被总调度看到、排队的任务在这一轮之后处理、中止后 `continue` 续跑、手动压缩
 - `test/isolation.ts`：临时 git 仓库里走完整流程：模型白名单、在 worktree 里干活、快照包含未提交改动、依赖目录挂载、`based_on`、估算花费、超预算拦截、`/apply` 不冲掉主目录的未提交改动、`/drop` 删除分支
-- `test/web.ts`：以演示模式启动终端，从 stdin 下发任务（异步剧本），检查后台接口、Host/Origin 校验、网页不能下发任务、SSE 实时推送（包括后台派工的状态和实时输出）、派工汇总、拓扑接口（多会话泳道、依赖、并行峰值）和历史分页
+- `test/web.ts`：通过 `test/faux-main.ts` 模拟入口启动真实终端与后台服务，从 stdin 下发任务，检查后台接口、Host/Origin 校验、网页不能下发任务、SSE 实时推送（包括后台派工的状态和实时输出）、派工汇总、拓扑接口（多会话泳道、依赖、并行峰值）和历史分页
 - `test/conversations-web.ts`：网页新建、切换、重命名与过期请求保护；比较切换前后的原始聊天、项目任务、成员会话、派工、用量和改动，验证进程重启后历史与选中状态仍保留
 - `test/admin-rebind.ts`：HTTP 服务原位切换会话，同一连接、端口和启动时间保持；验证实时连接重取快照、过期控制请求拒绝、失败回滚及订阅释放
 - `test/terminal.ts`：检查实际使用官方消息、工具、编辑器和选择器实例，验证关系树导航、模型搜索、刷新取消、思考块、流式参数、工具展开、控制序列过滤、窄窗口和输入隔离
@@ -503,10 +503,25 @@ npm test
 | `src/agents.ts` | 各 CLI 适配器：参数、会话续接、输出解析、进度摘要 |
 | `src/tools.ts` | Pi Durable 工具：`ask_*`（同步 / 后台）、`wait_jobs`、`cancel_job`、分工表工具，后台派工任务，以及总调度的系统提示 |
 | `src/dispatch.ts` | 一次派工的完整过程（选模型、预算、隔离、带上下文、调用 CLI、提交改动、更新分工表），同步和后台派工共用 |
-| `src/api-member.ts` | API 成员（DeepSeek）：注册模型、读写工具和 bash 白名单、工作说明、在 Pi Durable 子对话里执行一次派工 |
+| `src/api-member.ts` | API 成员（DeepSeek 等）：注册模型、读写工具、路径契约拦截与 bash 白名单、工作说明、在 Pi Durable 子对话里执行派工 |
+| `src/code-tools.ts` | API 编码/审查成员的只读 ACI 代码感知工具：`list_files`、`outline_file`、`find_symbol`、`search_code`、`git_diff` |
+| `src/scope.ts` | 任务级路径边界契约（`scope.allow` / `scope.forbid`）校验与实时/收尾越界拦截 |
 | `src/lead.ts` | 子调度：`delegate_to_lead` 工具、子负责人的工作说明、子对话里的进度和汇报汇总 |
 | `src/jobs.ts` | 后台派工：Pi Durable 里的记录、结果格式、本进程里的取消开关和实时输出 |
 | `src/board.ts` | 共同目标（GOAL.md）和分工表：任务数据、写出 ASSIGN.md、给总调度和成员的上下文 |
+| `src/task-readiness.ts` | 基于分工表计算任务就绪队列与前置依赖等待原因 |
+| `src/task-workflow.ts` | Durable 自动依赖推进、独立复核（含 `blind` 代码盲审）与上限内自动返工闭环 |
+| `src/task-lifecycle.ts` | 任务验收完成前的前置依赖、机器规则、独立复核与路径契约校验 |
+| `src/task-review.ts` | `review_task` 验收工具：针对最新 `result_id` 记录通过、返工或受阻依据 |
+| `src/task-recovery.ts` | `recover_task` 与任务受阻恢复计划准备（续接 / 补资料 / 换成员） |
+| `src/task-commands.ts` | 终端 `/tasks` 与 `/task inspect|resume|supply|reassign|cancel` 恢复命令 |
+| `src/integrations.ts` | 多 worktree 联合集成任务、`rerun` 基线重验与 `repair` 冲突/联调失败独立修复闭环 |
+| `src/integration-git.ts` | 联合集成专用私有 Git index 三方合并、基线/来源过期校验与冲突标记检测 |
+| `src/deliverables.ts` | `lemma.delivery.v1` 结构化交付解析与按字段/偏移交接片段提取 |
+| `src/results.ts` | 成员完整结果持久化与 `read_result` 分页读取 |
+| `src/resources.ts` | 团队/成员/API origin 并发限制、预算预留与费用账本 |
+| `src/operations.ts` | 外部 HTTP 写操作意图记录与未知状态跨成员拦截 |
+| `src/mcp-tools.ts` | 基于官方 MCP SDK 的只读 Streamable HTTP 工具发现与成员隔离授权 |
 | `src/conventions.ts` | Agent 规范文件：扫描归类、一致性检查、打码读取、共同规则同步 |
 | `src/git.ts` | 隔离用到的 git 操作：快照、worktree、提交、差异、合并回主目录 |
 | `src/changes.ts` | 改动记录（存成会话存储旁边的 JSON 文件） |
@@ -529,5 +544,5 @@ npm test
 | `src/admin.ts` | 后台网页服务（嵌在终端进程里）：只读接口 + 控制 + SSE + 派工汇总 |
 | `src/view.ts` | 把对话条目、实时状态和工具结果转成前端用的 JSON |
 | `web/` | 后台前端（原生 ES 模块，无构建步骤、无依赖）：`js/views.js` 各页面，`js/topology.js` 协作拓扑，`js/store.js` 数据同步，`js/sankey.js` 流向图 |
-| `scripts/check-agents.ts` | 实测三个 CLI 能否调通 |
+| `scripts/check-agents.ts` | 实测已启用的本机 CLI 与 API 成员能否调通 |
 | `scripts/fake-agent.mjs` | 模拟 CLI，供测试使用 |
