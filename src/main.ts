@@ -1,11 +1,10 @@
 // 入口（终端是主体，后台网页随终端一起启动）：
 //   npm start                 真实模型 + 新版终端 + 后台网页 http://127.0.0.1:8787
 //   npm start -- "你的问题"    单次提问，答完退出（不开后台）
-//   npm run demo              演示模式：假模型 + 模拟 CLI，不花钱（后台 8788）
-//   npm run demo:tui          新版终端演示（Pi TUI，固定输入区与任务状态）
 //   npm run tui               新版终端，真实模型；--plain 回到普通模式
 //   --no-web                  不开后台网页
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
 import { Writable } from "node:stream";
@@ -20,30 +19,38 @@ import { loadConfig, type AppConfig } from "./config.ts";
 import { memberSettingsCommand, MEMBER_HELP, type SettingQuestion } from "./member-settings.ts";
 import type { SettingsDraft } from "./settings.ts";
 import { clip, Jobs, type JobRecord, type JobsState } from "./jobs.ts";
-import { demoConfig, demoOrchestrator, installDemoMember } from "./demo.ts";
-import { createOrchestratorModel } from "./models.ts";
+import { createOrchestratorModel, type OrchestratorModel } from "./models.ts";
 import { controllerModels, nativeModelCatalog, selectControllerModel, restoreControllerModel } from "./model-selection.ts";
 import { colors as c, follow, setOutputSink, writeLine as log } from "./printer.ts";
 import { AgentSessions, RunBudget } from "./dispatch.ts";
 import { Learning } from "./learning.ts";
 import { Results, resultPage } from "./results.ts";
+import { Operations, operationList, resolveOperation } from "./operations.ts";
+import { CostLedger, Resources, resourceSnapshot } from "./resources.ts";
+import { resultExcerpt } from "./deliverables.ts";
+import { taskCommand, TASK_HELP } from "./task-commands.ts";
 import { AgentTerminal } from "./terminal.ts";
 import { listNativeConversations, watchTerminalState } from "./terminal-state.ts";
 import { SessionCatalog } from "./sessions.ts";
 import { liveDigest, storedDigest } from "./digest.ts";
 
+export interface MainOverrides {
+	config?: (base: AppConfig) => AppConfig;
+	createOrchestrator?: (config: AppConfig) => OrchestratorModel;
+	onOrchestrator?: (model: OrchestratorModel) => void;
+}
+
+export async function startMain(overrides?: MainOverrides): Promise<void> {
 const context = BACKGROUND_CONTEXT;
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith("--")));
-// 显式真实模式优先，避免之前启动演示遗留的环境变量继续选中假模型。
-const demo = !flags.has("--real") && (flags.has("--demo") || process.env.PI_AGENT_DEMO === "1");
 const configPath = resolve(process.env.PI_AGENT_CONFIG ?? "pi-agent.config.json");
 const baseConfig = loadConfig(configPath);
-const sessionCatalog = new SessionCatalog(demo ? demoConfig(baseConfig) : baseConfig);
+const sessionCatalog = new SessionCatalog(overrides?.config ? overrides.config(baseConfig) : baseConfig);
 let sessionId = argv.find((a) => a.startsWith("--session="))?.slice(10) ?? sessionCatalog.selected();
 if (sessionId !== "default" && !sessionCatalog.list().some((s) => s.id === sessionId)) sessionCatalog.create(sessionId);
 let config = sessionCatalog.config(sessionId);
-let orchestrator = demo ? demoOrchestrator() : createOrchestratorModel(config.orchestrator, `${config.storage}.models.json`);
+let orchestrator = overrides?.createOrchestrator ? overrides.createOrchestrator(config) : createOrchestratorModel(config.orchestrator, `${config.storage}.models.json`);
 let app = await openApp(config, orchestrator, context).catch((error: Error) => {
 	console.error(`启动失败：${error.message}`);
 	process.exit(1);
@@ -53,7 +60,7 @@ sessionCatalog.select(sessionId);
 type Runtime = { app: typeof app; config: typeof config; orchestrator: typeof orchestrator };
 const sessions = new Map<string, Runtime>([[sessionId, { app, config, orchestrator }]]);
 const drafts = new Map<string, string>();
-if (demo) installDemoMember(orchestrator.models);
+overrides?.onOrchestrator?.(orchestrator);
 let stopFollowing = async () => {};
 let terminalUI: AgentTerminal | undefined;
 let terminalConversation: Conversation | undefined;
@@ -90,7 +97,6 @@ let configuring = false;
 let plainQuestion: { resolve(value: string): void; reject(error: Error): void; secret: boolean } | undefined;
 
 async function assertConfigIdle(): Promise<void> {
-	if (demo) throw new Error("演示模式不保存真实配置，请使用 npm start。");
 	if (closing || switchingSession) throw new Error("正在切换或退出，请稍后配置。");
 	if (terminalConversation && String(terminalConversation.id) !== String(root.id)) throw new Error("请先 /main 返回总控再配置成员。");
 	for (const runtime of sessions.values()) {
@@ -109,7 +115,7 @@ async function commitSettings(draft: SettingsDraft, next: AppConfig, controller:
 	await assertConfigIdle();
 	// Stage registry/model changes first; no Harness or session database is replaced.
 	const targets = [...sessions.values()].map((runtime) => {
-		const candidate = { ...runtime.config, agents: next.agents, roles: next.roles, collaboration: next.collaboration, ...(controller ? { orchestrator: next.orchestrator } : {}) };
+		const candidate = { ...runtime.config, agents: next.agents, roles: next.roles, collaboration: next.collaboration, execution: next.execution, budget: next.budget, ...(controller ? { orchestrator: next.orchestrator } : {}) };
 		const model = controller ? createOrchestratorModel(next.orchestrator, `${runtime.config.storage}.models.json`) : undefined;
 		return { runtime, candidate, model, apply: runtime.app.prepareMembers(candidate) };
 	});
@@ -146,9 +152,9 @@ async function conversationList() {
 
 async function startWeb() {
 	if (!config.web.enabled || flags.has("--no-web")) return;
-	const port = webPort ?? Number(process.env.PI_AGENT_PORT ?? (demo ? config.web.port + 1 : config.web.port));
+	const port = webPort ?? Number(process.env.PI_AGENT_PORT ?? config.web.port);
 	const options = {
-		app, config, configPath, orchestrator, demo, port, context,
+		app, config, configPath, orchestrator, port, context,
 		session: { id: sessionId, title: sessionCatalog.get(sessionId).title, controllerId: String(root.id) },
 		conversations: {
 			list: conversationList,
@@ -199,9 +205,9 @@ async function sessionCommand(line: string) {
 		let runtime = sessions.get(id);
 		if (!runtime) {
 			const nextConfig = sessionCatalog.config(id);
-			const nextModel = demo ? demoOrchestrator() : createOrchestratorModel(nextConfig.orchestrator, `${nextConfig.storage}.models.json`);
+			const nextModel = overrides?.createOrchestrator ? overrides.createOrchestrator(nextConfig) : createOrchestratorModel(nextConfig.orchestrator, `${nextConfig.storage}.models.json`);
 			const nextApp = await openApp(nextConfig, nextModel, context);
-			if (demo) installDemoMember(nextModel.models);
+			overrides?.onOrchestrator?.(nextModel);
 			runtime = { app: nextApp, config: nextConfig, orchestrator: nextModel };
 			sessions.set(id, runtime);
 			attachJobOutput(id, nextApp);
@@ -240,8 +246,8 @@ async function sessionCommand(line: string) {
 
 async function printBanner() {
 	const controller = await root.agent(context);
-	log(c.green(`Lemma · 引理 · 多 Agent 协作（Pi Durable）${demo ? c.yellow("  [演示模式]") : ""}`));
-	log(c.dim(`总调度模型：${orchestrator.info?.type ?? (demo ? "演示" : config.orchestrator.type)} · ${controller.model ? `${controller.model.provider}/${controller.model.modelId}` : orchestrator.describe}`));
+	log(c.green("Lemma · 引理 · 多 Agent 协作（Pi Durable）"));
+	log(c.dim(`总调度模型：${orchestrator.info?.type ?? config.orchestrator.type} · ${controller.model ? `${controller.model.provider}/${controller.model.modelId}` : orchestrator.describe}`));
 	log(c.cyan(`会话：${sessionId} · ${sessionCatalog.get(sessionId).title}（/sessions 管理与切换）`));
 	log(c.cyan(`当前输入 → 总控对话 ${root.id}；成员各用独立 session_id（/conversation 查看隔离边界）`));
 	log(c.dim(`工作目录：${config.workdir}`));
@@ -462,8 +468,38 @@ async function changeCommand(line: string): Promise<boolean> {
 }
 
 async function command(line: string): Promise<boolean> {
-	if (line === "/help") { log(MEMBER_HELP); log("/sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); return true; }
-	if (/^\/(?:agent|setup|tool)(?:\s|$)/.test(line)) {
+	if (line === "/history") {
+		if (terminalUI) await terminalUI.loadEarlier();
+		else log("请通过 npm start 打开终端，使用滚轮或 PgUp 翻阅历史。");
+		return true;
+	}
+	if (line === "/thinking") {
+		if (terminalUI) terminalUI.toggleThinking();
+		else log("请通过 npm start 打开终端，使用 /thinking 或 Alt+T 切换思考记录。");
+		return true;
+	}
+	if (await taskCommand(line, { app, config, context, log, async assertIdle() {
+		if (configuring || switchingSession || closing) throw new Error("当前正在配置、切换或退出。");
+		if ((await harness.snapshot(LiveDoc, root.id, context))?.run) throw new Error("总控正在运行，请先等待或 /abort 再恢复任务。");
+	} })) return true;
+	if (line === "/progress") {
+		const state = resourceSnapshot(await harness.snapshot(Resources, context));
+		log(`运行 ${state.running.length} · 排队 ${state.queued.length} · 预留 $${state.reservedUsd.toFixed(4)}（估计）`);
+		for (const claim of state.queued) log(`${claim.id} · ${claim.member} · ${claim.reason}`);
+		log("/tasks 查看依赖、验收和结果；/operations 查看待核对外部操作。"); return true;
+	}
+	if (/^\/operations(?:\s|$)/.test(line)) {
+		const [, action, id, outcome, ...parts] = line.trim().split(/\s+/);
+		if (!action || action === "list") {
+			for (const item of operationList(await harness.snapshot(Operations, context))) log(`${item.id} · ${item.member}/${item.tool} · ${item.status} · ${item.result?.failure?.kind ?? ""}${item.result?.failure ? ` · ${item.result.failure.message}` : ""}${item.result?.failure?.retryAt ? ` · 重试时间 ${new Date(item.result.failure.retryAt).toISOString()}` : ""}${item.resolution ? ` · 核对 ${item.resolution.outcome}：${item.resolution.evidence}` : ""}`);
+			log("核对远端后：/operations resolve <ID> succeeded|not_applied <依据>；此命令只记录核对结论，不执行外部操作。"); return true;
+		}
+		if (action !== "resolve" || !id || !["succeeded", "not_applied"].includes(outcome ?? "") || !parts.length) throw new Error("用法：/operations resolve <ID> succeeded|not_applied <人工核对依据>");
+		await assertConfigIdle();
+		log(await harness.commit((tx) => resolveOperation(tx, id, outcome as "succeeded" | "not_applied", parts.join(" "), Date.now()), context)); return true;
+	}
+	if (line === "/help") { log(MEMBER_HELP); log(TASK_HELP); log("/sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); log("Enter 发送 · Ctrl+J 换行 · 滚轮/PgUp/PgDn 翻阅 · Ctrl+Home/End 到顶/最新 · Alt+End 最新 · Ctrl+K 会话 · Alt+C 关系树 · Ctrl+L 模型 · Ctrl+T 任务面板 · Ctrl+E 工具详情 · Alt+T 思考"); log("/history 补载更早记录 · /thinking 展开/收起思考 · Ctrl+Shift+F 搜索已加载记录；思考仅展示服务实际返回的内容。"); return true; }
+	if (/^\/(?:agent|setup|tool|limits|mcp)(?:\s|$)/.test(line)) {
 		if (configuring) throw new Error("配置正在进行中。");
 		configuring = true;
 		try { return await memberSettingsCommand(line, { path: configPath, config: () => config, question: settingQuestion, assertIdle: assertConfigIdle, commit: commitSettings, log }); }
@@ -504,13 +540,14 @@ async function command(line: string): Promise<boolean> {
 		return true;
 	}
 	if (/^\/result(?:\s|$)/.test(line)) {
-		const [, id, offset = "0", extra] = line.trim().split(/\s+/);
-		if (!id || extra || !/^\d+$/.test(offset)) throw new Error("用法：/result <result_id> [字符偏移]；仅查看当前总控的结果。");
+		const [, id, selection = "0", fieldOffset, extra] = line.trim().split(/\s+/);
+		const field = /^\d+$/.test(selection) ? undefined : selection;
+		if (!id || extra || (fieldOffset !== undefined && (!field || !/^\d+$/.test(fieldOffset)))) throw new Error("用法：/result <result_id> [字符偏移或结构化字段] [字段内字符偏移]");
 		const report = (await harness.snapshot(Results, root.id, id, context))?.result;
 		if (!report) throw new Error("当前总控没有这个结果。");
-		const page = resultPage(report, Number(offset), 4000);
+		const page = !field ? resultPage(report, Number(selection), 4000) : { ...resultExcerpt(report, { field, offset: Number(fieldOffset ?? 0), limit: 8000 }), id: report.id, member: report.member, status: report.status };
 		log(`${page.id} · ${page.member} · ${page.status} · ${page.offset}/${page.totalChars}\n${page.text}`);
-		if (page.nextOffset !== null) log(`下一页：/result ${id} ${page.nextOffset}`);
+		if (page.nextOffset !== null) log(`下一页：/result ${id} ${field ? `${field} ` : ""}${page.nextOffset}`);
 		return true;
 	}
 	if (line === "/learn" || line === "/repair") {
@@ -554,6 +591,8 @@ async function command(line: string): Promise<boolean> {
 			if (t.latestResult) log(c.dim(`    结果：${t.latestResult} · /result ${t.latestResult}`));
 			if (t.verification) log(`    机器检查：${t.verification.passed ? "通过，仍需复核" : "未通过"} · ${t.verification.checks.map((check) => `${check.name}:${check.passed ? "通过" : "失败"}`).join("、")}`);
 			if (t.review) log(`    复核：${t.review.verdict} · ${t.review.evidence.slice(0, 250)}`);
+			const recovery = t.recoveries?.at(-1); if (recovery) log(`    恢复：${recovery.action} → ${recovery.member} · ${recovery.status} · ${recovery.note.slice(0, 180)}`);
+			if (["todo", "blocked"].includes(t.status) && t.lastAttempt) log(c.dim(`    /task inspect ${t.id} · /task resume ${t.id} <依据> · /task supply ${t.id} <资料> · /task reassign ${t.id} <成员> <依据>`));
 		}
 		log(c.dim(`  完整分工表：${app.project.assignPath}${admin ? `　后台：${admin.url}/#/project` : ""}`));
 		return true;
@@ -617,6 +656,9 @@ async function command(line: string): Promise<boolean> {
 			return true;
 		case "/usage": {
 			const usage = (await harness.usage(context)) as any;
+			const entries = Object.values((await harness.snapshot(CostLedger, context))?.entries ?? {});
+			for (const category of ["member", "repair"] as const) { const items = entries.filter((entry) => entry.category === category); log(`${category === "member" ? "成员派工" : "自动返工"}：已知 $${items.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0).toFixed(4)} · ${items.filter((entry) => entry.costUsd === null).length} 次费用未知`); }
+			const resources = resourceSnapshot(await harness.snapshot(Resources, context)); log(`并行预留 $${resources.reservedUsd.toFixed(4)}（不是已花费）；总控/子调度用量见模型统计，角色费用尚不可完全分摊。`);
 			for (const [name, u] of Object.entries<any>(usage.models ?? {})) {
 				log(`  ${name}: 输入 ${u.input ?? 0} / 输出 ${u.output ?? 0} tokens`);
 			}
@@ -800,7 +842,7 @@ async function selectTerminalConversation(id: string) {
 	if (activeTerminalCommands) throw new Error("当前控制命令尚未完成，请稍后再查看子对话。");
 	switchingSession = true;
 	try {
-		const target = await harness.conversation(id as any, context);
+		const target = await harness.conversation(Number(id) as any, context);
 		if (!target) throw new Error("当前会话中没有这个子对话。");
 		if (closing || String(target.id) === String(terminalConversation?.id ?? root.id)) return;
 		drafts.set(terminalDraftKey(), terminalUI.editor.getExpandedText());
@@ -816,7 +858,7 @@ async function startTui() {
 	const creating = !terminalUI;
 	if (!terminalUI) {
 		const ui = new AgentTerminal({
-			workdir: config.workdir, model: orchestrator.describe, demo, web: admin?.url, session: sessionId, conversationId: String(root.id),
+			workdir: config.workdir, model: orchestrator.describe, web: admin?.url, session: sessionId, conversationId: String(root.id),
 			onSubmit(text) {
 				if (closing) return;
 				const generation = terminalGeneration;
@@ -826,7 +868,7 @@ async function startTui() {
 						if (closing || generation !== terminalGeneration) return;
 						if (switchingSession && text !== "/exit" && text !== "/quit") return log(c.dim("正在切换，命令未执行，请稍后重试。"));
 						// Task-owned 子对话由原派工管理，只允许查看或返回，不改变它的执行。
-						const readCommand = /^(?:\/main|\/conversations|\/tree|\/taskgraph|\/conversation|\/id|\/sessions?|\/members|\/tasks|\/goal|\/jobs|\/changes|\/diff|\/usage|\/agents|\/web|\/learn|\/repair|\/exit|\/quit)(?:\s|$)/.test(text) && !/^\/jobs\s+cancel/.test(text);
+						const readCommand = /^(?:\/help|\/history|\/thinking|\/main|\/conversations|\/tree|\/taskgraph|\/conversation|\/id|\/sessions?|\/members|\/tasks|\/goal|\/jobs|\/changes|\/diff|\/usage|\/agents|\/web|\/learn|\/repair|\/exit|\/quit)(?:\s|$)/.test(text) && !/^\/jobs\s+cancel/.test(text);
 						if (readingChild && !readCommand) return log(c.yellow("子对话为只读查看；请先 /main 返回总控再执行控制命令。"));
 						const bindsView = /^\/(?:sessions?|conversations|tree|main)(?:\s|$)/.test(text);
 						if (!bindsView) activeTerminalCommands++;
@@ -887,11 +929,10 @@ async function startTui() {
 	if (closing || generation !== terminalGeneration) return;
 	terminalConversation = conversation;
 	const current = () => !closing && activeId === sessionId && generation === terminalGeneration;
-	ui.bind({ workdir: currentAgent.cwd ?? config.workdir, model: currentAgent.model ? `${currentAgent.model.provider}/${currentAgent.model.modelId}` : orchestrator.describe, demo, web: admin?.url, session: sessionId,
+	ui.bind({ workdir: currentAgent.cwd ?? config.workdir, model: currentAgent.model ? `${currentAgent.model.provider}/${currentAgent.model.modelId}` : orchestrator.describe, web: admin?.url, session: sessionId,
 		conversationId: String(conversation.id), conversationLabel: String(conversation.id) === String(root.id) ? "总控 CID" : "子对话 CID · 只读",
 	}, drafts.get(terminalDraftKey()) ?? "");
-	await printBanner();
-	log("输入任务开始协作。Ctrl+K 原生会话，Alt+C 关系树，Ctrl+L 总控模型；/main 返回总控。");
+	if (creating) log(c.dim(`${orchestrator.info?.type ?? config.orchestrator.type} · 会话存储：${config.storage}`));
 	if (pendingChanges(activeApp.changes).length) printChanges(false);
 	let busy = false;
 	let refreshing = false;
@@ -958,4 +999,9 @@ if (oneShot) {
 		await startRepl();
 	}
 	harness.resume();
+}
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	await startMain();
 }

@@ -18,8 +18,8 @@ const listener = createServer();
 await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
 const port = (listener.address() as { port: number }).port;
 await new Promise<void>((resolve) => listener.close(() => resolve()));
-const terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./terminal-cli-child.ts", import.meta.url)), "--demo", "--tui"], {
-	env: { ...process.env, PI_AGENT_CONFIG: config, PI_AGENT_PORT: String(port), FAKE_AGENT_DELAY_MS: "120", PI_AGENT_DEMO: "0", TERM: "xterm-256color" },
+const terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./terminal-cli-child.ts", import.meta.url)), "--faux", "--tui"], {
+	env: { ...process.env, PI_AGENT_CONFIG: config, PI_AGENT_PORT: String(port), FAKE_AGENT_DELAY_MS: "120", TERM: "xterm-256color" },
 	stdio: ["pipe", "pipe", "pipe"],
 });
 let output = "";
@@ -81,6 +81,13 @@ try {
 	terminal.stdin.write(rootDraft);
 	await openChild(childId);
 	check(true, "Ctrl+K 可搜索并打开 DeepSeek 原生子对话，显示独立只读 CID");
+	const thinkingMarker = output.length;
+	send("/thinking");
+	await until("只读视图可折叠思考", () => visibleSince(thinkingMarker).includes("思考记录：已折叠"));
+	const thinkingRestoreMarker = output.length;
+	send("/thinking");
+	await until("只读视图可展开思考", () => visibleSince(thinkingRestoreMarker).includes("思考记录：已展开"));
+	send("/history");
 	const attemptMarker = output.length;
 	const rejectedMessage = "只读浏览时绝不能发送的唯一文本-READONLY-CHILD";
 	send(rejectedMessage);

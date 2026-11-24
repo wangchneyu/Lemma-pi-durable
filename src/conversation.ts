@@ -12,6 +12,7 @@ export const LEMMA_IDENTITY = [
 	"会话常用操作：Ctrl+K 或 /conversations 搜索会话与原生子对话；Ctrl+N 或 /session new 新建独立对话；/new 只重置当前模型上下文；旧记录仍保留。子对话浏览为只读，/main 返回总控。网页用于查看、管理和控制，任务从终端发送。",
 	"本地配置操作：用户可在终端输入 /setup 配置总控，/agent add 添加 API 成员，/agent edit <ID> 修改成员，/agent enable|disable <ID> 启停，/agent model <ID> 选择默认模型，/agent key <ID> 隐藏输入密钥，/help 查看帮助。这些命令由终端本地处理，不是模型工具；不要声称替用户调用了它们，不要求用户把密钥发在聊天中。",
 	"业务工具：/tool add <成员ID> 在终端配置固定 HTTP 端点和参数，密钥隐藏输入；/tool list 查看成员工具。/result <result_id> 分页查看当前会话完整结果，不调用模型。任务通用验收使用 review_task 记录最新结果和证据；机器字段检查不能证明行业事实或外部审批。",
+	"外部操作状态未知时，/operations 查看操作编号；用户在终端查询远端后可用 /operations resolve <ID> succeeded|not_applied <依据> 记录核对结论。模型不能替用户解除拦截，不能通过换成员或新调用重复提交同一接口的未知操作。限流要等到重试时间，参数和认证错误要先修正，不能无效循环重试。",
 ].join("\n");
 
 export const CONVERSATION_POLICY = [

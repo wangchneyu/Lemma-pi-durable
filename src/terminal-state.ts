@@ -1,6 +1,6 @@
 // 终端的状态适配层：只订阅 Durable 原生视图，不调度模型，也不拥有会话。
 import type { Context } from "@earendil-works/chord/context";
-import type { Conversation, ConversationView, ConversationWatch, EntryRecord, Harness, LiveState, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
+import type { Conversation, ConversationView, ConversationWatch, EntryRecord, Harness, LiveState, TaskGraph, TaskGraphWatch, TranscriptView } from "@earendil-works/pi-durable";
 import { ConversationTranscript } from "@earendil-works/pi-durable";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { toViewItem, toViewLive, type ViewItem, type ViewLive } from "./view.ts";
@@ -15,6 +15,7 @@ export interface TerminalConversationView {
 	partialMessage?: AssistantMessage;
 	tools?: TerminalTool[];
 	live: ViewLive;
+	history?: { hasEarlier: boolean; loading: boolean; loadEarlier(): Promise<void> };
 }
 
 export interface NativeTerminalTask {
@@ -47,8 +48,7 @@ export interface TerminalStateOptions {
 	onError?(error: unknown): void;
 }
 
-const MAX_ITEMS = 250;
-const MAX_CHARACTERS = 150_000;
+const HISTORY_PAGE_SIZE = 250;
 
 /** 两个原生订阅共用一个清理函数；切换后不再向旧视图发送任何更新。 */
 export async function watchTerminalState(options: TerminalStateOptions): Promise<() => Promise<void>> {
@@ -56,9 +56,10 @@ export async function watchTerminalState(options: TerminalStateOptions): Promise
 	let stopped = false;
 	let conversationWatch: ConversationWatch | undefined;
 	let graphWatch: TaskGraphWatch | undefined;
-	const createTranscript = () => new ConversationTranscript((query, limit, ctx) => conversation.entries(query, limit, undefined, ctx));
-	let transcript = createTranscript();
-	const projected = new WeakMap<EntryRecord, { item: TerminalItem; size: number }>();
+	const transcript = new ConversationTranscript((query, limit, ctx) => conversation.entries(query, limit, undefined, ctx), { pageSize: HISTORY_PAGE_SIZE });
+	const projected = new WeakMap<EntryRecord, TerminalItem>();
+	let latestView: ConversationView | undefined;
+	let loading: Promise<void> | undefined;
 	const report = (error: unknown) => {
 		if (stopped) return;
 		try { options.onError?.(error); } catch { /* 错误提示不能中断 Durable 的订阅。 */ }
@@ -69,29 +70,23 @@ export async function watchTerminalState(options: TerminalStateOptions): Promise
 		stopped = true;
 		await Promise.allSettled([conversationWatch?.stop(), graphWatch?.stop()]);
 	};
-	const renderConversation = (view: ConversationView) => {
+	const renderConversation = (view: ConversationView, merged: TranscriptView = transcript.merge(view)) => {
 		if (stopped) return;
-		// Upstream owns sliding-window merging and entry identity; IDs need not be contiguous.
-		let merged = transcript.merge(view);
-		// Bound only the presentation cache. Original history remains in SQLite.
-		if (merged.items.length > MAX_ITEMS * 4) { transcript = createTranscript(); merged = transcript.merge(view); }
-		const retained: { item: TerminalItem; size: number }[] = [];
-		let retainedCharacters = 0;
+		latestView = view;
+		// Durable owns paging and entry identity. Keep loaded history, including reset dividers,
+		// in the display only; viewing it never adds entries to the model's context.
+		const items: TerminalItem[] = [];
 		for (const row of merged.items) {
 			if (row.kind !== "entry") continue;
 			const entry = row.entry;
-			if (entry.kind === "pi.reset") { retained.length = 0; retainedCharacters = 0; }
 			let display = projected.get(entry);
 			if (!display) {
 				const item = toViewItem(entry);
 				if (!item) continue;
-				const native = { ...item, message: entry.model?.[0] as Message | undefined };
-				display = { item: native, size: JSON.stringify(native).length };
+				display = { ...item, message: entry.model?.[0] as Message | undefined };
 				projected.set(entry, display);
 			}
-			retained.push(display);
-			retainedCharacters += display.size;
-			while (retained.length > MAX_ITEMS || (retainedCharacters > MAX_CHARACTERS && retained.length > 1)) retainedCharacters -= retained.shift()!.size;
+			items.push(display);
 		}
 		const live = toViewLive(view.docs["pi.live"], view.docs["pi.inbox"]);
 		if (view.entries.at(-1)?.kind === "pi.reset") live.runFailure = undefined;
@@ -104,15 +99,35 @@ export async function watchTerminalState(options: TerminalStateOptions): Promise
 		for (const block of partialMessage?.content ?? []) if (block.type === "toolCall" && block.name && !tools.some((tool) => tool.callId === block.id)) tools.push({
 			callId: block.id, name: block.name, args: block.arguments, argsComplete: false, status: "pending", output: "",
 		});
-		publish(() => options.onConversation({ items: retained.map(({ item }) => item), live, partialMessage, tools }));
+		publish(() => options.onConversation({ items, live, partialMessage, tools, history: {
+			hasEarlier: merged.items.some((row) => row.kind !== "entry"), loading: !!loading, loadEarlier,
+		} }));
 	};
+	function loadEarlier(): Promise<void> {
+		if (stopped || !latestView) return Promise.resolve();
+		if (loading) return loading;
+		const current = transcript.merge(latestView);
+		const gap = current.items.findLast((row) => row.kind === "gap");
+		if (!gap && !current.items.some((row) => row.kind === "earlier")) return Promise.resolve();
+		loading = Promise.resolve().then(async () => {
+			try {
+				if (gap?.kind === "gap") await transcript.fillGap(gap, context);
+				else await transcript.loadEarlier(context);
+			} finally {
+				loading = undefined;
+				if (!stopped && latestView) renderConversation(latestView);
+			}
+		});
+		renderConversation(latestView);
+		return loading;
+	}
 	const renderGraph = (graph: TaskGraph) => publish(() => options.onTasks(Object.values(graph.tasks).map((node) => ({
 		id: String(node.id), kind: node.kind, status: node.state.status, conversationId: String(node.conversationId),
 		...(node.owner === undefined ? {} : { owner: String(node.owner) }),
 		label: `${node.kind}${node.background ? " · 后台" : ""}${node.abortRequested ? " · 正在中止" : ""}${node.blocked ? ` · ${node.blocked}` : ""}`,
 	}))));
 	try {
-		conversationWatch = await conversation.watch(context, { min: MAX_ITEMS, max: MAX_ITEMS * 2 });
+		conversationWatch = await conversation.watch(context, { min: HISTORY_PAGE_SIZE, max: HISTORY_PAGE_SIZE * 2 });
 		graphWatch = await harness.watchTaskGraph(context);
 		renderConversation(conversationWatch.value);
 		renderGraph(graphWatch.value);

@@ -11,6 +11,9 @@ import { nativeSessions, nativeConversationTree, conversationTree } from "../src
 import { nativeModelCatalog } from "../src/model-selection.ts";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { conversationWelcome, terminalRow } from "../src/terminal-layout.ts";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 
 class MemoryTerminal implements Terminal {
 	columns = 100;
@@ -56,7 +59,6 @@ let pickerRequests = 0;
 const ui = new AgentTerminal({
 	workdir: process.cwd(),
 	model: "faux-orchestrator",
-	demo: true,
 	terminal,
 	session: "frontend",
 	conversationId: "controller-123",
@@ -81,8 +83,9 @@ const frame = () => {
 
 try {
 	ui.start();
+	assert(frame().includes("从一个目标开始") && frame().includes("输入消息"));
 	assert.ok(ui.editor instanceof CustomEditor);
-	check(terminal.active && frame().includes("Lemma") && frame().includes("演示模式"), "新版终端可以启动并显示 Lemma 品牌");
+	check(terminal.active && frame().includes("Lemma") && !frame().includes("演示模式"), "新版终端可以启动并显示 Lemma 品牌");
 	check(
 		frame().includes("frontend") && frame().includes("总控 CID:controller-123"),
 		"固定栏显示会话名称与总控对话 ID，区分会话与成员上下文",
@@ -136,7 +139,6 @@ try {
 	const binding = {
 		workdir: process.cwd(),
 		model: "faux-orchestrator",
-		demo: true,
 		session: "frontend",
 		conversationId: "controller-123",
 	};
@@ -259,10 +261,17 @@ try {
 	const thinkingMessage = assistantMessage("");
 	thinkingMessage.content = [{ type: "thinking", thinking: "原生思考唯一标记" }, { type: "text", text: "原生回答唯一标记" }];
 	ui.applyConversation({ items: [{ id: 30, type: "assistant", text: "原生回答唯一标记", toolCalls: [], message: thinkingMessage }], live });
+	assert.ok(frame().includes("原生思考唯一标记"));
+	terminal.input("\x1bt");
 	assert.ok(!frame().includes("原生思考唯一标记") && frame().includes("Thinking"));
 	terminal.input("\x1bt");
 	assert.ok(frame().includes("原生思考唯一标记"));
-	terminal.input("\x1bt");
+	ui.applyConversation({ items: [], live: { ...live, busy: true }, partialMessage: thinkingMessage });
+	assert.ok(frame().includes("原生思考唯一标记"));
+	ui.toggleThinking();
+	assert.ok(!frame().includes("原生思考唯一标记"));
+	ui.toggleThinking();
+	assert.ok(frame().includes("原生思考唯一标记"));
 	const partialMessage = assistantMessage("");
 	partialMessage.content = [{ type: "toolCall", id: "streamed", name: "ask_codex", arguments: { task: "流式参数第一版" } }];
 	const streamTool = { callId: "streamed", name: "ask_codex", status: "pending", output: "", argsComplete: false, args: { task: "流式参数第一版" } };
@@ -385,6 +394,95 @@ try {
 	terminal.input("\x1b"); await cancelled;
 	assert.equal(ui.editor.getExpandedText(), settingsDraft);
 	check(true, "配置向导复用原生输入，隐藏密钥、不提交聊天，确认与取消均保留原草稿");
+
+	ui.bind(binding, "翻阅时保留的草稿");
+	const longItems: ViewItem[] = Array.from({ length: 35 }, (_, index) => ({ id: 1000 + index, type: "user", text: `历史消息 ${index} · 阅读位置固定` }));
+	const idle = { busy: false, turns: 0, partial: "", tools: [], inbox: [] };
+	ui.applyConversation({ items: longItems, live: idle }); frame();
+	terminal.input("\x1b[5~"); frame();
+	assert(!ui.tui.isFollowingOutput); const oldTop = ui.tui.viewportTop;
+	ui.write("后台新通知，不应抢走正在阅读的位置"); frame(); assert.equal(ui.tui.viewportTop, oldTop);
+	longItems.push({ id: 1100, type: "assistant", text: "新的最终回答", toolCalls: [] });
+	ui.applyConversation({ items: longItems, live: idle });
+	assert(frame().includes("正在翻阅") && frame().includes("2 条新内容")); assert.equal(ui.tui.viewportTop, oldTop);
+	terminal.input("\x1b[1;3F");
+	assert(ui.tui.isFollowingOutput); assert(frame().includes("新的最终回答") && !frame().includes("正在翻阅")); assert.equal(ui.editor.getExpandedText(), "翻阅时保留的草稿");
+	check(true, "PgUp 翻阅不被新日志和回答拉回底部，新增内容计数可见，Alt+End 返回最新且草稿不变");
+	assert(terminal.output.includes("\x1b[?1006h"), "原生 TUI 应启用 SGR 鼠标事件");
+	const atBottom = ui.tui.viewportTop;
+	terminal.input("\x1b[<64;20;8M"); frame();
+	assert(ui.tui.viewportTop < atBottom && !ui.tui.isFollowingOutput);
+	assert.equal(ui.editor.getExpandedText(), "翻阅时保留的草稿");
+	terminal.input("\x1b[1;5H"); frame();
+	assert(frame().includes("历史消息 0"));
+	terminal.input("\x1b[1;5F"); frame();
+	assert(ui.tui.isFollowingOutput);
+	check(true, "原生滚轮可翻出当前窗口，Ctrl+Home/End 到顶和回最新且不污染输入");
+	ui.bind(binding, "历史补页草稿");
+	let historyLoads = 0;
+	let releaseHistory!: () => void;
+	const historyReady = new Promise<void>((resolve) => { releaseHistory = resolve; });
+	const recentItems: ViewItem[] = Array.from({ length: 300 }, (_, index) => ({ id: 2000 + index, type: "user", text: `最近历史 ${index}` }));
+	ui.applyConversation({ items: recentItems, live: idle, history: { hasEarlier: true, loading: false, async loadEarlier() {
+		historyLoads++; await historyReady;
+		ui.applyConversation({ items: [...Array.from({ length: 50 }, (_, index) => ({ id: 1900 + index, type: "user" as const, text: `补回历史 ${index}` })), ...recentItems], live: idle, history: { hasEarlier: false, loading: false, async loadEarlier() {} } });
+	} } });
+	frame(); terminal.input("\x1b[1;5H"); frame();
+	assert(frame().includes("最近历史 0"), "显示层不能裁掉前 50 条历史");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(historyLoads, 1);
+	const readPosition = ui.tui.viewportTop;
+	releaseHistory(); await new Promise((resolve) => setTimeout(resolve, 0));
+	assert(frame().includes("最近历史 0") && ui.tui.viewportTop > readPosition);
+	assert(!frame().includes("条新内容"));
+	terminal.input("\x1b[1;5H"); frame(); assert(frame().includes("补回历史 0"));
+	assert.equal(ui.editor.getExpandedText(), "历史补页草稿");
+	check(true, "滚动到顶自动补页，超过 250 条仍可读，补页保持位置且不误计为新消息");
+	ui.bind(binding, "失败重试草稿");
+	let failedLoads = 0;
+	ui.applyConversation({ items: recentItems, live: idle, history: { hasEarlier: true, loading: false, async loadEarlier() { failedLoads++; throw new Error("分页暂时不可用"); } } });
+	frame(); terminal.input("\x1b[1;5H"); frame();
+	await new Promise((resolve) => setTimeout(resolve, 0)); frame();
+	await new Promise((resolve) => setTimeout(resolve, 0)); frame();
+	assert.equal(failedLoads, 1, "分页失败不能随着重绘无限重试");
+	assert(frame().includes("/history 重试"));
+	await ui.loadEarlier(); assert.equal(failedLoads, 2);
+	ui.bind(binding, "旧会话草稿");
+	let finishOldPage!: () => void;
+	ui.applyConversation({ items: recentItems, live: idle, history: { hasEarlier: true, loading: false, loadEarlier: () => new Promise<void>((resolve) => { finishOldPage = resolve; }) } });
+	frame(); terminal.input("\x1b[1;5H"); frame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	ui.bind({ ...binding, conversationId: "new-session-during-page" }, "新会话独立草稿");
+	ui.applyConversation({ items: [{ id: 1, type: "user", text: "新会话独立记录" }], live: idle }); frame();
+	finishOldPage(); await new Promise((resolve) => setTimeout(resolve, 0));
+	assert(ui.tui.isFollowingOutput && frame().includes("新会话独立记录"));
+	assert.equal(ui.editor.getExpandedText(), "新会话独立草稿");
+	check(true, "补页失败不无限重试，切换会话后迟到结果不移动新会话或影响草稿");
+	ui.bind(binding, "长记录草稿");
+	ui.applyConversation({ items: [{ id: 4000, type: "user", text: "长记录之前的开头标记" }, { id: 4001, type: "assistant", text: "中间内容".repeat(40_000), toolCalls: [] }, { id: 4002, type: "user", text: "长记录之后的结尾标记" }], live: idle });
+	frame(); terminal.input("\x1b[1;5H"); frame(); assert(frame().includes("长记录之前的开头标记"));
+	terminal.input("\x1b[1;5F"); frame(); assert(frame().includes("长记录之后的结尾标记"));
+	assert.equal(ui.editor.getExpandedText(), "长记录草稿");
+	check(true, "超过原 15 万字符限制的长对话也可滚动到开头和结尾");
+	const payload = { task: "核对报告", inputs: [{ result_id: "source-42", field: "data.total" }], recovery_id: "RECOVERY_DETAIL_ONLY_WHEN_EXPANDED" };
+	ui.bind(binding, ""); ui.applyConversation({ items: [{ id: 1200, type: "assistant", text: "", toolCalls: [{ id: "compact-call", name: "ask_reviewer", args: payload }] }, { id: 1201, type: "tool", callId: "compact-call", name: "ask_reviewer", text: "核对完成，金额 42，来源已列出。", isError: false }], live: idle });
+	assert(frame().includes("派工 → reviewer") && frame().includes("核对报告") && !frame().includes(payload.recovery_id));
+	terminal.input("\x05"); assert(frame().includes(payload.recovery_id)); terminal.input("\x05");
+	ui.applyConversation({ items: [], live: { ...idle, runFailure: { reason: "interrupted", detail: "网络中断，结果保留" } } });
+	assert(frame().includes("本轮未完成") && frame().includes("/continue"));
+	ui.applyConversation({ items: [], live: { ...idle, runFailure: { reason: "no_model" } } }); assert(frame().includes("/model") && !frame().includes("/continue"));
+	check(true, "协作卡片隐藏长参数并可原生展开，中断与未配置模型显示对应下一步");
+	for (const width of [1, 2, 8, 18, 42, 80, 120]) {
+		assert(visibleWidth(terminalRow("中文🙂会话标题", "模型与预算 $0.000", width)) <= width);
+		assert(conversationWelcome(width, false).every((line) => visibleWidth(line) <= width));
+	}
+	const previews = resolve("data/terminal-preview"); mkdirSync(previews, { recursive: true });
+	ui.bind(binding); ui.applyConversation({ items: [{ id: 1300, type: "user", text: "请核对这份报告的数据，再整理需要补充的资料。" }, { id: 1301, type: "assistant", text: "已核对现有资料。\n\n- 已确认：金额与来源一致。\n- 待补充：第二条记录的日期。\n\n补充日期后可继续原任务，无需重做已验收部分。", toolCalls: [] }], live: idle });
+	ui.setStatus({ busy: false, jobs: [], spent: 0.12, budget: 3, pending: 1 });
+	for (const [width, height] of [[100, 30], [42, 18], [18, 8]]) { terminal.columns = width!; terminal.rows = height!; terminal.resize(); const rendered = frame(); assert(ui.tui.getScreenLines().every((line) => visibleWidth(line) <= width!)); writeFileSync(resolve(previews, `${width}x${height}.txt`), rendered); }
+	terminal.columns = 100; terminal.rows = 30; terminal.resize();
+	ui.bind({ ...binding, conversationId: "child-7", conversationLabel: "子对话 CID · 只读" }); assert(frame().includes("只读浏览") && frame().includes("/main"));
+	check(true, "空状态、带角色消息、只读提示和中英文状态栏在宽窄终端均不越界，渲染帧已保存");
 
 	terminal.input("\x03");
 	assert.equal(interrupts, 1);

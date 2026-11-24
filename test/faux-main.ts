@@ -4,13 +4,15 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { MutableModels } from "@earendil-works/pi-ai";
-import { memberProvider } from "./api-member.ts";
-import type { AgentConfig, AppConfig } from "./config.ts";
-import type { OrchestratorModel } from "./models.ts";
+import { memberProvider } from "../src/api-member.ts";
+import type { AgentConfig, AppConfig } from "../src/config.ts";
+import { startMain } from "../src/main.ts";
+import type { OrchestratorModel } from "../src/models.ts";
 
 const FAKE_AGENT = fileURLToPath(new URL("../scripts/fake-agent.mjs", import.meta.url));
 
@@ -395,7 +397,19 @@ export function demoOrchestrator(): OrchestratorModel {
 	return {
 		models,
 		ref: { provider: "demo", modelId: "scripted-orchestrator" },
-		describe: "演示模式（脚本化假模型，不花钱）",
-		info: { type: "demo", modelId: "scripted-orchestrator", keySource: "不需要密钥" },
+		describe: "测试假模型",
+		info: { type: "faux", modelId: "scripted-orchestrator", keySource: "不需要密钥" },
 	};
+}
+
+export async function runFauxMain(): Promise<void> {
+	await startMain({
+		config: demoConfig,
+		createOrchestrator: () => demoOrchestrator(),
+		onOrchestrator: (model) => installDemoMember(model.models),
+	});
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	await runFauxMain();
 }

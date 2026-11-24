@@ -124,7 +124,7 @@ try {
 	const children = await listNativeConversations(app.harness, app.root, context);
 	assert.equal(children.length, 3);
 	assert(children.some((c) => c.id === sessionA && c.title.startsWith("数据分析员")));
-	admin = await startAdmin({ app, config, configPath, orchestrator: { ...orchestrator, describe: "faux" }, demo: false, port: 0, context });
+	admin = await startAdmin({ app, config, configPath, orchestrator: { ...orchestrator, describe: "faux" }, port: 0, context });
 	const state = await (await fetch(`${admin.url}/api/state`)).json() as any;
 	const member = state.agents.find((m: any) => m.kind === "analyst");
 	assert.equal(member.label, "数据分析员"); assert.equal(member.transport, "api"); assert.equal(member.workspace, "none"); assert.deepEqual(member.api.tools, []);
@@ -183,16 +183,21 @@ try {
 	const reader = createMemberTools("reader", { ...config.agents.analyst.api!, tools: ["read"] });
 	assert.deepEqual(reader.tools?.map((tool) => tool.name), ["read"]);
 	check(true, "权限与预算：显式 read 授权不附带写入或 shell，预算耗尽时拒绝 API 请求");
+	orchestrator.faux.setResponses([fauxAssistantMessage([fauxToolCall("plan_tasks", { tasks: [{ title: "取消也保留交付记录" }] })], { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("PLANNED"))]);
+	await (await app.root.submit({ type: "input", content: "plan cancellation" }, context)).wait(bounded());
 
 	paused = true;
 	const active = new Promise<void>((resolve) => { running = resolve; });
-	orchestrator.faux.setResponses([() => fauxAssistantMessage([fauxToolCall("ask_analyst", { task: "WAIT_FOR_CANCELLATION", session_id: sessionA }, { id: "cancel-resume" })], { stopReason: "toolUse" })]);
+	orchestrator.faux.setResponses([() => fauxAssistantMessage([fauxToolCall("ask_analyst", { task: "WAIT_FOR_CANCELLATION", task_id: "T2", session_id: sessionA }, { id: "cancel-resume" })], { stopReason: "toolUse" })]);
 	const submission = await app.root.submit({ type: "input", content: "Start cancellable followup" }, context);
 	await Promise.race([active, new Promise((_, reject) => setTimeout(() => reject(new Error("member did not start")), 10000).unref())]);
 	await app.root.abort(bounded());
 	assert.equal((await submission.wait(bounded())).status, "unanswered");
 	await app.harness.waitForIdle(bounded());
 	assert.equal((await app.harness.inspect(context)).tasks.length, 0);
+	const cancelled = (await app.harness.snapshot(Board, context))!.tasks.T2!;
+	assert.equal(cancelled.status, "todo"); assert(!cancelled.activeDispatch); assert(cancelled.latestResult);
+	assert.equal((await app.harness.snapshot(Results, app.root.id, cancelled.latestResult!, context))!.result!.status, "unanswered");
 	check(true, "取消：续接中的 API 成员随总控停止，没有遗留运行任务");
 
 	await app.harness.close(context);
@@ -224,7 +229,7 @@ try {
 		orchestrator: { ...api("controller"), modelId: "shared-model", apiKeyFromClaudeSettings: false },
 		web: { enabled: true, port: 0 },
 	}));
-	const terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./terminal-cli-child.ts", import.meta.url)), "--real", "--tui"], { env: { ...process.env, PI_AGENT_CONFIG: terminalConfig, PI_AGENT_DEMO: "0", LEMMA_CREDENTIALS_FILE: join(directory, "terminal-credentials.json"), TERM: "xterm-256color" }, stdio: ["pipe", "pipe", "pipe"] });
+	const terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./terminal-cli-child.ts", import.meta.url)), "--tui"], { env: { ...process.env, PI_AGENT_CONFIG: terminalConfig, LEMMA_CREDENTIALS_FILE: join(directory, "terminal-credentials.json"), TERM: "xterm-256color" }, stdio: ["pipe", "pipe", "pipe"] });
 	let output = "", errorsOutput = "", exited = false;
 	terminal.stdout.on("data", (chunk) => { output += chunk; }); terminal.stderr.on("data", (chunk) => { errorsOutput += chunk; });
 	const terminalClosed = new Promise<number | null>((resolve) => terminal.once("close", (code) => { exited = true; resolve(code); }));
@@ -235,8 +240,10 @@ try {
 	};
 	const send = (value: string) => terminal.stdin.write(`\x1b[200~${value}\x1b[201~\x1b[13u`);
 	try {
-		await until(() => terminalText(output).includes("数据分析员") && output.includes("Enter"));
+		await until(() => terminalText(output).includes("从一个目标开始") && output.includes("Enter"));
 		terminal.stdin.write("\x1b[?1;2c");
+		send("/agents");
+		await until(() => terminalText(output).includes("数据分析员"));
 		const configureMember = async () => {
 			const beginning = output.length; send("/agent add helper");
 			const steps = [
@@ -294,10 +301,13 @@ try {
 		const resultId = terminalText(output).match(/result_id: (dispatch:[^\s|\]]+)/)![1]!;
 		operationStart = output.length; send(`/result ${resultId}`);
 		await until(() => terminalText(output.slice(operationStart)).includes("ANALYSIS_EVIDENCE_42"));
+		operationStart = output.length; send("/operations");
+		await until(() => terminalText(output.slice(operationStart)).includes("核对远端后"));
 		assert(!JSON.stringify(terminalState).includes("HIDDEN_TERMINAL_SETTING_KEY"));
 		const history = await (await fetch(`${url}/api/history`)).text();
 		assert(!history.includes("HIDDEN_TERMINAL_SETTING_KEY") && !history.includes("/agent add helper"));
 		assert(!history.includes("HIDDEN_BUSINESS_TOOL_KEY") && !history.includes("/tool add") && !history.includes(`/result ${resultId}`));
+		assert(!history.includes("/operations"));
 		operationStart = output.length; send("/session new configured_session");
 		await until(() => terminalText(output.slice(operationStart)).includes("已切换到 configured_session"));
 		const switchedState = await (await fetch(`${url}/api/state`)).json() as any;

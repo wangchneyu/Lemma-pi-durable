@@ -290,13 +290,17 @@ const COLUMNS = [
 
 function taskCard(t, all) {
 	const deps = t.deps.map((d) => all.find((x) => x.id === d)).filter(Boolean);
+	const waiting = deps.filter((dependency) => dependency.status !== "done");
 	return `<article class="task-card" data-s="${t.status}">
+		${waiting.length ? `<p class="task-note">等待前置验收：${waiting.map((dependency) => esc(dependency.id)).join("、")}</p>` : ""}
 		<header><span class="mono task-id">${esc(t.id)}</span>${t.role ? `<span class="role-chip">${esc(t.role)}</span>` : ""}${t.owner ? agentTag(t.owner) : ""}</header>
 		<h3>${esc(t.title)}</h3>
 		${t.acceptance ? `<p class="task-accept" title="${esc(t.acceptance)}"><span>验收</span>${esc(short(t.acceptance, 90))}</p>` : ""}
 		${t.verification ? `<p class="task-accept" title="${esc(t.verification.checks.map((c) => `${c.name}：${c.passed ? "通过" : "失败"} · ${c.evidence}`).join("\n"))}"><span>机器检查</span>${t.verification.passed ? "通过，仍需复核" : "未通过，需要返工"}</p>` : ""}
 		${t.review ? `<p class="task-note" title="${esc(t.review.evidence)}">复核 ${esc(t.review.verdict)} · ${esc(short(t.review.evidence, 90))}</p>` : ""}
 		${t.latestResult ? `<p class="task-note mono" title="${esc(t.latestResult)}">结果 ${esc(t.latestResult)}</p>` : ""}
+		${t.recoveries?.length ? `<p class="task-note">恢复 ${esc(t.recoveries.at(-1).action)} → ${esc(t.recoveries.at(-1).member)} · ${esc(t.recoveries.at(-1).status)}</p>` : ""}
+		${["todo", "blocked"].includes(t.status) && t.lastAttempt ? `<p class="task-note mono">终端 /task inspect ${esc(t.id)} 查看失败证据与恢复入口</p>` : ""}
 		${
 			deps.length || t.changes.length
 				? `<footer>${deps.map((d) => `<span class="dep" data-s="${d.status}" title="${esc(d.title)}">← ${esc(d.id)}</span>`).join("")}${t.changes.map((c) => changeLink(c)).join("")}</footer>`
@@ -327,7 +331,11 @@ function project() {
 			const done = count("done");
 			const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
 			const available = new Set((store.state.agents ?? []).filter((a) => a.available).map((a) => a.kind));
+			const uncertain = (store.state.operations ?? []).filter((operation) => operation.method === "POST" && ["pending", "unknown"].includes(operation.status));
+			const resources = store.state.resources ?? { running: [], queued: [], reservedUsd: 0 };
 			root.innerHTML = `
+				<section class="card"><header class="card-head"><h2 class="card-title">执行与等待</h2><span class="card-note">${resources.running.length} 运行 · ${resources.queued.length} 排队 · 预留 $${Number(resources.reservedUsd).toFixed(4)}（估计）</span></header><div class="card-body">${resources.queued.map((claim) => `<p>${esc(claim.member)} · ${esc(claim.reason ?? "等待资源")}</p>`).join("") || "当前没有排队任务"}</div></section>
+				${uncertain.length ? `<section class="card"><header class="card-head"><h2 class="card-title err-t">外部操作待核对</h2></header><div class="card-body">${uncertain.map((operation) => `<p><span class="mono">${esc(operation.id)}</span> · ${esc(operation.member)}/${esc(operation.tool)} · ${esc(operation.failure?.message ?? "请求已发出但尚无确定回执")}</p>`).join("")}<p>查询远端流水后，在终端使用 /operations resolve 记录核对依据；核对前禁止重复提交同一接口。</p></div></section>` : ""}
 				<section class="card goal-card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">最终目标</h2><div class="card-sub"><span class="mono">${esc(p.goalPath)}</span></div></div>
 						${p.goal && /待你确认/.test(p.goal) ? `<span class="pill" data-s="pending">总调度起草 · 待你确认</span>` : ""}</header>
@@ -1147,7 +1155,7 @@ function config() {
 			const dl = (rows) => `<dl class="kvs wide">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
 			const code = (v) => `<code>${esc(v)}</code>`;
 			root.innerHTML = `
-				<section class="card"><header class="card-head"><h2 class="card-title">进程</h2>${s.demo ? `<span class="demo-badge">演示模式</span>` : ""}</header>
+				<section class="card"><header class="card-head"><h2 class="card-title">进程</h2></header>
 					<div class="card-body">${dl([
 						["配置文件", `<button type="button" class="linkish mono" data-copy="${esc(s.configPath)}">${esc(s.configPath)}</button>`],
 						["工作目录", code(s.workdir)],

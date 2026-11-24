@@ -228,6 +228,8 @@ export function connect() {
 	});
 	// 目标或分工表变了
 	es.addEventListener("project", () => refreshState(100));
+	// Durable queue, reservation and external-operation changes include parked work.
+	es.addEventListener("resources", () => refreshState(100));
 	// 子调度在自己的子对话里派了工 / 有了进展
 	es.addEventListener("lead", () => {
 		refreshDispatches(200);

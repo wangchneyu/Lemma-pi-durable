@@ -15,13 +15,13 @@ writeFileSync(configPath, JSON.stringify({
 }));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function demo(tui: boolean, real = false): Promise<void> {
+async function runCase(tui: boolean, real = false): Promise<void> {
+	const entry = real ? "../src/main.ts" : tui ? "./terminal-cli-child.ts" : "./faux-main.ts";
 	const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [
-		"--no-warnings", fileURLToPath(new URL(tui ? "./terminal-cli-child.ts" : "../src/main.ts", import.meta.url)),
-		"--demo", "--tui", "--no-web",
-		...(real ? ["--real"] : []),
+		"--no-warnings", fileURLToPath(new URL(entry, import.meta.url)),
+		...(real ? [] : ["--faux"]), "--tui", "--no-web",
 	], {
-		env: { ...process.env, PI_AGENT_CONFIG: configPath, PI_AGENT_DEMO: real ? "1" : "0", FAKE_AGENT_DELAY_MS: "250", TERM: "xterm-256color" },
+		env: { ...process.env, PI_AGENT_CONFIG: configPath, FAKE_AGENT_DELAY_MS: "250", TERM: "xterm-256color" },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let output = "";
@@ -58,7 +58,7 @@ async function demo(tui: boolean, real = false): Promise<void> {
 			const final = terminalText(output);
 			assert.ok(final.includes("anthropic-compatible") && final.includes("session.sqlite"));
 			assert.ok(!final.includes("演示模式") && !final.includes("demo-workspace"));
-			check(true, "显式真实模式覆盖演示标志和遗留环境变量，使用真实配置与会话存储（不发送请求）");
+			check(true, "真实入口始终使用真实配置与会话存储（不发送请求）");
 		} else if (tui) {
 			const final = terminalText(output);
 			assert.ok(output.includes("\x1b[?1049l"));
@@ -73,6 +73,6 @@ async function demo(tui: boolean, real = false): Promise<void> {
 	}
 }
 
-await demo(true);
-await demo(false);
-await demo(false, true);
+await runCase(true);
+await runCase(false);
+await runCase(false, true);

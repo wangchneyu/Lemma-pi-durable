@@ -16,7 +16,7 @@ const free = createServer();
 await new Promise<void>((resolve) => free.listen(0, "127.0.0.1", resolve));
 const port = (free.address() as { port: number }).port;
 await new Promise<void>((resolve) => free.close(() => resolve()));
-const child = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./terminal-cli-child.ts", import.meta.url)), "--demo", "--tui"], {
+const child = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./terminal-cli-child.ts", import.meta.url)), "--faux", "--tui"], {
 	env: { ...process.env, PI_AGENT_CONFIG: file, PI_AGENT_PORT: String(port), FAKE_AGENT_DELAY_MS: "1200", TERM: "xterm-256color" }, stdio: ["pipe", "pipe", "pipe"],
 });
 let output = "";

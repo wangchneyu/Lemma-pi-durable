@@ -6,6 +6,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { startAdmin, type AdminOptions } from "../src/admin.ts";
 import { openApp } from "../src/app.ts";
+import { Resources } from "../src/resources.ts";
 import { check, fauxOrchestrator, testConfig } from "./helpers.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -16,7 +17,7 @@ const second = await openApp(configs[1]!, models[1]!, context, { memory: true })
 const apps = [first, second];
 const options = (index: number): AdminOptions => ({
 	app: apps[index]!, config: configs[index]!, configPath: "test-only.json",
-	orchestrator: { ...models[index]!, describe: "faux" }, demo: true, port: 0, context,
+	orchestrator: { ...models[index]!, describe: "faux" }, port: 0, context,
 	session: { id: index ? "second" : "first", title: index ? "第二个" : "第一个" },
 });
 const agent = new Agent({ keepAlive: true, maxSockets: 1 });
@@ -41,12 +42,17 @@ try {
 	const socket = initial.socket;
 	const baseline = { changes: second.changes.listenerCount("change"), project: second.project.listenerCount("change"), jobs: second.jobs.listenerCount("change") };
 	let streamEnded = false;
+	let events = "";
 	await new Promise<void>((resolve, reject) => {
 		const req = request(admin.url + "/api/events", (res) => {
-			stream = res; res.on("end", () => { streamEnded = true; });
+			stream = res; res.on("end", () => { streamEnded = true; }); res.on("data", (chunk) => { events += chunk; });
 			res.once("data", () => resolve()); res.resume();
 		}); req.on("error", reject); req.end();
 	});
+	await first.harness.commit(async (tx) => { (await tx.doc(Resources)).claims.fixture = { id: "fixture", member: "claude", service: "cli:claude", runKey: null, status: "queued", reservedUsd: 0, at: Date.now(), reason: "等待团队并发名额" }; }, context);
+	const eventDeadline = Date.now() + 3000; while (!events.includes("event: resources") && Date.now() < eventDeadline) await new Promise((done) => setTimeout(done, 20));
+	assert(events.includes("event: resources")); assert.equal((await raw("/api/state")).data.resources.queued.length, 1);
+	check(true, "排队文档首次创建即经 Durable 提交订阅推送网页，不依赖定时刷新");
 	await admin.rebind(options(1));
 	const changed = await raw("/api/state");
 	assert.equal(admin.url, originalUrl); assert.equal(changed.socket, socket);

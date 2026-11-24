@@ -9,6 +9,7 @@ import { Board } from "../src/board.ts";
 import { callBusinessTool, createBusinessTools, validateBusinessTools, type HttpBusinessTool } from "../src/business-tools.ts";
 import { verifyReport, validateAcceptanceChecks } from "../src/acceptance.ts";
 import { Results, storeResult } from "../src/results.ts";
+import { Operations, resolveOperation } from "../src/operations.ts";
 import { check, fakeCalls, fauxOrchestrator, testConfig, toolResults } from "./helpers.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -18,6 +19,8 @@ const server = createServer(async (req, res) => {
 	const path = new URL(req.url!, "http://localhost").pathname;
 	received.push({ path: req.url!, key: req.headers["idempotency-key"] as string, auth: req.headers.authorization, body: Buffer.concat(chunks).toString() });
 	if (path === "/slow") return;
+	if (path === "/auth") { res.writeHead(401); res.end("unauthorized"); return; }
+	if (path === "/limited") { res.writeHead(429, { "Retry-After": "3" }); res.end("wait"); return; }
 	if (path === "/redirect") { res.writeHead(302, { Location: "/forbidden" }); res.end(); return; }
 	res.writeHead(path === "/failed" ? 503 : 200, { "content-type": "application/json" });
 	res.end(JSON.stringify({ evidence: "SOURCE_42", amount: 42, secret: process.env.LEMMA_BUSINESS_TEST_KEY }));
@@ -53,6 +56,9 @@ try {
 	assert(!received.some((item) => item.path === "/forbidden"));
 	assert((await callBusinessTool({ ...post, url: `${base}/slow`, timeoutSeconds: 0.03 }, { query: "x" }, new AbortController().signal, "slow")).text.includes("状态未知"));
 	assert((await callBusinessTool({ ...tool, url: `${base}/slow` }, { query: "x" }, AbortSignal.timeout(30), "cancel")).isError);
+	assert.equal((await callBusinessTool({ ...tool, url: `${base}/auth` }, { query: "x" }, new AbortController().signal, "auth")).failure!.kind, "authentication");
+	const limited = await callBusinessTool({ ...tool, url: `${base}/limited` }, { query: "x" }, new AbortController().signal, "limit");
+	assert.equal(limited.failure!.kind, "rate_limit"); assert(limited.failure!.retryAt! > Date.now());
 	check(true, "业务 HTTP：参数校验、密钥脱敏、固定端点、幂等键、拒绝重定向、超时和取消");
 
 	// Install the actual member extension into a native Durable conversation.
@@ -118,4 +124,48 @@ try {
 	board = (await app.harness.snapshot(Board, context))!; assert.equal(board.tasks.T1!.status, "done"); assert.equal(board.tasks.T1!.review!.resultId, report.id);
 	assert(board.tasks.T1!.verification!.passed); assert((await app.harness.snapshot(Results, app.root.id, board.tasks.T3!.latestResult!, context))?.result?.text.includes("SOURCE_42"));
 	check(true, "重启保留原会话中的验收规则、通过证据、返工记录与最新完整结果");
+
+	await run("plan_tasks", { tasks: [{ title: "不带机器规则也必须验收" }] });
+	await run("update_task", { id: "T4", status: "done", note: "空口声称完成" }, true);
+	await run("update_task", { id: "T4", status: "review", note: "伪造待验收" }, true);
+	await run("ask_claude", { task: "交付供验收", task_id: "T4" });
+	await run("update_task", { id: "T4", status: "done" }, true);
+	await run("update_task", { id: "T4", status: "done", note: "已读取完整交付并核对" });
+	assert.equal((await app.harness.snapshot(Board, context))!.tasks.T4!.review!.verdict, "accepted");
+	await run("plan_tasks", { tasks: [{ title: "文件导出失败不丢交付" }] });
+	const originalExport = app.project.writeAssign; app.project.writeAssign = () => { throw new Error("fixture disk failure"); };
+	try { await run("ask_claude", { task: "export failure fixture", task_id: "T5" }); } finally { app.project.writeAssign = originalExport; }
+	const exported = (await app.harness.snapshot(Board, context))!.tasks.T5!;
+	assert.equal(exported.status, "review"); assert((await app.harness.snapshot(Results, app.root.id, exported.latestResult!, context))!.result);
+	check(true, "所有任务统一完成规则：无机器规则也必须有成功交付和验收证据，旧入口不会绕过");
+
+	const postTool = { ...tool, url: `${base}/slow`, method: "POST" as const, timeoutSeconds: 0.03 };
+	const writer = { ...recoveredApi, api: { ...recoveredApi.api!, httpTools: [postTool] } };
+	app.prepareMembers({ ...config, agents: { ...config.agents, fixture: writer, other: { ...writer, name: "other" } } })();
+	const nativeCall = async (memberId: string, query: string, error: boolean) => {
+		const model = fauxProvider({ provider: memberProvider(memberId), models: [{ id: "fixture-model" }] }); orch.models.setProvider(model.provider);
+		model.setResponses([fauxAssistantMessage([fauxToolCall("lookup", { query })], { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("CLAIMED_SUCCESS"))]);
+		return run(`ask_${memberId}`, { task: query }, error);
+	};
+	const requests = () => received.filter((entry) => new URL(entry.path, base).pathname === "/slow").length;
+	const beforePost = requests(); await nativeCall("fixture", "external-write", true);
+	assert.equal(requests(), beforePost + 1);
+	const operation = Object.values((await app.harness.snapshot(Operations, context))!.operations).find((operation) => operation.method === "POST" && operation.status === "unknown")!;
+	assert(operation); await nativeCall("other", "try-different-payload", true); assert.equal(requests(), beforePost + 1);
+	await app.harness.close(context); app = await openApp(config, orch, context);
+	await nativeCall("other", "after-restart", true); assert.equal(requests(), beforePost + 1);
+	await assert.rejects(app.harness.commit((tx) => resolveOperation(tx, operation.id, "not_applied", "", Date.now()), context));
+	await app.harness.commit((tx) => resolveOperation(tx, operation.id, "not_applied", "查询远端流水确认未执行", Date.now()), context);
+	await nativeCall("other", "retry-after-confirmation", true); assert.equal(requests(), beforePost + 2);
+	check(true, "POST 状态未知跨成员和重启保持拦截；人工核对未执行并记录依据后才能重新提交");
+	const remaining = Object.values((await app.harness.snapshot(Operations, context))!.operations).find((entry) => entry.status === "unknown")!;
+	await app.harness.commit((tx) => resolveOperation(tx, remaining.id, "succeeded", "远端流水号 SUCCESS_42 已确认", Date.now()), context);
+	await nativeCall("other", "retry-after-confirmation", true); assert.equal(requests(), beforePost + 2);
+	check(true, "人工确认远端成功后，相同参数不能再次提交，不会把旧失败报告伪造为成功");
+	const limitedMember = { ...writer, api: { ...writer.api!, httpTools: [{ ...tool, url: `${base}/limited` }] } };
+	app.prepareMembers({ ...config, agents: { ...config.agents, fixture: limitedMember } })();
+	const limitRequests = () => received.filter((entry) => new URL(entry.path, base).pathname === "/limited").length;
+	const limitBefore = limitRequests(); await nativeCall("fixture", "limited-one", true); await nativeCall("fixture", "limited-two", true);
+	assert.equal(limitRequests(), limitBefore + 1);
+	check(true, "Retry-After 等待时间持久化，冷却期间新调用不会再次请求接口");
 } finally { await app.harness.close(context); server.closeAllConnections(); await new Promise<void>((done) => server.close(() => done())); if (oldKey === undefined) delete process.env.LEMMA_BUSINESS_TEST_KEY; else process.env.LEMMA_BUSINESS_TEST_KEY = oldKey; }

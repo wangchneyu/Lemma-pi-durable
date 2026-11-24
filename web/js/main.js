@@ -60,7 +60,6 @@ function renderChrome() {
 		$("#statusText").textContent = failure ? "待命 · 上一轮已中止" : "待命";
 	}
 	$("#stopBtn").hidden = !live.busy;
-	if (state) $("#demoBadge").hidden = !state.demo;
 	const counts = {
 		runs: buildRuns().filter((r) => !r.divider).length + (store.hasMore ? "+" : ""),
 		dispatches: store.dispatches.length || "",

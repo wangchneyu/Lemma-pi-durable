@@ -25,8 +25,8 @@ let exited = false;
 
 function launch() {
 	exited = false; output = "";
-	terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("../src/main.ts", import.meta.url)), "--demo", "--plain"], {
-		env: { ...process.env, PI_AGENT_CONFIG: config, PI_AGENT_PORT: String(port), FAKE_AGENT_DELAY_MS: "150", PI_AGENT_DEMO: "0" }, stdio: ["pipe", "pipe", "pipe"],
+	terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./faux-main.ts", import.meta.url)), "--plain"], {
+		env: { ...process.env, PI_AGENT_CONFIG: config, PI_AGENT_PORT: String(port), FAKE_AGENT_DELAY_MS: "150" }, stdio: ["pipe", "pipe", "pipe"],
 	});
 	terminal.stdout.on("data", (chunk) => { output += chunk; });
 	terminal.stderr.on("data", (chunk) => { output += chunk; });

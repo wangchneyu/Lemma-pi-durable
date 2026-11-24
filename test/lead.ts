@@ -81,7 +81,7 @@ check(board.tasks.T2?.parent === "T1" && board.tasks.T3?.parent === "T1", "子�
 check(board.tasks.T1?.status === "review" && board.tasks.T1?.owner === "子调度·后端", "上级任务由子调度负责，完成后待验收");
 
 // ---- 后台网页：拓扑里能看到子调度和它派的工 ----
-const admin = await startAdmin({ app, config, configPath: "test", orchestrator: { models: orch.models, ref: orch.ref, describe: "faux" }, demo: false, port: 8796, context });
+const admin = await startAdmin({ app, config, configPath: "test", orchestrator: { models: orch.models, ref: orch.ref, describe: "faux" }, port: 8796, context });
 const topo: any = await (await fetch(`${admin.url}/api/topology`)).json();
 const leadBar = topo.bars.find((b: any) => b.mode === "lead");
 const sub = topo.bars.filter((b: any) => b.lead && b.lead === leadBar?.key);

@@ -12,6 +12,8 @@ import type { AcceptanceCheck, TaskVerification } from "./acceptance.ts";
 export type TaskStatus = "todo" | "doing" | "review" | "done" | "blocked" | "dropped";
 
 export type BoardTask = {
+	lastAttempt?: { callId: string; controllerId: string; dispatchTaskId: string; member: string; task: string; cwd?: string; model?: string; sessionId?: string; changeId?: string; structured?: boolean; inputs?: { result_id: string; field?: string; offset?: number; limit?: number }[] };
+	recoveries?: { id: string; controllerId: string; action: "resume" | "reassign" | "supply"; member: string; note: string; fromResult: string | null; reviewEvidence?: string; sessionId?: string; basedOn?: string; cwd?: string; model?: string; status: "prepared" | "running" | "finished" | "cancelled"; at: number; callId?: string; cancelledByCall?: string; resultId?: string; previousStatus: TaskStatus; originalTask: string; originalInputs?: { result_id: string; field?: string; offset?: number; limit?: number }[]; structured?: boolean }[];
 	id: string;
 	title: string;
 	detail?: string;
@@ -27,6 +29,8 @@ export type BoardTask = {
 	acceptance?: string;
 	checks?: AcceptanceCheck[];
 	latestResult?: string;
+	/** Durable dispatch ownership; only that dispatch may settle this attempt. */
+	activeDispatch?: string;
 	verification?: TaskVerification;
 	review?: { resultId: string; verdict: "accepted" | "rework" | "blocked"; evidence: string; at: number };
 	notes: string[];
@@ -154,8 +158,10 @@ export function renderAssign(tasks: BoardTask[], updatedAt: number): string {
 		if (t.deps.length) lines.push(`- 依赖：${t.deps.join("、")}`);
 		if (t.acceptance) lines.push(`- 验收标准：${t.acceptance}`);
 		if (t.latestResult) lines.push(`- 最新结果：${t.latestResult}（终端 /result ${t.latestResult} 查看）`);
+		if (t.activeDispatch) lines.push(`- 当前派工：${t.activeDispatch}（执行与收尾由 Durable 管理）`);
 		if (t.verification) lines.push(`- 机器检查：${t.verification.passed ? "通过，仍需复核依据" : "未通过"}；${t.verification.checks.map((check) => `${check.name}：${check.passed ? "通过" : "失败"}（${check.evidence}）`).join("；")}`);
 		if (t.review) lines.push(`- 复核：${t.review.verdict} · ${t.review.evidence.replace(/\n+/g, " ")}`);
+		for (const recovery of t.recoveries?.slice(-3) ?? []) lines.push(`- 恢复：${recovery.action} → ${recovery.member} · ${recovery.status} · 原结果 ${recovery.fromResult ?? "无"} · ${recovery.note.replace(/\n+/g, " ")}`);
 		if (t.detail) lines.push(`- 说明：${t.detail.replace(/\n+/g, " ")}`);
 		if (t.changes.length) lines.push(`- 改动：${t.changes.map((c) => `#${c}`).join("、")}（终端 /changes 查看）`);
 		for (const n of t.notes.slice(-5)) lines.push(`- 记录：${n}`);
@@ -176,13 +182,13 @@ export function boardSummary(board: BoardState | undefined): string {
 	return (tasks.length > selected.length ? `共 ${tasks.length} 项，完成 ${tasks.filter((t) => t.status === "done").length} 项；显示最近活动与完成项。\n` : "") + selected
 		.map(
 			(t) =>
-				`- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title.slice(0, 160)}${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.parent ? ` ·属于 ${t.parent}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.slice(-3).map((c) => `#${c}`).join(",")}` : ""}`,
+				`- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title.slice(0, 160)}${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.parent ? ` ·属于 ${t.parent}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.latestResult ? ` ·结果 ${t.latestResult}` : ""}${t.recoveries?.length ? ` ·恢复 ${t.recoveries.at(-1)!.status}` : ""}${t.changes.length ? ` ·改动 ${t.changes.slice(-3).map((c) => `#${c}`).join(",")}` : ""}`,
 		)
 		.join("\n");
 }
 
 /** 派工时放在成员任务前面的上下文：共同目标 + 这项任务 + 分工全貌（成员据此理解自己在全局里的位置） */
-export function taskBrief(goal: string | undefined, board: BoardState | undefined, taskId: string | undefined): string {
+export function taskBrief(goal: string | undefined, board: BoardState | undefined, taskId: string | undefined, mode: "relevant" | "full" = "relevant"): string {
 	const parts: string[] = [];
 	if (goal) parts.push(`【项目最终目标（GOAL.md）】\n${goal}`);
 	const tasks = boardTasks(board).filter((t) => t.status !== "dropped");
@@ -193,6 +199,7 @@ export function taskBrief(goal: string | undefined, board: BoardState | undefine
 			[
 				`【你负责的任务】${task.id} · ${task.title}${task.role ? `（角色：${task.role}）` : ""}`,
 				task.acceptance ? `验收标准：${task.acceptance}` : "",
+				task.detail ? `任务说明：${task.detail}` : "",
 				task.checks?.length ? `机器验收规则（首次派工后锁定）：${JSON.stringify(task.checks)}` : "",
 				deps.length ? `前置任务：${deps.map((d) => `${d.id} ${d.title}（${STATUS_LABEL[d.status]}）`).join("；")}` : "",
 			]
@@ -201,8 +208,9 @@ export function taskBrief(goal: string | undefined, board: BoardState | undefine
 		);
 	}
 	if (tasks.length > 1) {
+		const selected = mode === "full" || !task ? tasks : tasks.filter((candidate) => candidate.id === task.id || task.deps.includes(candidate.id) || candidate.id === task.parent || candidate.deps.includes(task.id));
 		parts.push(
-			`【团队分工全貌】（只读；共 ${tasks.length} 项，较长时仅显示相关与活动任务；不要修改分工表）\n${(tasks.length > 20 ? [...tasks.filter((t) => t.id === taskId || task?.deps.includes(t.id)), ...tasks.filter((t) => t.id !== taskId && !task?.deps.includes(t.id) && (t.status === "doing" || t.status === "review"))].slice(0, 20) : tasks)
+			`【相关团队分工】（只读；共 ${tasks.length} 项，显示 ${Math.min(selected.length, 20)} 项；不要修改分工表）\n${selected.slice(0, 20)
 				.map((t) => `- ${t.id} [${STATUS_LABEL[t.status]}] ${t.title.slice(0, 120)}${t.owner ? ` — ${t.owner}` : ""}${t.id === taskId ? "  ← 你" : ""}`)
 				.join("\n")}`,
 		);

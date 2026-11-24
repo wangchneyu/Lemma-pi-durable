@@ -17,7 +17,7 @@ export interface OrchestratorModel {
 	info?: { type: string; modelId: string; host?: string; keySource: string };
 }
 
-function resolveKey(config: OrchestratorConfig): string | undefined {
+export function resolveOrchestratorKey(config: OrchestratorConfig): string | undefined {
 	for (const name of config.apiKeyEnv ?? []) {
 		const value = process.env[name];
 		if (value) return value;
@@ -88,14 +88,14 @@ export function createOrchestratorModel(config: OrchestratorConfig, catalogPath?
 			apiKey: {
 				name: "Orchestrator API key",
 				resolve: async () => {
-					const key = resolveKey(config);
+					const key = resolveOrchestratorKey(config);
 					return key ? { auth: { apiKey: key }, source: "Lemma config" } : undefined;
 				},
 			},
 		},
 		models: [...new Set([config.modelId, ...(config.modelIds ?? []), ...cached])].map((id) => ({ ...model, id, name: id })),
 		fetchModels: config.discoverModels ? async (context) => {
-			const key = resolveKey(config);
+			const key = resolveOrchestratorKey(config);
 			const endpoint = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 			const prefix = endpoint.pathname.endsWith("/") ? endpoint.pathname.slice(0, -1) : endpoint.pathname;
 			endpoint.pathname = `${prefix}${prefix.endsWith("/v1") ? "" : "/v1"}/models`;

@@ -70,11 +70,12 @@ try {
 	orch.faux.setResponses([
 		fauxAssistantMessage([fauxToolCall("plan_tasks", { tasks: [{ title: "验收失败不准完成" }] }, { id: "p5" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage([fauxToolCall("ask_claude", { task: "不能绕过失败", task_id: "T1" }, { id: "r5" })], { stopReason: "toolUse" }),
-		fauxAssistantMessage([fauxToolCall("update_task", { id: "T1", status: "done" }, { id: "d5" })], { stopReason: "toolUse" }),
+		fauxAssistantMessage([fauxToolCall("update_task", { id: "T1", status: "done", note: "尝试绕过失败检查" }, { id: "d5" })], { stopReason: "toolUse" }),
 		(ctx: any) => { rejectedDone = toolResults(ctx).at(-1)!.text; return fauxAssistantMessage(fauxText("保持未完成")); },
 	]);
 	await (await app.root.submit({ type: "input", content: "验证不能直接标成功" }, context)).wait(context);
-	assert.ok(rejectedDone.includes("不能把任务标为完成"));
+	assert.match(rejectedDone, /不能完成|未通过|没有成功/);
+	assert.notEqual((await app.harness.snapshot((await import("../src/board.ts")).Board, context))!.tasks.T1!.status, "done");
 	check(true, "验收失败时，调度无法直接把任务标完成来绕过检查");
 
 	config.autonomy.checks = [{ name: "长时间验收", command: "node", args: ["-e", "setTimeout(()=>{},30000)"] }];
@@ -92,5 +93,21 @@ try {
 	assert.ok(!app.jobs.running(job));
 	assert.equal(fakeCalls(config).length - cancellationCalls, 1);
 	check(true, "后台验收可取消，取消后不再自动派工修复");
+	config.autonomy.checks = [{ name: "prepare reassignment failure", command: "node", args: ["-e", "process.exit(1)"] }];
+	config.budget.perRunUsd = 3;
+	const tools = async (name: string, args: any) => { let reply: any; orch.faux.setResponses([fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" }), (request: any) => { reply = toolResults(request).at(-1); return fauxAssistantMessage(fauxText("OK")); }]); await (await app.root.submit({ type: "input", content: name }, context)).wait(context); assert(reply); return reply; };
+	await tools("plan_tasks", { tasks: [{ title: "保留代码成果换成员恢复", acceptance: "original acceptance retained" }] });
+	await tools("ask_claude", { task: "KEEP_CODE_ON_REASSIGN", task_id: "T2" });
+	const { Board } = await import("../src/board.ts");
+	const original = (await app.harness.snapshot(Board, context))!.tasks.T2!, originalChange = original.lastAttempt!.changeId!; assert(originalChange);
+	config.agents.codex.models = [{ id: "fixture-code", tier: "standard" }];
+	const beforeRecovery = fakeCalls(config).length;
+	config.autonomy.checks = [{ name: "one recovery repair passes", command: "node", args: ["-e", `if(require('fs').readFileSync(${JSON.stringify(join(repo, "calls.jsonl"))},'utf8').trim().split(String.fromCharCode(10)).length<${beforeRecovery + 2})process.exit(1)`] }];
+	const prepared = await tools("recover_task", { id: "T2", action: "reassign", member: "codex", note: "Continue existing code and correct remaining check" }); assert(!prepared.isError, prepared.text);
+	const plan = JSON.parse(prepared.text); assert.equal(plan.dispatch.based_on, originalChange);
+	const recovered = await tools("ask_codex", plan.dispatch); assert(!recovered.isError, recovered.text); assert(recovered.text.includes("自动修复 1/2"));
+	const task = (await app.harness.snapshot(Board, context))!.tasks.T2!; assert.equal(task.status, "review"); assert.equal(task.recoveries!.at(-1)!.status, "finished"); assert.equal(task.acceptance, "original acceptance retained"); assert.equal(fakeCalls(config).length - beforeRecovery, 2);
+	assert(app.changes.list().some((change) => change.basedOn === originalChange && change.verification?.passed));
+	check(true, "代码恢复换成员基于原工作分支，原生返工续接仍可通过验收，恢复计划最终收尾");
 	assert.equal(readFileSync(join(repo, "app.txt"), "utf8"), "original\n");
 } finally { await app.harness.close(context); }

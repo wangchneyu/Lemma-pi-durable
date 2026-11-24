@@ -4,6 +4,8 @@ import { editSettings, type SettingsDraft } from "./settings.ts";
 import { saveCredential } from "./credentials.ts";
 import { memberToolNames } from "./api-member.ts";
 import { toolSettingsCommand, TOOL_HELP } from "./tool-settings.ts";
+import { executionSettingsCommand, EXECUTION_HELP } from "./execution-settings.ts";
+import { mcpSettingsCommand, MCP_HELP } from "./mcp-settings.ts";
 
 export interface SettingQuestion { title: string; value?: string; secret?: boolean }
 export interface MemberSettingsHost {
@@ -24,9 +26,13 @@ export const MEMBER_HELP = [
 	"/setup  配置总控模型、API 地址与本机凭据",
 	"/agents  查看全部成员；/members 查看已运行的成员会话",
 	TOOL_HELP,
+	EXECUTION_HELP,
+	MCP_HELP,
 ].join("\n");
 
 export async function memberSettingsCommand(line: string, host: MemberSettingsHost): Promise<boolean> {
+	if (/^\/mcp(?:\s|$)/.test(line)) return mcpSettingsCommand(line, host);
+	if (/^\/limits(?:\s|$)/.test(line)) return executionSettingsCommand(line, host);
 	if (/^\/tool(?:\s|$)/.test(line)) return toolSettingsCommand(line, host);
 	if (!/^\/(?:agent|setup)(?:\s|$)/.test(line)) return false;
 	const [command, action = "help", suppliedId, ...extra] = line.trim().split(/\s+/);

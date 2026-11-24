@@ -130,7 +130,7 @@ export class JobHub extends EventEmitter {
 		const job = doc?.jobs[id];
 		if (!job) return "not_found";
 		if (job.status !== "running") return "not_running";
-		await this.harness!.abortTask(job.piTask as any, context);
+		await this.harness!.abortTask(Number(job.piTask) as any, context);
 		return "cancelled";
 	}
 

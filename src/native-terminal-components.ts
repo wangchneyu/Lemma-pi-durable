@@ -5,7 +5,7 @@ import {
 	getMarkdownTheme, getSelectListTheme, initTheme, type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { CURSOR_MARKER, getKeybindings, KeybindingsManager, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, type Component } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, getKeybindings, KeybindingsManager, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 initTheme("dark", false);
 // Native tool renderers read this action to display the configured expansion shortcut.
@@ -27,6 +27,32 @@ export { AssistantMessageComponent, UserMessageComponent, ToolExecutionComponent
 /** Keep only presentation hooks: tool execution is always owned by Pi Durable. */
 export function nativeToolRenderers(name: string, cwd: string): ToolRenderers {
 	const factory = { read: createReadToolDefinition, write: createWriteToolDefinition, edit: createEditToolDefinition, bash: createBashToolDefinition }[name];
+	if (name.startsWith("ask_") || ["plan_tasks", "update_task", "review_task", "recover_task", "read_result", "wait_jobs"].includes(name)) return {
+		renderCall(rawArgs, theme, context) {
+			const args = rawArgs && typeof rawArgs === "object" ? rawArgs as Record<string, unknown> : {};
+			const label = name.startsWith("ask_") ? `派工 → ${name.slice(4)}` : ({ plan_tasks: "任务规划", update_task: "更新任务", review_task: "验收任务", recover_task: "恢复任务", read_result: "读取成果", wait_jobs: "等待后台" }[name] ?? name);
+			const detail = args.task ?? args.id ?? args.result_id ?? (Array.isArray(args.tasks) ? `${args.tasks.length} 项任务` : "");
+			const summary = cleanText(String(detail)).replace(/\s+/g, " ");
+			const metadata = [args.task_id, args.model, args.background ? "后台" : undefined, args.session_id ? "续接" : undefined, args.action, args.field].filter(Boolean).map((value) => cleanText(String(value)).replace(/\s+/g, " "));
+			const text = theme.fg("toolTitle", label) + (metadata.length ? theme.fg("muted", ` · ${metadata.join(" · ")}`) : "");
+			return { render: (width) => [truncateToWidth(text, Math.max(1, width)), ...(summary ? [truncateToWidth(theme.fg("muted", summary), Math.max(1, width))] : []), ...(context.expanded ? new Text(cleanText(JSON.stringify(args, null, 2)), 0, 0).render(width) : [])], invalidate() {} };
+		},
+		renderResult(result, options, theme, context) {
+			const raw = result.content.filter((block) => block.type === "text").map((block) => "text" in block ? block.text : "").join("\n"), text = cleanText(raw);
+			if (options.expanded) return new Text(text, 0, 0);
+			let preview = text;
+			if (["recover_task", "review_task", "read_result"].includes(name)) try {
+				const value = JSON.parse(text);
+				if (name === "review_task") preview = `${value.task} · ${value.action}${value.verification ? ` · 机器检查${value.verification.passed ? "通过" : "未通过"}` : ""}\n${value.evidence ?? ""}`;
+				if (name === "recover_task" && value.recovery) preview = `${value.task} · ${value.recovery.action} → ${value.recovery.member} · ${value.recovery.status}\n${value.recovery.note}`;
+				if (name === "read_result" && typeof value.text === "string") preview = `${value.id}${value.field ? ` · ${value.field}` : ""} · ${value.offset}/${value.totalChars} 字符\n${value.text}`;
+			} catch { /* Plain failures remain visible. */ }
+			const lines = preview.split("\n"), shown = lines.slice(0, 10);
+			const changed = preview !== text || lines.length > shown.length;
+			const body = shown.join("\n") + (changed ? `\n${context.keyHint("app.tools.expand", "查看完整参数与结果")}` : "");
+			return new Text(theme.fg(context.isError ? "error" : "toolOutput", body), 0, 0);
+		},
+	};
 	if (!["read", "write", "edit", "bash"].includes(name) || !factory) return {};
 	const { renderCall, renderResult, renderShell } = factory(cwd);
 	return { renderCall, renderResult, renderShell } as ToolRenderers;

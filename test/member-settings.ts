@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { loadConfig } from "../src/config.ts";
 import { editSettings } from "../src/settings.ts";
@@ -68,6 +69,23 @@ try {
 	await memberSettingsCommand("/tool remove researcher lookup", host); assert.equal(config.agents.researcher.api!.httpTools!.length, 0);
 	assert.equal(app.harness, harness); assert.equal(app.root.id, rootId);
 	check(true, "业务工具向导：新增、凭据更新、重载与移除不重建运行时，不泄漏密钥");
+	let query = "", requests = 0; const server = createServer((req, res) => { requests++; query = new URL(req.url!, "http://fixture").searchParams.get("query") ?? ""; res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ value: 42 })); });
+	await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+	try {
+		const url = `http://127.0.0.1:${(server.address() as any).port}/records`;
+		answers = ["字段查询", url, "GET", "fields", "query", "string", "查询词", "yes", "-", ""];
+		await memberSettingsCommand("/tool add researcher fields_lookup", host); assert.equal(answers.length, 0);
+		assert.deepEqual(config.agents.researcher.api!.httpTools![0]!.parameters, { type: "object", properties: { query: { type: "string", description: "查询词" } }, required: ["query"], additionalProperties: false });
+		answers = ['{"query":"forty two"}']; await memberSettingsCommand("/tool test researcher fields_lookup", host); assert.equal(requests, 1); assert.equal(query, "forty two");
+		answers = ['{}']; await memberSettingsCommand("/tool test researcher fields_lookup", host); assert.equal(requests, 1);
+		answers = ["提交资料", url, "POST", '{"type":"object","properties":{}}', "-", ""]; await memberSettingsCommand("/tool add researcher submit_record", host);
+		await assert.rejects(memberSettingsCommand("/tool test researcher submit_record", host), /只运行 GET/); assert.equal(requests, 1);
+	} finally { server.closeAllConnections(); await new Promise<void>((done) => server.close(() => done())); }
+	answers = ["3", "2", "1", "2.5", "0.2"]; await memberSettingsCommand("/limits edit", host);
+	assert.deepEqual(loadConfig(file).execution, { maxConcurrent: 3, perMember: 2, perService: 1 }); assert.equal(config.budget.reservePerDispatchUsd, 0.2); assert.equal(config.budget.perRunUsd, 2.5);
+	await memberSettingsCommand("/limits", host);
+	const priorLimits = readFileSync(file, "utf8"); answers = ["0", "2", "1", "2.5", "0.2"]; await assert.rejects(memberSettingsCommand("/limits edit", host)); assert.equal(readFileSync(file, "utf8"), priorLimits);
+	check(true, "字段向导与 GET 实测无需模型，参数校验与 POST 保护有效，并发预算配置可重载");
 	answers = ["anthropic-compatible", "https://controller.invalid", "controller-model", "CONTROLLER_SECRET"];
 	await memberSettingsCommand("/setup", host);
 	assert.equal(loadConfig(file).orchestrator.modelId, "controller-model");

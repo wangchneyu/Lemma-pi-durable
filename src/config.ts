@@ -4,6 +4,7 @@ import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { validateBusinessTools, type HttpBusinessTool } from "./business-tools.ts";
+import { validateMcpGrants, type McpGrant } from "./mcp-tools.ts";
 
 /** claude / codex / gemini 是本机 CLI；deepseek 是 Pi 原生的 API 成员（Pi Durable 子对话 + 内置读写工具） */
 export type BuiltinAgentKind = "claude" | "codex" | "gemini" | "deepseek";
@@ -19,6 +20,7 @@ export const CLI_KINDS = ["claude", "codex", "gemini"] as const;
  * 用内置的 read / write / edit / bash 工具在（隔离的）工作目录里干活。
  */
 export interface ApiMemberConfig {
+	mcpServers?: McpGrant[];
 	httpTools?: HttpBusinessTool[];
 	/** Reference into the local credential store; never the secret itself. */
 	credential?: string;
@@ -128,11 +130,14 @@ export interface RoleConfig {
 }
 
 export interface BudgetConfig {
+	/** User-chosen estimate for parallel admission; zero disables reservations. */
+	reservePerDispatchUsd?: number;
 	/** 一次运行（你的一次输入）里成员花费的上限，美元；超过后不再派工。null 表示不限 */
 	perRunUsd: number | null;
 }
 
 export interface AppConfig {
+	execution?: { maxConcurrent?: number; perMember?: number; perService?: number };
 	/** Domain/controller guidance, shared by the terminal and web application. */
 	collaboration?: { instructions: string };
 	/** 命名会话的分工表目录；项目目标与规则仍从工作目录读取。 */
@@ -309,6 +314,9 @@ export function normalizeConfig(raw: Partial<AppConfig>, path = "pi-agent.config
 		if (merged.api) {
 			const api = merged.api;
 			validateBusinessTools(api.httpTools);
+			validateMcpGrants(api.mcpServers);
+			const toolNames = [...(api.tools ?? []), ...(api.httpTools ?? []).map((tool) => tool.id), ...(api.mcpServers ?? []).flatMap((grant) => grant.tools.map((tool) => `mcp_${grant.id}_${tool.name}`))];
+			if (new Set(toolNames).size !== toolNames.length) throw new Error("成员工具名称冲突，请调整连接或工具 ID。");
 			if (api.credential !== undefined && (typeof api.credential !== "string" || !/^local-[a-f0-9-]{36}$/.test(api.credential))) throw new Error(`成员 ${kind} 的本机凭据引用无效。`);
 			if (!["openai-compatible", "anthropic-compatible"].includes(api.type) || !["off", "allowlist", "all"].includes(api.bash)) throw new Error(`成员 ${kind} 的 API 协议或 bash 配置无效。`);
 			if (!Array.isArray(api.apiKeyEnv) || api.apiKeyEnv.some((key) => typeof key !== "string" || !key.trim()) || !Array.isArray(api.bashAllow) || api.bashAllow.some((entry) => typeof entry !== "string" || !entry.trim())) throw new Error(`成员 ${kind} 的 API 凭据与命令白名单需要字符串数组。`);
@@ -340,6 +348,9 @@ export function normalizeConfig(raw: Partial<AppConfig>, path = "pi-agent.config
 		web: { ...DEFAULTS.web, ...(raw.web ?? {}) },
 	};
 	if (config.collaboration && typeof config.collaboration.instructions !== "string") throw new Error("collaboration.instructions 需要为字符串。");
+	for (const value of Object.values(config.execution ?? {})) if (!Number.isSafeInteger(value) || value < 1 || value > 64) throw new Error("并发上限需要 1–64 的整数。");
+	if (config.budget.reservePerDispatchUsd !== undefined && (!Number.isFinite(config.budget.reservePerDispatchUsd) || config.budget.reservePerDispatchUsd < 0)) throw new Error("派工预算预留需要非负金额。");
+	if (config.budget.perRunUsd !== null && (!Number.isFinite(config.budget.perRunUsd) || config.budget.perRunUsd < 0)) throw new Error("每轮预算需要非负金额或 null。");
 	for (const [id, member] of Object.entries(agents)) {
 		if ((member.name !== undefined && (typeof member.name !== "string" || !member.name.trim())) || (member.instructions !== undefined && typeof member.instructions !== "string")) throw new Error(`成员 ${id} 的名称与指令需要为有效字符串。`);
 	}

@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineTool } from "@earendil-works/pi-durable";
 import { compile, unsafe, type Schema } from "@earendil-works/pi-schema";
 import { readCredential } from "./credentials.ts";
+import { Operations, unresolved, type BusinessFailure, type OperationResult } from "./operations.ts";
 
 /** Fixed endpoints configured locally; models supply business arguments only. */
 export interface HttpBusinessTool {
@@ -36,10 +38,12 @@ export function validateBusinessTools(tools: HttpBusinessTool[] | undefined): vo
 	}
 }
 
-export async function callBusinessTool(tool: HttpBusinessTool, args: Record<string, unknown>, signal: AbortSignal, key: string): Promise<{ text: string; isError: boolean }> {
-	if (!compile(tool.parameters).check(args)) return { text: "业务工具参数不符合已配置的 JSON Schema，未发送请求。", isError: true };
+export async function callBusinessTool(tool: HttpBusinessTool, args: Record<string, unknown>, signal: AbortSignal, key: string): Promise<OperationResult> {
+	const fail = (kind: BusinessFailure["kind"], message: string, retryable = false, retryAt?: number): OperationResult => ({ text: message, isError: true, failure: { kind, message, retryable, ...(retryAt !== undefined ? { retryAt } : {}) } });
+	if (!compile(tool.parameters).check(args)) return fail("validation", "业务工具参数不符合已配置的 JSON Schema，未发送请求。");
+	if (signal.aborted) return fail("cancelled", "业务请求已取消，未发送请求。");
 	const secret = (tool.auth?.env ? process.env[tool.auth.env] : undefined) || readCredential(tool.auth?.credential);
-	if (tool.auth && !secret) return { text: "业务工具缺少凭据；请在终端配置，未发送请求。", isError: true };
+	if (tool.auth && !secret) return fail("authentication", "业务工具缺少凭据；请在终端配置，未发送请求。");
 	const redact = (value: string) => secret ? value.split(secret).join("[REDACTED]") : value;
 	const headers: Record<string, string> = { Accept: "application/json" };
 	if (secret) headers.Authorization = `Bearer ${secret}`;
@@ -47,7 +51,7 @@ export async function callBusinessTool(tool: HttpBusinessTool, args: Record<stri
 	if (tool.method === "POST" && tool.idempotencyHeader) headers[tool.idempotencyHeader] = createHash("sha256").update(key).digest("hex");
 	const url = new URL(tool.url);
 	if (tool.method === "GET") for (const [name, value] of Object.entries(args)) {
-		if (!["string", "number", "boolean"].includes(typeof value)) return { text: "GET 查询参数只支持字符串、数字和布尔值。", isError: true };
+		if (!["string", "number", "boolean"].includes(typeof value)) return fail("validation", "GET 查询参数只支持字符串、数字和布尔值。");
 		url.searchParams.set(name, String(value));
 	}
 	try {
@@ -55,12 +59,21 @@ export async function callBusinessTool(tool: HttpBusinessTool, args: Record<stri
 		const reader = response.body?.getReader();
 		const chunks: Uint8Array[] = []; let size = 0; let oversized = false;
 		if (reader) try { while (true) { const chunk = await reader.read(); if (chunk.done) break; size += chunk.value.byteLength; if (size > 131072) { oversized = true; await reader.cancel(); break; } chunks.push(chunk.value); } } finally { reader.releaseLock(); }
-		if (oversized) return { text: JSON.stringify({ status: response.status, error: "响应超过 128 KiB，未将不完整数据当作结果；请缩小查询范围。" }), isError: true };
+		if (oversized) return fail(tool.method === "POST" ? "outcome_unknown" : "response_invalid", "响应超过 128 KiB，未将不完整数据当作结果；POST 远端操作状态未知，请先核对。");
 		const body = redact(Buffer.concat(chunks).toString("utf8"));
 		const limit = tool.maxResultChars ?? 8000;
-		return { text: JSON.stringify({ status: response.status, body: body.slice(0, limit), truncated: body.length > limit }), isError: !response.ok };
+		const text = JSON.stringify({ status: response.status, body: body.slice(0, limit), truncated: body.length > limit });
+		if (response.ok) return { text, isError: false };
+		if ([401, 403].includes(response.status)) return { ...fail("authentication", "接口认证或权限失败，请修正凭据后再继续。"), text };
+		if (tool.method === "POST" && (response.status >= 500 || response.status === 408)) return { ...fail("outcome_unknown", "外部操作返回服务端错误或超时，远端状态未知，请先核对。"), text };
+		if (response.status === 429 || response.status === 503) {
+			const header = response.headers.get("retry-after");
+			const at = header ? /^\d+$/.test(header) ? Date.now() + Number(header) * 1000 : Date.parse(header) : NaN;
+			return { ...fail(response.status === 429 ? "rate_limit" : "temporary", "接口暂时不可用，等待后可重试查询；不自动重复外部写操作。", tool.method === "GET", Number.isFinite(at) ? Math.max(Date.now(), at) : undefined), text };
+		}
+		return { ...fail(response.status >= 500 || response.status === 408 ? "temporary" : "rejected", "接口拒绝请求，请按错误修正后继续。", tool.method === "GET" && response.status >= 500), text };
 	} catch {
-		return { text: signal.aborted ? "业务请求已取消。" : tool.method === "POST" ? "业务请求失败或超时，远端操作状态未知；请先核对，勿盲目重试。" : "业务请求失败或超时。", isError: true };
+		return tool.method === "POST" ? fail("outcome_unknown", "业务请求失败、取消或超时，远端操作状态未知；请先核对，勿盲目重试。") : fail(signal.aborted ? "cancelled" : "temporary", signal.aborted ? "业务请求已取消。" : "业务请求失败或超时，可稍后重试查询。", !signal.aborted);
 	}
 }
 
@@ -72,8 +85,27 @@ export function createBusinessTools(member: string, tools: HttpBusinessTool[] = 
 		execute: async (args, api, context) => {
 			// Conversation/task IDs are only unique inside one database. Memoize a globally unique key.
 			const requestKey = await api.memo("http-request-key", randomUUID(), context);
+			const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical((value as Record<string, unknown>)[key])])) : value;
+			const argumentsHash = createHash("sha256").update(JSON.stringify(canonical(args))).digest("hex");
+			const blocked = await api.commit(async (tx) => {
+				const operations = (await tx.doc(Operations)).operations;
+				const own = operations[requestKey];
+				if (own?.result) return { result: JSON.parse(JSON.stringify(own.result)) as OperationResult };
+				const uncertain = Object.values(operations).find((entry) => entry.method === "POST" && entry.endpoint === tool.url && ((unresolved(entry) && (entry.id !== requestKey || !tool.idempotencyHeader)) || (entry.argumentsHash === argumentsHash && entry.resolution?.outcome === "succeeded")));
+				if (tool.method === "POST" && uncertain) return { result: { text: `外部操作 ${uncertain.id} 状态待核对或已确认成功，禁止重复提交。终端 /operations 查看并人工核对远端状态。`, isError: true, failure: { kind: "outcome_unknown", message: "外部操作需要先核对远端结果。", retryable: false } } as OperationResult };
+				const cooldown = Object.values(operations).find((entry) => entry.endpoint === tool.url && entry.result?.failure?.retryAt && entry.result.failure.retryAt > api.now());
+				if (cooldown) return { result: { text: `接口正在限流等待，请在 ${new Date(cooldown.result!.failure!.retryAt!).toISOString()} 后重试。`, isError: true, failure: JSON.parse(JSON.stringify(cooldown.result!.failure)) } as OperationResult };
+				if (!own) operations[requestKey] = { id: requestKey, member, tool: tool.id, method: tool.method, endpoint: tool.url, argumentsHash, taskId: String(api.taskId), conversationId: String(api.conversationId), status: "pending", createdAt: api.now(), updatedAt: api.now() };
+				return null;
+			}, context);
+			if (blocked) return { output: [{ type: "text" as const, text: JSON.stringify({ ...blocked.result, operationId: requestKey }) }], isError: blocked.result.isError };
 			const result = await callBusinessTool(tool, args, context.abortSignal ?? new AbortController().signal, `${requestKey}:${member}:${tool.id}`);
-			return { output: [{ type: "text" as const, text: result.text }], isError: result.isError };
+			await api.commit(async (tx) => {
+				const operation = (await tx.doc(Operations)).operations[requestKey]!;
+				operation.status = result.failure?.kind === "outcome_unknown" ? "unknown" : result.isError ? "failed" : "succeeded";
+				operation.result = result; operation.updatedAt = api.now();
+			}, BACKGROUND_CONTEXT);
+			return { output: [{ type: "text" as const, text: JSON.stringify({ ...result, operationId: requestKey }) }], isError: result.isError };
 		},
 	}));
 }

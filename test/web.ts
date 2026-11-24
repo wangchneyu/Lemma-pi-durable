@@ -13,7 +13,7 @@ const port = 8799;
 const base = `http://127.0.0.1:${port}`;
 writeFileSync(join(dir, "config.json"), JSON.stringify({ workdir: dir, storage: join(dir, "session.sqlite") }));
 
-const terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("../src/main.ts", import.meta.url)), "--demo"], {
+const terminal = spawn(process.execPath, ["--no-warnings", fileURLToPath(new URL("./faux-main.ts", import.meta.url))], {
 	env: { ...process.env, PI_AGENT_CONFIG: join(dir, "config.json"), PI_AGENT_PORT: String(port), FAKE_AGENT_DELAY_MS: "600", NO_PROXY: "*" },
 	stdio: ["pipe", "pipe", "inherit"],
 });
@@ -44,7 +44,7 @@ try {
 	check(terminalOutput.includes(`后台网页：`) && terminalOutput.includes(String(port)), "终端横幅里显示后台地址");
 
 	const state = await json("/api/state");
-	check(state.demo === true && state.agents.length === 4 && state.agents.every((a: any) => a.available), "/api/state 返回演示模式和四个可用成员");
+	check(state.demo === undefined && state.agents.length === 4 && state.agents.every((a: any) => a.available), "/api/state 返回四个可用成员且不含演示模式标志");
 	const dsInfo = state.agents.find((a: any) => a.kind === "deepseek");
 	check(dsInfo?.api?.host === "api.deepseek.com" && /PI_AGENT_DEMO_KEY/.test(dsInfo.api.keySource) && !JSON.stringify(dsInfo).includes("demo-placeholder"), "DeepSeek 显示接入地址和密钥来源，不含密钥");
 	check(state.orchestrator.keySource && !JSON.stringify(state).match(/sk-|token"/i), "配置信息只给出密钥来源，不含密钥");

@@ -3,5 +3,11 @@ Object.defineProperty(process.stdin, "isTTY", { value: true });
 Object.defineProperty(process.stdout, "isTTY", { value: true });
 Object.defineProperty(process.stdout, "columns", { value: 110 });
 Object.defineProperty(process.stdout, "rows", { value: 30 });
-await import("../src/main.ts");
+if (process.argv.includes("--faux")) {
+	const { runFauxMain } = await import("./faux-main.ts");
+	await runFauxMain();
+} else {
+	const { startMain } = await import("../src/main.ts");
+	await startMain();
+}
 export {};

@@ -10,6 +10,7 @@ import {
 	ScrollView,
 	Text,
 	truncateToWidth,
+	visibleWidth,
 	TuiAltScreen,
 	VStack,
 	type Component,
@@ -27,17 +28,25 @@ import {
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { TerminalConversationView, TerminalItem, TerminalTool } from "./terminal-state.ts";
 import type { NativeModelCatalog } from "./model-selection.ts";
+import { conversationWelcome, terminalLabel, terminalRow } from "./terminal-layout.ts";
 export const TERMINAL_COMMANDS = [
 	["agents", "成员和模型"],
 	["agent", "add / edit / show / enable / disable / model / key 成员配置"],
 	["setup", "引导配置总控模型、接口与凭据"],
-	["tool", "list / add / edit / key / remove 成员业务工具"],
+	["tool", "list / add / edit / key / remove / test 成员业务工具"],
+	["limits", "查看并发和预算；edit 引导修改限制"],
+	["progress", "运行、排队与预留；定位等待原因"],
+	["mcp", "add / refresh / remove / list 成员 MCP 只读工具"],
 	["help", "终端操作与成员配置命令"],
+	["history", "加载当前对话更早的记录，不调用模型"],
+	["thinking", "展开或收起模型返回的思考记录"],
 	["web", "后台网页"],
 	["usage", "用量"],
 	["goal", "项目目标"],
 	["tasks", "分工表"],
+	["task", "inspect / resume / supply / reassign / cancel 受阻任务恢复"],
 	["result", "按 result_id 分页查看完整成员结果，不调用模型"],
+	["operations", "查看业务操作；resolve 人工核对未知远端状态"],
 	["rules", "共同规则"],
 	["jobs", "后台任务"],
 	["queue", "排到下一轮"],
@@ -77,17 +86,35 @@ class SettingsInput extends Input {
 	}
 }
 class Line implements Component {
-	private readonly value: () => string;
-	constructor(value: () => string) {
+	private readonly value: (width: number) => string;
+	constructor(value: (width: number) => string) {
 		this.value = value;
 	}
 	render(width: number): string[] {
-		return [truncateToWidth(this.value(), Math.max(1, width))];
+		return [truncateToWidth(this.value(width), Math.max(1, width))];
 	}
 	invalidate(): void {}
 }
+/** Observe native scroll boundaries without intercepting its keyboard, mouse or selection input. */
+class HistoryScrollView extends ScrollView {
+	private readonly onReachStart: () => void;
+	constructor(component: Component, onReachStart: () => void) {
+		super(component, { follow: "end", primary: true, scrollbar: "auto" });
+		this.onReachStart = onReachStart;
+	}
+	override updateLayout(height: number, viewport: number, requestRender: () => void): void {
+		super.updateLayout(height, viewport, requestRender);
+		if (!this.isFollowingEnd && this.scrollTop <= this.viewportHeight) this.onReachStart();
+	}
+}
 /** Isolate input history without replacing Editor or using private framework fields. */
 class ConversationEditor extends CustomEditor {
+	caption: () => string = () => "输入消息";
+	override renderTopBorder(width: number, hiddenLineCount: number): string {
+		if (hiddenLineCount > 0 || width < 24) return super.renderTopBorder(width, hiddenLineCount);
+		const label = truncateToWidth(` ${this.caption()} `, Math.max(1, width - 4));
+		return this.borderColor("──" + label + "─".repeat(Math.max(0, width - visibleWidth(label) - 2)));
+	}
 	private histories = new Map<string, string[]>();
 	private key = "";
 	private browsing = -1;
@@ -179,7 +206,6 @@ export interface TerminalStatus {
 export interface TerminalBinding {
 	workdir: string;
 	model: string;
-	demo: boolean;
 	web?: string;
 	session?: string;
 	conversationId?: string;
@@ -213,7 +239,7 @@ export class AgentTerminal {
 	private options: AgentTerminalOptions;
 	private readonly transcript = new Container();
 	private readonly notices = new Container();
-	private readonly partial = safeNativeComponent(new AssistantMessageComponent(undefined, true));
+	private readonly partial = safeNativeComponent(new AssistantMessageComponent(undefined, false));
 	private readonly liveTools = new Container();
 	private readonly taskPanel = new Text("", 1, 0);
 	private readonly scroll: ScrollView;
@@ -227,17 +253,24 @@ export class AgentTerminal {
 	private tasks: TerminalTask[] = [];
 	private tasksVisible = false;
 	private toolsExpanded = false;
-	private thinkingHidden = true;
+	private thinkingHidden = false;
 	private picker?: OverlayHandle;
 	private disposePicker?: () => void;
 	private size = 0;
 	private stopped = false;
 	private started = false;
 	private lastUser?: number;
+	private unread = 0;
+	private seenEntries = new Set<number>();
+	private newestEntry = -Infinity;
+	private readonly messageFrames = new Map<string, Container>();
+	private readonly failure = new Text("", 1, 0);
+	private historyRequest?: object;
+	private historyAutoBlocked = false;
 	constructor(options: AgentTerminalOptions) {
 		this.options = options;
 		this.binding = { ...options };
-		this.tui = new TuiAltScreen(options.terminal ?? new ProcessTerminal(), true, undefined, { mouse: false });
+		this.tui = new TuiAltScreen(options.terminal ?? new ProcessTerminal(), true, undefined, { mouse: true, wheelScrollLines: "auto" });
 		this.editor = new ConversationEditor(
 			this.tui,
 			{ borderColor: c.cyan, selectList: selectTheme },
@@ -245,27 +278,36 @@ export class AgentTerminal {
 			{ paddingX: 1, autocompleteMaxVisible: 5 },
 		);
 		(this.editor as CustomEditor).onAction("app.model.select", () => options.onModels?.());
+		(this.editor as ConversationEditor).caption = () => this.readOnly ? "只读浏览 · /main 返回总控" : this.status.busy ? "补充本轮要求 · Ctrl+C 中止" : "输入消息 · / 查看命令";
 		this.editor.onSubmit = (text) => {
 			if (this.stopped || !text.trim()) return;
 			this.editor.addToHistory(text);
 			this.scroll.scrollToEnd();
+			this.unread = 0;
 			options.onSubmit(text);
 		};
 		const document = new Container();
+		document.addChild(new Line(() => c.dim(this.view?.history?.loading ? " 正在加载更早记录…" : this.view?.history?.hasEarlier ? " 向上滚动加载更早记录 · /history" : this.view?.items.length ? " 已到对话开头" : "")));
+		document.addChild({ render: (width) => !this.view?.items.length && !this.status.busy && !this.view?.live.partial && !this.view?.live.runFailure && !(this.view?.tools ?? this.view?.live.tools)?.length ? conversationWelcome(width, this.readOnly) : [], invalidate() {} });
 		document.addChild(this.transcript);
+		document.addChild({ render: (width) => this.view?.live.partial || this.view?.partialMessage?.content.some((block) => block.type === "thinking") ? [truncateToWidth(c.dim(this.readOnly ? " 成员 · 正在回答" : " Lemma · 正在回答"), Math.max(1, width))] : [], invalidate() {} });
 		document.addChild(this.partial);
 		document.addChild(this.liveTools);
 		document.addChild(this.notices);
-		this.scroll = new ScrollView(document, { follow: "end", primary: true, scrollbar: "hidden" });
+		document.addChild(this.failure);
+		this.scroll = new HistoryScrollView(document, () => {
+			if (!this.historyAutoBlocked && !this.historyRequest && this.view?.history?.hasEarlier && !this.view.history.loading)
+				queueMicrotask(() => { if (!this.stopped && !this.historyAutoBlocked && !this.scroll.isFollowingEnd && this.scroll.scrollTop <= this.scroll.viewportHeight) void this.loadEarlier(); });
+		});
 		this.tui.setLayoutRoot(
 			new VStack([
 				{
-					component: new Line(() => {
+					component: new Line((width) => {
 						const b = this.binding;
-						return (
+						return terminalRow(
 							c.cyan(
-								` Lemma${b.demo ? " · 演示模式" : ""}${b.session ? ` · ${plain(b.session)}` : ""}${b.conversationId ? ` · ${plain(b.conversationLabel ?? "总控 CID")}:${plain(b.conversationId)}` : ""}`,
-							) + c.dim(`  ${plain(b.model)}`)
+								` Lemma${b.session ? ` · ${terminalLabel(b.session)}` : ""}${b.conversationId ? ` · ${terminalLabel(b.conversationLabel ?? "总控 CID")}:${terminalLabel(b.conversationId)}` : ""}`,
+							), c.dim(terminalLabel(b.model)), width
 						);
 					}),
 					shrink: 0,
@@ -273,7 +315,7 @@ export class AgentTerminal {
 				{
 					component: new Line(() =>
 						c.dim(
-							` ${plain(this.binding.workdir)}${this.binding.web ? `  后台：${plain(this.binding.web)}` : ""}`,
+							` ${terminalLabel(this.binding.workdir, 500)}${this.binding.web ? `  后台网页：${terminalLabel(this.binding.web, 200)}` : ""}`,
 						),
 					),
 					shrink: 0,
@@ -286,14 +328,10 @@ export class AgentTerminal {
 					shrink: 1,
 					visible: ({ height }) => this.tasksVisible && height >= 14,
 				},
-				{ component: new Line(() => this.statusLine()), shrink: 0 },
+				{ component: new Line((width) => this.statusLine(width)), shrink: 0 },
 				{ component: this.editor, maxSize: 9, minSize: 3 },
 				{
-					component: new Line(() =>
-						c.dim(
-							" Enter 发送 · Ctrl+K 会话 · Alt+C 树 · Ctrl+L 模型 · Ctrl+T 任务 · Ctrl+E 工具 · Alt+T 思考",
-						),
-					),
+					component: new Line((width) => this.helpLine(width)),
 					shrink: 0,
 					visible: ({ height }) => height >= 10,
 				},
@@ -313,6 +351,7 @@ export class AgentTerminal {
 				options.onConversations();
 				return { consume: true };
 			}
+			if (matchesKey(data, "alt+end")) { this.scroll.scrollToEnd(); this.unread = 0; this.tui.requestRender(); return { consume: true }; }
 			if (matchesKey(data, "alt+c") && options.onTree) { options.onTree(); return { consume: true }; }
 			if (matchesKey(data, "ctrl+t")) {
 				this.toggleTasks();
@@ -324,10 +363,7 @@ export class AgentTerminal {
 				return { consume: true };
 			}
 			if (matchesKey(data, "alt+t")) {
-				this.thinkingHidden = !this.thinkingHidden;
-				this.partial.setHideThinkingBlock(this.thinkingHidden);
-				for (const card of this.cards.values()) if (card instanceof AssistantMessageComponent) card.setHideThinkingBlock(this.thinkingHidden);
-				this.tui.requestRender();
+				this.toggleThinking();
 				return { consume: true };
 			}
 			if (matchesKey(data, "ctrl+o") && options.onSessionNext) {
@@ -353,6 +389,9 @@ export class AgentTerminal {
 		if (this.stopped) return;
 		this.closePicker();
 		this.binding = { ...binding };
+		this.historyRequest = undefined;
+		this.historyAutoBlocked = false;
+		this.tui.resetTextSelection();
 		this.transcript.clear();
 		this.notices.clear();
 		this.partial.updateContent(assistantMessage(""));
@@ -363,6 +402,7 @@ export class AgentTerminal {
 		this.size = 0;
 		this.view = undefined;
 		this.lastUser = undefined;
+		this.unread = 0; this.seenEntries.clear(); this.newestEntry = -Infinity; this.messageFrames.clear(); this.failure.setText("");
 		this.tasks = [];
 		this.status = { busy: false, jobs: [], spent: 0, budget: null, pending: 0 };
 		(this.editor as ConversationEditor).bindHistory(`${binding.session ?? ""}:${binding.conversationId ?? ""}`);
@@ -372,12 +412,52 @@ export class AgentTerminal {
 		this.scroll.scrollToEnd();
 		this.tui.requestRender();
 	}
-	private statusLine(): string {
+	private get readOnly(): boolean { return this.binding.conversationLabel?.includes("只读") ?? false; }
+	private helpLine(width: number): string {
+		if (!this.scroll.isFollowingEnd) return c.yellow(` 正在翻阅${this.unread ? ` · ${this.unread} 条新内容` : ""} · Alt+End 回到最新`);
+		if (this.readOnly) return c.dim(" 只读 · /main 返回总控 · PgUp/PgDn 翻阅 · Ctrl+K 会话");
+		return c.dim(width < 54 ? " 滚轮翻阅 · Alt+T 思考 · /help" : width < 100 ? " Enter 发送 · 滚轮/PgUp 翻阅 · Alt+T 思考 · /help" : " Enter 发送 · Ctrl+J 换行 · 滚轮/PgUp/PgDn 翻阅 · Alt+T 思考 · Ctrl+K 会话 · /help");
+	}
+	toggleThinking(): void {
+		this.thinkingHidden = !this.thinkingHidden;
+		this.partial.setHideThinkingBlock(this.thinkingHidden);
+		for (const card of this.cards.values()) if (card instanceof AssistantMessageComponent) card.setHideThinkingBlock(this.thinkingHidden);
+		this.tui.flash(`思考记录：${this.thinkingHidden ? "已折叠" : "已展开"} · Alt+T 切换`);
+		this.tui.requestRender();
+	}
+	async loadEarlier(): Promise<void> {
+		const history = this.view?.history;
+		if (this.stopped || this.historyRequest || history?.loading || !history?.hasEarlier) return;
+		const request = this.historyRequest = {};
+		this.historyAutoBlocked = false;
+		const first = this.transcript.children[0];
+		try {
+			await history.loadEarlier();
+			if (this.stopped || this.historyRequest !== request) return;
+			if (first && !this.scroll.isFollowingEnd) {
+				const index = this.transcript.children.indexOf(first);
+				if (index > 0) {
+					const width = this.scroll.getContentWidth(this.tui.terminal.columns);
+					const added = this.transcript.children.slice(0, index).reduce((sum, child) => sum + child.render(width).length, 0);
+					const top = this.scroll.scrollTop;
+					this.tui.renderNow();
+					this.scroll.scrollTo(top + added, { disableFollow: true });
+				}
+			}
+		} catch (error) {
+			if (!this.stopped && this.historyRequest === request) { this.historyAutoBlocked = true; this.tui.flash(`历史加载失败，可 /history 重试：${plain(error, 120)}`); }
+		} finally { if (this.historyRequest === request) this.historyRequest = undefined; }
+		this.tui.requestRender();
+	}
+	private statusLine(width: number): string {
 		const s = this.status,
 			label = this.binding.conversationLabel?.includes("只读") ? "子对话" : "总调度",
-			state = s.busy ? c.yellow(`${label}运行中`) : c.green(`${label}空闲`),
+			state = this.view?.live.retry ? c.yellow(`${label}重试等待`) : s.busy ? c.yellow(`${label}运行中`) : this.readOnly ? c.dim("子对话只读") : this.view?.live.runFailure ? c.red("本轮未完成") : c.green(`${label}空闲`),
 			budget = `$${s.spent.toFixed(3)}${s.budget === null ? "" : ` / $${s.budget.toFixed(2)}`}`;
-		return ` ${state} · 成员 ${budget} · 待合并 ${s.pending}${s.jobs.length ? ` · 后台 ${s.jobs.map(terminalText).join(" / ")}` : " · 后台无任务"}`;
+		const tools = (this.view?.tools ?? this.view?.live.tools ?? []).filter((tool) => !["done", "error", "aborted", "interrupted"].includes(tool.status)), queued = tools.filter((tool) => ["waiting", "sleeping", "pending"].includes(tool.status)).length;
+		const inbox = this.view?.live.inbox.length ?? 0;
+		const activity = `${tools.length ? ` · 工具 ${tools.length}${queued ? `（等待 ${queued}）` : ""}` : ""}${inbox ? ` · 待处理消息 ${inbox}` : ""}${s.jobs.length ? ` · 后台 ${s.jobs.map((job) => terminalLabel(job)).join(" / ")}` : ""}`;
+		return terminalRow(` ${state}${activity}`, `成员 ${budget} · 待合并 ${s.pending}`, width);
 	}
 	start(): void {
 		if (this.started || this.stopped) return;
@@ -392,7 +472,7 @@ export class AgentTerminal {
 		this.blocks.push({ component, size: safe.length });
 		this.size += safe.length;
 		this.notices.addChild(component);
-		this.scroll.scrollToEnd();
+		if (!this.scroll.isFollowingEnd) this.unread++;
 		while (this.blocks.length > 60 || this.size > 30_000) {
 			const first = this.blocks.shift()!;
 			this.size -= first.size;
@@ -413,15 +493,16 @@ export class AgentTerminal {
 	setModel(model: string): void { this.binding.model = model; this.tui.requestRender(); }
 	applyConversation(view: TerminalConversationView): void {
 		if (this.stopped) return;
-		const retained: TerminalItem[] = [];
-		let size = 0;
-		for (const item of view.items.slice(-250).reverse()) {
-			const next = JSON.stringify(item).length;
-			if (retained.length && size + next > 120_000) break;
-			retained.unshift(item);
-			size += next;
-		}
+		const retained = view.items;
+		const newest = this.newestEntry;
 		this.view = { ...view, items: retained };
+		const fresh = retained.filter((item) => item.id > newest && !this.seenEntries.has(item.id));
+		for (const item of fresh) this.newestEntry = Math.max(this.newestEntry, item.id);
+		if (!this.scroll.isFollowingEnd) this.unread += fresh.length; else this.unread = 0;
+		this.seenEntries = new Set(retained.map((item) => item.id));
+		const failure = view.live.runFailure;
+		const next = failure && ["interrupted", "turn_limit", "aborted"].includes(failure.reason) ? "/continue 续跑 · /tasks 查看成果" : failure?.reason === "model_error" || failure?.reason === "no_model" ? "/model 检查模型 · /help 查看操作" : "/tasks 查看成果 · /help 查看操作";
+		this.failure.setText(failure && !view.live.busy ? c.red(`本轮未完成 · ${plain(failure.reason, 80)}`) + (failure.detail ? `\n${plain(failure.detail, 220)}` : "") + c.dim(`\n${next} · 记录已保留`) : "");
 		const lastUser = retained.findLast((item) => item.type === "user")?.id;
 		if (lastUser !== undefined && lastUser !== this.lastUser) {
 			// New committed input starts the next interaction, without old command output below it.
@@ -466,7 +547,11 @@ export class AgentTerminal {
 			this.cards.set(key, card!);
 			this.renderedItems.set(card!, item);
 			used.add(key);
-			children.push(card!);
+			if (item.type === "user" || (item.type === "assistant" && (item.text || item.error || item.message?.role === "assistant" && item.message.content.some((block) => block.type === "thinking")))) {
+				let frame = this.messageFrames.get(key);
+				if (!frame) { frame = new Container(); frame.addChild(new Text(item.type === "user" ? c.cyan(this.readOnly ? "收到的任务" : "你") : c.dim(this.readOnly ? "成员" : "Lemma"), 1, 0)); frame.addChild(card!); this.messageFrames.set(key, frame); }
+				children.push(frame);
+			} else children.push(card!);
 		};
 		const updateTool = (card: ToolExecutionComponent, result: Extract<TerminalItem, { type: "tool" }> | undefined, active: TerminalTool | undefined) => {
 			const signature = JSON.stringify([result, active, this.toolsExpanded]);
@@ -521,6 +606,7 @@ export class AgentTerminal {
 				tool(`result:${item.id}`, item.callId, item.name, {}, item);
 		}
 		for (const key of this.cards.keys()) if (!used.has(key)) this.cards.delete(key);
+		for (const key of this.messageFrames.keys()) if (!used.has(key)) this.messageFrames.delete(key);
 		if (
 			children.length !== this.transcript.children.length ||
 			children.some((child, index) => this.transcript.children[index] !== child)

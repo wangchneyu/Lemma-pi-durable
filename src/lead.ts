@@ -7,6 +7,8 @@ import { AssistantEntry, configure, defineTool, type EntryRecord, type JsonObjec
 import { obj, opt, str } from "@earendil-works/pi-schema";
 import { commitBoard, defined, checkBudget, type DispatchDeps } from "./dispatch.ts";
 import { clip, Jobs, type JobsState } from "./jobs.ts";
+import { Results, storeResult } from "./results.ts";
+import { verifyReport } from "./acceptance.ts";
 
 /** 子调度的提交 requestId 前缀：由它开始的运行不重置花费（仍算用户那一轮） */
 export const LEAD_REQUEST_PREFIX = "pi-agent:lead:";
@@ -75,7 +77,7 @@ export function createLeadTool(deps: DispatchDeps): ToolRegistration {
 		execute: async (args: { goal: string; name?: string; scope?: string; task_id?: string }, api, context) => {
 			const name = (args.name ?? "子调度").trim().slice(0, 24) || "子调度";
 			const io = {
-				commit: <T>(change: (tx: any) => T | Promise<T>) => api.commit(change, context),
+				commit: <T>(change: (tx: any) => T | Promise<T>) => api.commit(change, BACKGROUND_CONTEXT),
 				now: () => api.now(),
 				output: (chunk: string) => api.output(chunk),
 				callId: api.callId,
@@ -86,6 +88,9 @@ export function createLeadTool(deps: DispatchDeps): ToolRegistration {
 				details: (v: JsonObject) => api.details(v, context),
 			};
 			const fail = (text: string) => ({ output: [{ type: "text" as const, text }], isError: true });
+			const resultId = `lead:${api.taskId}`;
+			const saved = (await api.snapshot(Results, api.conversationId, resultId, context))?.result;
+			if (saved) return { output: [{ type: "text" as const, text: saved.text + `\n\n[result_id: ${resultId}]` }], isError: saved.status !== "done" };
 			const over = await checkBudget(io as any, config);
 			if (over) return fail(over);
 			if (args.task_id) {
@@ -109,20 +114,24 @@ export function createLeadTool(deps: DispatchDeps): ToolRegistration {
 			await api.details({ conversationId: childId, name, goal: clip(args.goal, 200), ...(args.task_id ? { taskId: args.task_id } : {}) }, context);
 			api.output(`🧭 子调度「${name}」开始：${clip(args.goal, 100)}\n`);
 			if (args.task_id) {
-				await commitBoard(project, io as any, (b) => {
+				const { result: refusal } = await commitBoard(project, io as any, (b) => {
 					const t = b.tasks[args.task_id!];
-					if (!t || t.status === "done") return;
+					if (!t || t.status === "done" || t.status === "dropped") return "任务已结束或不存在。";
+					if (t.activeDispatch && t.activeDispatch !== api.callId) return "该任务已有派工执行。";
+					if (t.deps.some((id) => b.tasks[id]?.status !== "done")) return "前置任务尚未验收。";
 					t.status = "doing";
+					t.activeDispatch = api.callId; delete t.review; delete t.verification;
 					t.owner = `子调度·${name}`;
 					if (!t.dispatches.includes(api.callId)) t.dispatches.push(api.callId);
 					t.updatedAt = api.now();
 				});
+				if (refusal) return fail(refusal);
 			}
 
 			const harness = hub.harness;
 			if (!harness) return fail("子调度没有就绪。");
 			const ctx = BACKGROUND_CONTEXT;
-			const child = await harness.conversation(childId as any, ctx);
+			const child = await harness.conversation(Number(childId) as any, ctx);
 			if (!child) return fail("找不到子调度的对话。");
 
 			// 进度：子调度派了谁、做了什么
@@ -183,23 +192,38 @@ export function createLeadTool(deps: DispatchDeps): ToolRegistration {
 					}
 				}
 				const done = settled.status === "done";
-				if (args.task_id) {
-					await commitBoard(project, io as any, (b) => {
+				const body = done ? answer || "（子调度没有文字汇报）" : `子调度没有完成（${settled.reason ?? settled.status}${settled.detail ? `：${settled.detail}` : ""}）${answer ? `\n\n最后的输出：\n${answer}` : ""}`;
+				await commitBoard(project, io as any, async (b, tx) => {
+					if ((await tx.doc(Results, api.conversationId, resultId, null)).result) return;
+					await storeResult(tx, api.conversationId, { id: resultId, member: "lead", conversationId: childId, submissionId: null, taskId: String(api.taskId), status: done ? "done" : "unanswered", text: body, createdAt: api.now() });
+					if (args.task_id) {
 						const t = b.tasks[args.task_id!];
-						if (!t) return;
+						if (!t || (t.activeDispatch && t.activeDispatch !== api.callId)) return;
+						delete t.activeDispatch; t.latestResult = resultId;
+						if (t.checks?.length) t.verification = verifyReport(resultId, body, t.acceptance, t.checks, api.now());
 						if (t.status !== "done") t.status = done ? "review" : "blocked";
 						for (const id of changeIds) if (!t.changes.includes(id)) t.changes.push(id);
 						t.notes.push(`${new Date(api.now()).toLocaleString("zh-CN", { hour12: false })} 子调度·${name}：${done ? `完成，派工 ${dispatches} 次，待验收` : `没有完成（${settled.reason ?? settled.status}）`}`);
 						t.updatedAt = api.now();
-					});
-				}
+					}
+				});
 				const meta = `[子调度: ${name} | 派工: ${dispatches} 次 | 改动: ${changeIds.size ? [...changeIds].map((c) => `#${c}`).join(" ") : "无"} | 耗时: ${Math.round((api.now() - started) / 1000)}s]`;
-				const body = done ? answer || "（子调度没有文字汇报）" : `子调度没有完成（${settled.reason ?? settled.status}${settled.detail ? `：${settled.detail}` : ""}）${answer ? `\n\n最后的输出：\n${answer}` : ""}`;
 				return {
-					output: [{ type: "text", text: `${body}\n\n${args.task_id ? `[任务 ${args.task_id} ${done ? "标为待验收：对照验收标准核对后用 update_task 标完成或打回" : "标为受阻"}]\n\n` : ""}${meta}` }],
+					output: [{ type: "text", text: `${body}\n\n${args.task_id ? `[任务 ${args.task_id} ${done ? "标为待验收：对照验收标准核对后用 review_task 验收，所有子任务也需验收" : "标为受阻"}]\n\n` : ""}${meta}\n[result_id: ${resultId}]` }],
 					isError: !done,
 					details: defined({ conversationId: childId, name, goal: clip(args.goal, 200), taskId: args.task_id, dispatches, changes: [...changeIds], durationMs: api.now() - started }) as JsonObject,
 				};
+			} catch (error) {
+				if (hub.closing) throw error;
+				const cancelled = !!context.abortSignal?.aborted;
+				const body = cancelled ? "子调度已取消，已有成员结果保留。" : "子调度执行异常，已有成员结果保留，请检查失败证据后继续。";
+				await commitBoard(project, io as any, async (board, tx) => {
+					if ((await tx.doc(Results, api.conversationId, resultId, null)).result) return;
+					await storeResult(tx, api.conversationId, { id: resultId, member: "lead", conversationId: childId, submissionId: null, taskId: String(api.taskId), status: "unanswered", text: body, createdAt: api.now() });
+					const task = args.task_id ? board.tasks[args.task_id] : undefined;
+					if (task?.activeDispatch === api.callId) { delete task.activeDispatch; task.status = cancelled ? "todo" : "blocked"; task.latestResult = resultId; task.notes.push(body); task.updatedAt = api.now(); }
+				});
+				return fail(body + `\n[result_id: ${resultId}]`);
 			} finally {
 				await watch.stop().catch(() => {});
 			}

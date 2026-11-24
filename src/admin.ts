@@ -9,6 +9,8 @@ import type { Context } from "@earendil-works/chord/context";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { agentAdapter } from "./agents.ts";
 import { memberKey, memberToolNames } from "./api-member.ts";
+import { Operations, operationList } from "./operations.ts";
+import { CostLedger, Resources, resourceSnapshot } from "./resources.ts";
 import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
 import type { OrchestratorModel } from "./models.ts";
@@ -37,7 +39,6 @@ export interface AdminOptions {
 	config: AppConfig;
 	configPath: string;
 	orchestrator: OrchestratorModel;
-	demo: boolean;
 	port: number;
 	context: Context;
 	/** 网页上做了控制操作时，通知终端 */
@@ -159,7 +160,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		await Promise.allSettled(cleanup.map((fn) => Promise.resolve().then(fn)));
 	};
 	try {
-	const { app, config, orchestrator, demo, context } = options;
+	const { app, config, orchestrator, context } = options;
 	const { harness, root, agents, changes, project } = app;
 
 	// ---------- 派工汇总：启动时扫一遍全部历史，之后随新条目增量更新 ----------
@@ -267,7 +268,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		if (disposed || attached.has(conversationId)) return;
 		attached.add(conversationId);
 		void (async () => {
-			const child = await harness.conversation(conversationId as any, context);
+			const child = await harness.conversation(Number(conversationId) as any, context);
 			if (!child || disposed) return;
 			let cursor: any;
 			do {
@@ -377,6 +378,10 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 		for (const res of clients) res.write(payload);
 	};
+	const resourceChanges = harness.observeCommits({ advance(publication) {
+		if (publication.changes.some((change) => change.type === "document" && ["lemma.resources", "lemma.cost-ledger", "lemma.business-operations"].includes(change.record.kind))) broadcast("resources", null);
+	}, end() {} });
+	cleanup.push(() => resourceChanges.detach());
 	const watch = await root.watch(context);
 	cleanup.push(() => watch.stop());
 	const seen = new Set(watch.value.entries.map((e) => Number(e.id)));
@@ -596,7 +601,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		for (const d of allDispatches()) if (d.sessionId) useCount.set(d.sessionId, (useCount.get(d.sessionId) ?? 0) + 1);
 		const o = config.orchestrator;
 		return {
-			demo,
+			operations: operationList(await harness.snapshot(Operations, context)).map(({ id, member, tool, method, status, createdAt, updatedAt, result, resolution }) => ({ id, member, tool, method, status, createdAt, updatedAt, failure: result?.failure, resolution })),
 			pid: process.pid,
 			startedAt,
 			configPath: options.configPath,
@@ -619,6 +624,8 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			stripEnv: config.stripEnv,
 			isolation: config.isolation,
 			budget: { ...config.budget, ...((await harness.snapshot(RunBudget, context)) as any) },
+			resources: resourceSnapshot(await harness.snapshot(Resources, context)),
+			costLedger: Object.values((await harness.snapshot(CostLedger, context))?.entries ?? {}),
 			modelStats: modelStats(),
 			project: {
 				goal: project.goal() ?? null,
@@ -647,7 +654,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					models: c.models,
 					defaultModel: c.defaultModel ?? null,
 					api: c.api
-						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow, tools: [...memberToolNames(c.api), ...(c.api.httpTools ?? []).map((tool) => tool.id)] }
+						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow, tools: [...memberToolNames(c.api), ...(c.api.httpTools ?? []).map((tool) => tool.id), ...(c.api.mcpServers ?? []).flatMap((grant) => grant.tools.map((tool) => `mcp_${grant.id}_${tool.name}`))] }
 						: null,
 				};
 			}),

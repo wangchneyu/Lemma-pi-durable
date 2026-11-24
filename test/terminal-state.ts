@@ -37,22 +37,38 @@ try {
 	await until(() => current.items.length === 200);
 	await root.commit(async (tx) => { for (let i = 0; i < 340; i++) await tx.appendEntry(root.id, userEntry(`第二批 ${i}`)); }, context);
 	await until(() => current.items.at(-1)?.type === "user" && (current.items.at(-1) as { text: string }).text === "第二批 339");
-	assert.equal(current.items.length, 250);
-	assert.ok(current.items.every((item) => item.type !== "user" || item.text.startsWith("第二批")));
-	check(true, "终端订阅增量接收原生视图，并限制历史长度，不被滑动窗口覆盖");
+	assert.ok(current.history?.hasEarlier);
+	await current.history.loadEarlier();
+	assert.equal(current.items.length, 540);
+	assert.equal((current.items[0] as { text: string }).text, "第一批 0");
+	check(true, "终端订阅保留已加载历史，不再静默截断为最近 250 条");
 	await root.commit(async (tx) => { await tx.appendEntry(root.id, { kind: "pi.reset", head: "self" }); await tx.appendEntry(root.id, userEntry("重置后的独立内容")); }, context);
-	await until(() => current.items.length === 2);
-	assert.equal(current.items[0]?.type, "divider");
-	assert.equal((current.items[1] as { text: string }).text, "重置后的独立内容");
+	await until(() => current.items.length === 542);
+	assert.equal(current.items.at(-2)?.type, "divider");
+	assert.equal((current.items.at(-1) as { text: string }).text, "重置后的独立内容");
 	assert.equal((await root.entries({}, 1000, undefined, context)).items.filter((entry) => entry.kind === "pi.user").length, 541);
-	check(true, "重置后只展示新上下文，原始记录仍在原生存储中");
+	check(true, "重置只隔离模型上下文，旧对话仍可翻阅且保留明确分隔");
 	const nativeMessage = assistantMessage("原始回答");
 	nativeMessage.content.unshift({ type: "thinking", thinking: "不能被网页投影丢掉的思考" });
 	await root.commit((tx) => tx.appendEntry(root.id, { kind: "pi.assistant", model: [nativeMessage] }), context);
 	await until(() => current.items.at(-1)?.type === "assistant");
 	assert.deepEqual(current.items.at(-1)?.message, JSON.parse(JSON.stringify(nativeMessage)));
 	check(true, "终端保留完整原始助手消息，思考、模型和用量不经过网页文本压平");
+	await stop();
+	stop = await watchTerminalState({ harness, conversation: root, context, onConversation: (value) => { current = value; calls++; }, onTasks: (value) => { tasks = value; calls++; } });
+	assert.ok(current.items.length <= 500 && current.history?.hasEarlier);
+	while (current.history?.hasEarlier) {
+		const first = current.history.loadEarlier();
+		assert.equal(current.history.loadEarlier(), first, "重复翻页应共享同一次 Durable 读取");
+		await first;
+	}
+	assert.equal(current.items.length, 543);
+	assert.equal((current.items[0] as { text: string }).text, "第一批 0");
+	assert.deepEqual(current.items.at(-1)?.message, JSON.parse(JSON.stringify(nativeMessage)));
+	const loadedCalls = calls; await current.history?.loadEarlier(); assert.equal(calls, loadedCalls);
+	check(true, "重新订阅后通过原生接口逐页找回全部历史和思考，去重加载且到顶停止");
 	const streaming = assistantMessage("原生流式正文");
+	streaming.content.unshift({ type: "thinking", thinking: "原生流式思考" });
 	streaming.content.push({ type: "toolCall", id: "stream-args", name: "ask_codex", arguments: { task: "尚未完成的参数" } });
 	await root.commit(async (tx) => {
 		const doc = await tx.doc(LiveDoc, root.id);
