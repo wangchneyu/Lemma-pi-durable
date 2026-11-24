@@ -12,6 +12,13 @@ Lemma 的核心是任务如何分配、上下文如何隔离、结果如何交�
 
 克隆仓库、`npm install`、`npm start`，进入终端后通过 `/setup` 与 `/agent` 配置模型和成员；本地管理网页同时启动。成员的配置、权限及运行方式见 [成员使用说明](docs/custom-agents.md)。
 
+## 设计亮点
+
+- **信息隐藏与结构化交接**（借鉴 *MetaGPT / MAST*）：严格隔离成员会话上下文，不让多个 Agent 在同一聊天室自由群聊；下游仅接收经验证的 `lemma.delivery.v1` 结构化字段与 `inputs` 原文片段，避免上下文污染与级联幻觉。
+- **ACI 专用代码工具与执行扎根**（借鉴 *SWE-agent*）：API 编码与只读审查成员内置 `list_files`、`outline_file`、`find_symbol`、`search_code` 与 `git_diff` 只读代码感知工具，结合 `autonomy.checks`、多分支联合集成 `integrate_changes` 与冲突修复 `repair_integration`，以真实编译器与测试退出码为准绳。
+- **路径契约防篡改与代码盲审**（借鉴 *MAST / Maker-Checker*）：任务支持 `scope: { allow, forbid }` 路径契约（API 写入前实时拦截 + CLI/API 收尾硬校验，支撑“契约先行 + 实现与测试分流”）；`reviewer.blind: true` 在复核时剥离执行者的主观自述话术，仅依据需求契约与客观 `git_diff` 盲审，消除迎合偏见（Sycophancy）。
+- **复杂度自适应拓扑**（借鉴 *Adaptive Topologies*）：按任务耦合度与风险自适应选择 **L0（单兵快路）**、**L1（独立盲审双人闭环）** 或 **L2（契约先行 → 实现/测试并行隔离 → 联合集成撞击测试 → 人工 `/apply`）**，避免简单任务产生额外协调税。
+
 ## 为什么叫 Lemma
 
 在数学中，**引理是帮助证明后续命题的辅助命题**。一个复杂结论往往需要先建立若干引理，再把它们组合起来。
