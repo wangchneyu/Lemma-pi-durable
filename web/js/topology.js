@@ -3,13 +3,13 @@
 import { classifyTopology, renderTaskDag } from "./dag.js";
 import { openDispatch } from "./drawer.js";
 import { runningJobs, store } from "./store.js";
-import { AGENT_LABEL, KINDS, agentColor, duration, esc, getJson, money, post, short, stamp, toast } from "./util.js";
+import { AGENT_LABEL, KINDS, agentColor, clipDisplay, duration, esc, getJson, money, post, short, stamp, toast } from "./util.js";
 
 const NS = "http://www.w3.org/2000/svg";
-const LANE_H = 30;
+const LANE_H = 34;
 const GROUP_GAP = 18;
-const TOP = 50;
-const COL = { orch: 18, orchW: 128, member: 196, memberW: 120, lane: 360, laneW: 190, time: 572 };
+const TOP = 52;
+const COL = { orch: 16, orchW: 146, member: 210, memberW: 142, lane: 396, laneW: 204, time: 616 };
 const WINDOWS = { 20: "最近 20 次", 40: "最近 40 次", 80: "最近 80 次" };
 const PREF = "pi-agent-topology-window";
 
@@ -164,7 +164,7 @@ export function topology() {
 			stage.innerHTML = `<div class="empty-inline"><span class="dot"></span>还没有派工。总调度派活后，这里会显示谁在哪个会话里、什么时候、和谁并行。</div>`;
 			return;
 		}
-		const width = Math.max(980, stage.clientWidth - 12);
+		const width = Math.max(1060, stage.clientWidth - 12);
 		const timeW = width - COL.time - 24;
 		// ---- 布局：成员分组，组内按会话最早开始时间排 ----
 		const members = [...new Set(["lead", "integration", ...KINDS, ...data.members.map((m) => m.kind), ...data.lanes.map((lane) => lane.agent)])].map((k) => ({ kind: k, info: data.members.find((m) => m.kind === k), lanes: data.lanes.filter((l) => l.agent === k).sort((a, b) => a.first - b.first) })).filter(
@@ -190,8 +190,11 @@ export function topology() {
 
 		const s = svg("svg", { class: "topo-svg", width, height, viewBox: `0 0 ${width} ${height}` });
 		const defs = svg("defs");
-		defs.innerHTML = `<marker id="topoArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
-			<pattern id="topoStripe" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="3" height="6" fill="currentColor" opacity=".28"/></pattern>`;
+		defs.innerHTML = `<marker id="topoArrow" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M1.5,1.8 L8.5,5 L1.5,8.2 L3.2,5 z" fill="var(--muted)"/></marker>
+			<pattern id="topoStripe" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="3" height="6" fill="currentColor" opacity=".28"/></pattern>
+			<clipPath id="clipOrch"><rect x="8" y="2" width="${COL.orchW - 26}" height="40"/></clipPath>
+			<clipPath id="clipMember"><rect x="10" y="2" width="${COL.memberW - 18}" height="38"/></clipPath>
+			<clipPath id="clipLaneLabel"><rect x="6" y="0" width="${COL.laneW - 14}" height="${LANE_H}"/></clipPath>`;
 		s.append(defs);
 
 		// ---- 时间轴 ----
@@ -257,8 +260,10 @@ export function topology() {
 		// ---- 总调度节点 ----
 		const orch = svg("g", { class: `topo-node orch${data.orchestrator.busy ? " busy" : ""}`, transform: `translate(${COL.orch},${orchY - 22})` });
 		orch.append(svg("rect", { width: COL.orchW, height: 44, rx: 9 }));
-		orch.append(svg("text", { x: 12, y: 19, class: "name" }, "总调度"));
-		orch.append(svg("text", { x: 12, y: 34, class: "sub" }, short(data.orchestrator.model ?? "", 18)));
+		const orchText = svg("g", { "clip-path": "url(#clipOrch)" });
+		orchText.append(svg("text", { x: 12, y: 19, class: "name" }, "总调度"));
+		orchText.append(svg("text", { x: 12, y: 34, class: "sub" }, clipDisplay(data.orchestrator.model ?? "", 18)));
+		orch.append(orchText);
 		orch.append(svg("circle", { cx: COL.orchW - 14, cy: 15, r: 4, class: "lamp" }));
 		s.append(orch);
 
@@ -268,8 +273,10 @@ export function topology() {
 			const g = svg("g", { class: `topo-node member${running ? " busy" : ""}${m.info?.available === false ? " off" : ""}`, transform: `translate(${COL.member},${m.cy - 20})`, style: `--c:${agentColor(m.kind)}` });
 			g.append(svg("rect", { width: COL.memberW, height: 40, rx: 8 }));
 			g.append(svg("rect", { width: 4, height: 40, rx: 2, class: "bar" }));
-			g.append(svg("text", { x: 14, y: 17, class: "name" }, AGENT_LABEL[m.kind] ?? m.kind));
-			g.append(svg("text", { x: 14, y: 32, class: "sub" }, `${m.lanes.filter((l) => l.session).length} 个会话${running ? ` · ${running} 路在跑` : ""}`));
+			const memberText = svg("g", { "clip-path": "url(#clipMember)" });
+			memberText.append(svg("text", { x: 13, y: 17, class: "name" }, clipDisplay(AGENT_LABEL[m.kind] ?? m.kind, 15)));
+			memberText.append(svg("text", { x: 13, y: 32, class: "sub" }, clipDisplay(`${m.lanes.filter((l) => l.session).length} 个会话${running ? ` · ${running} 路在跑` : ""}`, 19)));
+			g.append(memberText);
 			s.append(g);
 		}
 
@@ -287,8 +294,10 @@ export function topology() {
 						: l.session
 							? `会话 ${l.session.slice(0, 8)}`
 							: "一次性";
-				g.append(svg("text", { x: 10, y: 12, class: "name" }, label));
-				g.append(svg("text", { x: 10, y: 22, class: "sub" }, `${l.rounds} 轮${l.tasks.length ? ` · ${l.tasks.join(" ")}` : ""}${l.model ? ` · ${short(l.model, 16)}` : ""}`));
+				const laneText = svg("g", { "clip-path": "url(#clipLaneLabel)" });
+				laneText.append(svg("text", { x: 10, y: 12, class: "name" }, clipDisplay(label, 25)));
+				laneText.append(svg("text", { x: 10, y: 24, class: "sub" }, clipDisplay(`${l.rounds} 轮${l.tasks.length ? ` · ${l.tasks.join(" ")}` : ""}${l.model ? ` · ${l.model}` : ""}`, 30)));
+				g.append(laneText);
 				const title = svg("title", {}, `${label}\n${l.rounds} 轮，最近：${l.lastTask ?? ""}${l.session ? `\n${l.session}` : ""}`);
 				g.append(title);
 				lanes.append(g);
@@ -314,8 +323,9 @@ export function topology() {
 				continue;
 			}
 			links.append(svg("path", { class: link.type === "integrate" || link.type === "review" ? link.type : "", d: curve(x1, y1, x2, y2), "marker-end": "url(#topoArrow)" }));
-			if (link.change) links.append(svg("text", { x: (x1 + x2) / 2 + 4, y: (y1 + y2) / 2 - 3 }, link.type === "review" ? `复核 ${link.change}` : `#${link.change}`));
+			if (link.change && Math.hypot(x2 - x1, y2 - y1) >= 48) links.append(svg("text", { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 5, "text-anchor": "middle" }, link.type === "review" ? `复核 ${link.change}` : `#${link.change}`));
 		}
+		s.append(links);
 
 		// ---- 派工时间条 ----
 		const bars = svg("g", { class: "topo-bars" });
@@ -340,7 +350,7 @@ export function topology() {
 					: b.reviewRole
 						? `🔎 ${[b.job, b.taskId].filter(Boolean).join(" ")}`
 						: [b.job, b.taskId].filter(Boolean).join(" ") || (b.resume ? "续" : "");
-			if (label && w > 26) g.append(svg("text", { x: 5, y: 12 }, short(label, Math.max(2, Math.floor(w / 7)))));
+			if (label && w > 28) g.append(svg("text", { x: 5, y: 11.5 }, clipDisplay(label, Math.max(2, Math.floor((w - 10) / 6.5)))));
 			g.append(
 				svg(
 					"title",
@@ -362,7 +372,6 @@ export function topology() {
 			bars.append(g);
 		}
 		s.append(bars);
-		s.append(links);
 		stage.replaceChildren(s);
 	}
 

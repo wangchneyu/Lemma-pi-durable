@@ -84,6 +84,19 @@ export function short(text, max) {
 	const t = String(text ?? "").replace(/\s+/g, " ").trim();
 	return t.length > max ? `${t.slice(0, max)}…` : t;
 }
+/** 按中英文显示宽度截断（全角/中文按 2 格计算），防止 SVG 固定框内文字溢出 */
+export function clipDisplay(text, maxCols) {
+	const t = String(text ?? "").replace(/\s+/g, " ").trim();
+	let used = 0;
+	let out = "";
+	for (const ch of t) {
+		const w = ch.codePointAt(0) > 0x2e7f ? 2 : 1;
+		if (used + w > maxCols) return out ? `${out}…` : "…";
+		used += w;
+		out += ch;
+	}
+	return out;
+}
 
 // ---------- 提示 / 复制 / 请求 ----------
 let toastTimer;

@@ -1,6 +1,6 @@
 // 多 Agent 协作结构可视化：L0/L1/L2 自适应拓扑 DAG、Path Scope 隔离矩阵、Maker-Checker 盲审返工环。
 import { openDispatch } from "./drawer.js";
-import { AGENT_LABEL, STATUS_LABEL, agentColor, esc, short } from "./util.js";
+import { AGENT_LABEL, STATUS_LABEL, agentColor, clipDisplay, esc, short } from "./util.js";
 
 const NS = "http://www.w3.org/2000/svg";
 
@@ -121,22 +121,22 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 		for (const entry of intNodes) cols[totalCols - 1].push({ kind: "integration", id: `int:${entry.it.id}`, data: entry.it, upstreamIds: entry.upstreamIds });
 	}
 
-	const NODE_W = 212;
-	const NODE_H = 82;
-	const COL_GAP = 56;
-	const ROW_GAP = 16;
+	const NODE_W = 248;
+	const NODE_H = 92;
+	const COL_GAP = 72;
+	const ROW_GAP = 18;
 	const PAD_X = 16;
-	const PAD_Y = 30;
+	const PAD_Y = 34;
 	const maxRows = Math.max(1, ...cols.map((c) => c.length));
-	const width = Math.max(540, PAD_X * 2 + totalCols * NODE_W + Math.max(0, totalCols - 1) * COL_GAP);
+	const width = Math.max(580, PAD_X * 2 + totalCols * NODE_W + Math.max(0, totalCols - 1) * COL_GAP);
 	const height = Math.max(180, PAD_Y * 2 + maxRows * NODE_H + Math.max(0, maxRows - 1) * ROW_GAP);
 
 	const pos = new Map();
 	const s = svg("svg", { class: "dag-svg", viewBox: `0 0 ${width} ${height}`, width, height, role: "img", "aria-label": "任务依赖 DAG 图" });
 	const defs = svg("defs");
 	const mkMarker = (id, cls) => {
-		const m = svg("marker", { id, viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse" });
-		m.append(svg("path", { d: "M1,2 L9,5 L1,8 z", class: cls }));
+		const m = svg("marker", { id, viewBox: "0 0 10 10", refX: 7.5, refY: 5, markerWidth: 5.5, markerHeight: 5.5, orient: "auto-start-reverse" });
+		m.append(svg("path", { d: "M1.5,1.8 L8.5,5 L1.5,8.2 L3.2,5 z", class: cls }));
 		return m;
 	};
 	defs.append(mkMarker("dagArrowDep", "dag-arrow-dep"), mkMarker("dagArrowInt", "dag-arrow-int"));
@@ -148,11 +148,29 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 		const startY = PAD_Y + (height - PAD_Y * 2 - colH) / 2;
 		const x = PAD_X + c * (NODE_W + COL_GAP);
 		const label = intNodes.length && c === cols.length - 1 ? "联合集成汇流" : c === 0 ? "起点 / 契约层" : `阶段 ${c + 1}`;
-		s.append(svg("text", { x: x + NODE_W / 2, y: 16, class: "dag-col-label", "text-anchor": "middle" }, label));
+		s.append(svg("text", { x: x + NODE_W / 2, y: 18, class: "dag-col-label", "text-anchor": "middle" }, label));
 		list.forEach((node, r) => {
 			pos.set(node.id, { x, y: startY + r * (NODE_H + ROW_GAP), node });
 		});
 	}
+
+	// 统计每节点入边数，交错落点避免多条线堆在同一像素上
+	const incomingCount = new Map();
+	const incomingSeen = new Map();
+	for (const t of active) for (const dep of t.deps ?? []) if (pos.has(dep) && pos.has(t.id)) incomingCount.set(t.id, (incomingCount.get(t.id) ?? 0) + 1);
+	for (const entry of intNodes) {
+		const iid = `int:${entry.it.id}`;
+		const sources = entry.upstreamIds.length ? entry.upstreamIds : cols[Math.max(0, totalCols - 2)]?.map((n) => n.id) ?? [];
+		for (const upId of sources) if (pos.has(upId) && pos.has(iid)) incomingCount.set(iid, (incomingCount.get(iid) ?? 0) + 1);
+	}
+	const targetY = (id, y) => {
+		const total = incomingCount.get(id) ?? 1;
+		const idx = incomingSeen.get(id) ?? 0;
+		incomingSeen.set(id, idx + 1);
+		if (total <= 1) return y + NODE_H / 2;
+		const span = Math.min(28, (total - 1) * 10);
+		return y + NODE_H / 2 - span / 2 + (span * idx) / (total - 1);
+	};
 
 	// 连线层（节点下方）
 	const edgesG = svg("g", { class: "dag-edges" });
@@ -162,33 +180,34 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 		for (const dep of t.deps ?? []) {
 			const from = pos.get(dep);
 			if (!from) continue;
-			const x1 = from.x + NODE_W;
+			const x1 = from.x + NODE_W + 1;
 			const y1 = from.y + NODE_H / 2;
-			const x2 = to.x - 3;
-			const y2 = to.y + NODE_H / 2;
-			const mx = (x1 + x2) / 2;
+			const x2 = to.x - 4;
+			const y2 = targetY(t.id, to.y);
+			const dx = Math.max(24, (x2 - x1) * 0.5);
 			const blocking = byId.get(dep)?.status !== "done";
 			edgesG.append(svg("path", {
-				d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`,
+				d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
 				class: `dag-edge dep${blocking ? " blocking" : " done"}`,
 				"marker-end": "url(#dagArrowDep)",
 			}));
 		}
 	}
 	for (const entry of intNodes) {
-		const to = pos.get(`int:${entry.it.id}`);
+		const iid = `int:${entry.it.id}`;
+		const to = pos.get(iid);
 		if (!to) continue;
 		const sources = entry.upstreamIds.length ? entry.upstreamIds : cols[Math.max(0, totalCols - 2)]?.map((n) => n.id) ?? [];
 		for (const upId of sources) {
 			const from = pos.get(upId);
 			if (!from) continue;
-			const x1 = from.x + NODE_W;
+			const x1 = from.x + NODE_W + 1;
 			const y1 = from.y + NODE_H / 2;
-			const x2 = to.x - 3;
-			const y2 = to.y + NODE_H / 2;
-			const mx = (x1 + x2) / 2;
+			const x2 = to.x - 4;
+			const y2 = targetY(iid, to.y);
+			const dx = Math.max(24, (x2 - x1) * 0.5);
 			edgesG.append(svg("path", {
-				d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`,
+				d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
 				class: "dag-edge int",
 				"marker-end": "url(#dagArrowInt)",
 			}));
@@ -196,19 +215,27 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 	}
 	s.append(edgesG);
 
-	// 节点层
+	// 节点层（每张节点卡片绑定独立 clipPath，彻底杜绝文字溢边框）
 	const nodesG = svg("g", { class: "dag-nodes" });
+	let clipIdx = 0;
 	for (const { x, y, node } of pos.values()) {
+		const clipId = `dagClip-${++clipIdx}`;
+		const cp = svg("clipPath", { id: clipId });
+		cp.append(svg("rect", { x: x + 8, y: y + 4, width: NODE_W - 16, height: NODE_H - 8, rx: 6 }));
+		defs.append(cp);
+
 		if (node.kind === "integration") {
 			const it = node.data;
 			const st = it.status ?? it.changeStatus;
 			const ok = st === "passed" || it.changeStatus === "applied";
 			const g = svg("g", { class: `dag-node integration ${ok ? "s-done" : st === "conflict" || st === "failed" ? "s-blocked" : "s-doing"}`, tabindex: 0 });
-			g.append(svg("rect", { x, y, width: NODE_W, height: NODE_H, rx: 9, class: "box" }));
-			g.append(svg("text", { x: x + 12, y: y + 21, class: "nid" }, `集成 #${it.id}`));
-			g.append(svg("text", { x: x + NODE_W - 12, y: y + 21, class: "nstat", "text-anchor": "end" }, it.changeStatus === "applied" ? "已合并" : st));
-			g.append(svg("text", { x: x + 12, y: y + 43, class: "ntitle" }, short((it.sources ?? []).map((src) => `#${src.id}`).join(" + ") || it.task, 24)));
-			g.append(svg("text", { x: x + 12, y: y + 64, class: "nmeta" }, `检查 ${it.passed ?? 0}/${it.total ?? 0}${it.conflicts?.length ? ` · 冲突 ${it.conflicts.length}` : ""}`));
+			g.append(svg("rect", { x, y, width: NODE_W, height: NODE_H, rx: 10, class: "box" }));
+			const content = svg("g", { "clip-path": `url(#${clipId})` });
+			content.append(svg("text", { x: x + 12, y: y + 23, class: "nid" }, clipDisplay(`集成 #${it.id}`, 18)));
+			content.append(svg("text", { x: x + NODE_W - 12, y: y + 23, class: "nstat", "text-anchor": "end" }, it.changeStatus === "applied" ? "已合并" : st));
+			content.append(svg("text", { x: x + 12, y: y + 48, class: "ntitle" }, clipDisplay((it.sources ?? []).map((src) => `#${src.id}`).join(" + ") || it.task, 28)));
+			content.append(svg("text", { x: x + 12, y: y + 71, class: "nmeta" }, clipDisplay(`检查 ${it.passed ?? 0}/${it.total ?? 0}${it.conflicts?.length ? ` · 冲突 ${it.conflicts.length}` : ""}`, 34)));
+			g.append(content);
 			g.addEventListener("click", () => { location.hash = `#/changes/${encodeURIComponent(it.id)}`; });
 			nodesG.append(g);
 			continue;
@@ -217,16 +244,18 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 		const readiness = readinessMap?.get(t.id);
 		const color = t.owner ? agentColor(t.owner) : "var(--orch)";
 		const g = svg("g", { class: `dag-node s-${t.status}`, style: `--c:${color}`, tabindex: 0 });
-		g.append(svg("rect", { x, y, width: NODE_W, height: NODE_H, rx: 9, class: "box" }));
-		g.append(svg("rect", { x, y: y + 8, width: 3.5, height: NODE_H - 16, rx: 2, class: "bar" }));
-		g.append(svg("text", { x: x + 12, y: y + 21, class: "nid" }, `${t.id}${t.automation ? " ⚡" : ""}`));
-		g.append(svg("text", { x: x + NODE_W - 10, y: y + 21, class: "nstat", "text-anchor": "end" }, STATUS_LABEL[t.status] ?? t.status));
-		g.append(svg("text", { x: x + 12, y: y + 43, class: "ntitle" }, short(t.title, 22)));
+		g.append(svg("rect", { x, y, width: NODE_W, height: NODE_H, rx: 10, class: "box" }));
+		g.append(svg("rect", { x, y: y + 10, width: 3.5, height: NODE_H - 20, rx: 2, class: "bar" }));
+		const content = svg("g", { "clip-path": `url(#${clipId})` });
+		content.append(svg("text", { x: x + 13, y: y + 23, class: "nid" }, clipDisplay(`${t.id}${t.automation ? " ⚡" : ""}`, 18)));
+		content.append(svg("text", { x: x + NODE_W - 12, y: y + 23, class: "nstat", "text-anchor": "end" }, STATUS_LABEL[t.status] ?? t.status));
+		content.append(svg("text", { x: x + 13, y: y + 48, class: "ntitle" }, clipDisplay(t.title, 30)));
 		const scopeTag = t.scope?.allow?.length ? `🔒 ${t.scope.allow[0]}` : "";
 		const ownerLabel = t.owner ? AGENT_LABEL[t.owner] ?? t.owner : "未指派";
 		const revTag = t.reviewer ? ` · 🔎${t.reviewer.blind ? "盲审" : "复核"}${t.checksByMember?.length ? `×${t.checksByMember.length}` : ""}` : "";
-		const waitHint = t.status === "todo" && readiness && !readiness.ready ? " · 等待中" : "";
-		g.append(svg("text", { x: x + 12, y: y + 64, class: "nmeta" }, short(`${ownerLabel}${revTag}${scopeTag ? ` · ${scopeTag}` : ""}${waitHint}`, 32)));
+		const waitHint = t.status === "todo" && readiness && !readiness.ready ? " · 等待" : "";
+		content.append(svg("text", { x: x + 13, y: y + 71, class: "nmeta" }, clipDisplay(`${ownerLabel}${revTag}${scopeTag ? ` · ${scopeTag}` : ""}${waitHint}`, 34)));
+		g.append(content);
 		g.append(svg("title", {}, `${t.id}: ${t.title}\n状态: ${STATUS_LABEL[t.status] ?? t.status}${t.scope ? `\n路径契约: allow=${(t.scope.allow ?? []).join(",")} forbid=${(t.scope.forbid ?? []).join(",")}` : ""}`));
 		g.addEventListener("click", () => onSelectTask?.(t));
 		nodesG.append(g);
