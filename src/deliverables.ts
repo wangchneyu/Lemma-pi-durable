@@ -33,7 +33,7 @@ export function resultExcerpt(report: { text: string; deliverable?: Deliverable 
 		if (!delivery) throw new Error("该结果没有结构化交付；可按原文片段读取。");
 		const value = deliveryField(delivery, input.field); source = typeof value === "string" ? value : JSON.stringify(value);
 	}
-	const offset = input.offset ?? 0, limit = input.limit ?? 2000;
+	const offset = input.offset ?? 0, limit = input.limit ?? 8000;
 	if (!Number.isSafeInteger(offset) || offset < 0 || offset > source.length || !Number.isSafeInteger(limit) || limit < 1 || limit > 8000) throw new Error("交接片段的 offset 或 limit 无效。");
 	const end = Math.min(source.length, offset + limit);
 	return { text: source.slice(offset, end), totalChars: source.length, offset, nextOffset: end < source.length ? end : null };

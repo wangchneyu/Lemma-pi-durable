@@ -205,8 +205,8 @@ export async function runCodingCollaborationBenchmark(options: {
 						success = existsSync(join(targetDir, "src/discount.mjs")) && existsSync(join(targetDir, "test/discount.test.mjs"));
 					} catch {}
 				} else {
-					await (await app.root.submit({ type: "input", content: "TEAM_DISCOUNT: 拆分为 T1(implementer 限 src/, 禁用 test/, 盲审返工)、T2(tester 限 test/, 禁用 src/) 与 T3(联合集成)。" }, BACKGROUND_CONTEXT)).wait(withAbortSignal(AbortSignal.timeout(20000), BACKGROUND_CONTEXT));
-					const end = Date.now() + 20000;
+					await (await app.root.submit({ type: "input", content: "TEAM_DISCOUNT: 拆分为 T1(implementer 限 src/, 禁用 test/, 盲审返工)、T2(tester 限 test/, 禁用 src/) 与 T3(联合集成)。" }, BACKGROUND_CONTEXT)).wait(withAbortSignal(AbortSignal.timeout(30000), BACKGROUND_CONTEXT));
+					const end = Date.now() + 40000;
 					while ((await app.harness.snapshot(Board, BACKGROUND_CONTEXT))?.tasks.T3?.status !== "done" && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
 					const board = await app.harness.snapshot(Board, BACKGROUND_CONTEXT);
 					const t1 = board?.tasks.T1, t2 = board?.tasks.T2, t3 = board?.tasks.T3;

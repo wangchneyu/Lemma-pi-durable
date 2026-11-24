@@ -24,7 +24,7 @@ git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
 
 // ---- 白名单（纯函数） ----
 const api = config.agents.deepseek.api!;
-check(bashRefusal("npm test", api) === undefined && bashRefusal("git diff --stat", api) === undefined, "白名单里的命令放行");
+check(bashRefusal("npm test", api) === undefined && bashRefusal("git diff --stat", api) === undefined && bashRefusal("node scripts/check.mjs", api) === undefined && bashRefusal("git init", api) === undefined, "白名单里的命令放行");
 check(!!bashRefusal("rm -rf src", api), "白名单外的命令被拒绝");
 check(!!bashRefusal("npm test && rm -rf src", api) && !!bashRefusal("cat a > b", api) && !!bashRefusal("ls $(whoami)", api), "串接、重定向、命令替换被拒绝");
 check(!!bashRefusal("npm testing", api), "只按整个词匹配命令开头");

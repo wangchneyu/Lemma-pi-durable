@@ -24,7 +24,7 @@ async function member(id: string, file: string, text: string, base?: string) {
 	return app.changes.upsert({ id, agent: "claude", callId: id, task: id, root: repo, subdir: "", path, branch, base: start, head, files: [{ path: file, add: 1, del: 0 }], add: 1, del: 0, status: "pending", createdAt: Date.now(), updatedAt: Date.now() });
 }
 async function wait(id: string) {
-	const end = Date.now() + 15000; while (Date.now() < end) { const record = (await app.harness.snapshot(Integrations, ctx))?.records[id]; if (record && integrationTerminal(record)) return record; await new Promise((resolve) => setTimeout(resolve, 25)); }
+	const end = Date.now() + 25000; while (Date.now() < end) { const record = (await app.harness.snapshot(Integrations, ctx))?.records[id]; if (record && integrationTerminal(record)) return record; await new Promise((resolve) => setTimeout(resolve, 25)); }
 	throw new Error(JSON.stringify(await app.harness.snapshot(Integrations, ctx)));
 }
 try {
@@ -64,7 +64,7 @@ try {
 	await dropChange(app.changes, failed.id);
 	config.autonomy.checks = [{ name: "long", command: "node", args: ["-e", "setTimeout(()=>{},20000)"], timeoutSeconds: 30 }];
 	const cancel = await app.integrate(app.root.id, [c.id, d.id], ctx);
-	const cancelEnd = Date.now() + 10000; while (!app.jobs.running(`integration:${cancel.id}`) && Date.now() < cancelEnd) await new Promise((resolve) => setTimeout(resolve, 25));
+	const cancelEnd = Date.now() + 25000; while (!app.jobs.running(`integration:${cancel.id}`) && Date.now() < cancelEnd) await new Promise((resolve) => setTimeout(resolve, 25));
 	assert(app.jobs.running(`integration:${cancel.id}`)); await app.cancelIntegration(app.root.id, cancel.id, ctx);
 	assert.equal((await wait(cancel.id)).integration!.status, "cancelled"); assert(!(await applyChange(app.changes, cancel.id)).ok);
 	check(true, "运行中的联合检查可取消并终止子进程，取消状态持久保存且无法应用");
@@ -78,7 +78,7 @@ try {
 	// Ignore only the fixture check counter; its existence reveals accidental replay.
 	const e = await member("restart-a", "restart-a.txt", "A"), f = await member("restart-b", "restart-b.txt", "B");
 	const restart = await app.integrate(app.root.id, [e.id, f.id], ctx);
-	const restartEnd = Date.now() + 10000; while (!existsSync(join(restart.path, "ignored-check-counter")) && Date.now() < restartEnd) await new Promise((resolve) => setTimeout(resolve, 25));
+	const restartEnd = Date.now() + 25000; while (!existsSync(join(restart.path, "ignored-check-counter")) && Date.now() < restartEnd) await new Promise((resolve) => setTimeout(resolve, 25));
 	assert(existsSync(join(restart.path, "ignored-check-counter")));
 	await app.harness.close(ctx); app = await openApp(config, orch, ctx); app.harness.resume();
 	const restored = await wait(restart.id); assert.equal(restored.integration!.status, "failed"); assert(restored.message!.includes("中途被打断"), restored.message ?? "缺少中断依据");

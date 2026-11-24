@@ -138,7 +138,17 @@ export function createTaskWorkflow(deps: DispatchDeps, available: Set<string>, e
 					if (merged.integration!.status !== "passed") { item.status = "blocked"; item.notes.push(`前置联合集成 #${merged.id} ${merged.integration!.status}：${merged.message ?? "查看集成记录"}`); continue; }
 					basedOn = merged.id;
 				}
-				args = { task_id: item.id, task: `${item.title}\n${item.detail ?? ""}\n验收标准：${item.acceptance ?? "提供可核对的结果与依据"}`, inputs: dependencies.map((dependency) => ({ result_id: dependency.latestResult!, limit: 2000 })), ...(basedOn ? { based_on: basedOn } : {}), ...(item.automation.model ? { model: item.automation.model } : {}) };
+				const inputs: NonNullable<DispatchArgs["inputs"]> = [];
+				for (const dependency of dependencies) {
+					const depResult = (await tx.doc(Results, controller, dependency.latestResult!, null)).result;
+					const total = depResult?.text.length ?? 0;
+					const chunks = Math.max(1, Math.ceil(total / 8000));
+					for (let offset = 0; offset < chunks * 8000 && inputs.length < 8; offset += 8000) {
+						inputs.push({ result_id: dependency.latestResult!, offset, limit: 8000 });
+						if (offset + 8000 >= total) break;
+					}
+				}
+				args = { task_id: item.id, task: `${item.title}\n${item.detail ?? ""}\n验收标准：${item.acceptance ?? "提供可核对的结果与依据"}`, inputs, ...(basedOn ? { based_on: basedOn } : {}), ...(item.automation.model ? { model: item.automation.model } : {}) };
 			}
 			const job = await enqueue(tx, controller, `workflow:${item.id}:${item.dispatches.length}:${item.latestResult ?? "initial"}`, item.automation.member, args, args.model);
 			item.activeDispatch = job.callId; item.status = "doing";

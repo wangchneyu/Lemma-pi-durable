@@ -56,4 +56,19 @@ try {
 	assert.equal((await (await app.root.submit({ type: "input", content: "Read the background report" }, ctx)).wait(ctx)).status, "done");
 	assert.equal((await app.harness.snapshot(Results, app.root.id, backgroundId, ctx))?.result?.text, "BACKGROUND_REPORT_FULL");
 	check(true, "编码宿主：后台短报告同样携带 result_id，等待结果后可读原文");
+
+	// 默认交接片段上限已提高到 8000：3500 字符中等需求应完整一次透传；超 8000 时标出未传完警告
+	const spec3500 = "SPEC_HEAD " + "requirement section ".repeat(180) + " SPEC_TAIL_END";
+	assert(spec3500.length > 3300 && spec3500.length < 8000);
+	const { storeResult } = await import("../src/results.ts");
+	await app.harness.commit((tx) => storeResult(tx, app.root.id, { id: "spec-3500", member: "claude", conversationId: "fixture", submissionId: null, taskId: "fixture", status: "done", text: spec3500, createdAt: Date.now() }), ctx);
+	let handoffPrompt = "";
+	member.setResponses([(request: any) => { handoffPrompt = JSON.stringify(request.messages); return fauxAssistantMessage(fauxText("SPEC_RECEIVED")); }]);
+	orch.faux.setResponses([
+		() => fauxAssistantMessage([fauxToolCall("ask_deepseek", { task: "Implement spec", inputs: [{ result_id: "spec-3500" }] }, { id: "handoff-3500" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("DONE")),
+	]);
+	await (await app.root.submit({ type: "input", content: "Handoff medium spec" }, ctx)).wait(ctx);
+	assert(handoffPrompt.includes("SPEC_HEAD") && handoffPrompt.includes("SPEC_TAIL_END") && !handoffPrompt.includes("未传完"), "3500 字中等需求默认完整交接，不再 2000 字截断");
+	check(true, "交接默认单段上限提升至 8000 字符，中等需求完整透传不截断");
 } finally { await app.harness.close(ctx); delete process.env.LEMMA_TEST_RESULT_KEY; }

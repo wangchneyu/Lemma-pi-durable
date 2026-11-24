@@ -18,7 +18,7 @@ export interface ResultPage {
 	id: string; member: string; conversationId: string; status: "done" | "unanswered";
 	text: string; offset: number; nextOffset: number | null; totalChars: number;
 }
-export function resultPage(result: MemberResult, offset = 0, limit = 2000): ResultPage {
+export function resultPage(result: MemberResult, offset = 0, limit = 8000): ResultPage {
 	if (!Number.isSafeInteger(offset) || offset < 0) throw new RangeError("offset must be a nonnegative integer.");
 	if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8000) throw new RangeError("limit must be between 1 and 8000.");
 	const end = Math.min(result.text.length, offset + limit);

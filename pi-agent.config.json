@@ -22,7 +22,7 @@
 	"agents": {
 		"claude": {
 			"enabled": true,
-			"extraArgs": ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(node --test:*)"],
+			"extraArgs": ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npx:*)", "Bash(node:*)", "Bash(git init:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"],
 			"defaultModel": "claude-sonnet-5-5",
 			"models": [
 				{ "id": "claude-haiku-5-5", "tier": "economy", "note": "简单、机械的活：查资料、改格式、写小段文档" },
