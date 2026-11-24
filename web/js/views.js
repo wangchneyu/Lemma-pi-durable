@@ -1,6 +1,6 @@
 // 后台各页面。每个页面：mount(root, params) 渲染，update(kind, payload) 响应数据变化，unmount() 清理。
 import { openDispatch } from "./drawer.js";
-import { bindDagPanelEvents, classifyTopology, renderReviewLoopPanel, renderScopeMatrix, renderTaskDag } from "./dag.js";
+import { bindDagPanelEvents, renderReviewLoopPanel, renderScopeMatrix } from "./dag.js";
 import { openCreateIntegrationDialog, openLimitsEditor, openMemberEditor, openOrchestratorEditor, openRecoverDialog, openRepairIntegrationDialog, openResolveOperationDialog, runControlAction } from "./editors.js";
 import { METRICS, MODES, RANGES, Sankey } from "./sankey.js";
 import { buildRuns, callInfo, dispatchRows, isDispatch, loadEarlier, pendingChanges, runningJobs, store } from "./store.js";
@@ -412,7 +412,6 @@ function project() {
 			const readyList = readinessList.filter((r) => r.ready);
 			const activeIntegrations = (store.state.integrations ?? []).filter((it) => !it.supersededBy && it.changeStatus !== "dropped");
 			const canCreateInt = store.changes.filter((c) => !c.integration && ["pending", "conflict"].includes(c.status)).length >= 2;
-			const topoInfo = classifyTopology(tasks, activeIntegrations);
 			root.innerHTML = `
 				<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">执行与协作推进</h2><div class="card-sub">${wfPaused ? "自动推进已暂停" : "自动推进运行中"} · 就绪 ${readyList.length} 项 · ${resources.running.length} 运行 · ${resources.queued.length} 排队 · 预留 $${Number(resources.reservedUsd).toFixed(4)}（估计）</div></div><button type="button" class="${wfPaused ? "primary-btn" : "ghost-btn"} tiny" data-wf-action="${wfPaused ? "resume" : "pause"}">${wfPaused ? "恢复自动协作" : "暂停自动协作"}</button></header><div class="card-body">${resources.queued.map((claim) => `<p>${esc(claim.member)} · ${esc(claim.reason ?? "等待资源")}</p>`).join("") || (readyList.length ? `<p class="muted">当前就绪任务：${readyList.map((r) => `<span class="mono">${esc(r.id)}</span>`).join("、")}</p>` : "当前没有排队任务")}</div></section>
 				${activeIntegrations.length || canCreateInt ? `<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">多分支联合集成与联调</h2><div class="card-sub">合并多个隔离分支并运行全套检查 · 冲突时可直接派成员修现场</div></div>${canCreateInt ? `<button type="button" class="ghost-btn tiny" data-create-int="1">+ 发起联合集成</button>` : ""}</header><div class="card-body">${activeIntegrations.length ? activeIntegrations.slice(0, 6).map((it) => {
@@ -434,11 +433,10 @@ function project() {
 							: `<div class="empty-inline"><span class="dot"></span>还没有 GOAL.md。可以自己写，或者把项目目标告诉总调度，让它起草（会标明待你确认）。成员每次派工都会拿到这份目标。</div>`
 					}</div>
 				</section>
-				${tasks.length ? `<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">协作结构图（DAG）</h2><div class="card-sub">${esc(topoInfo.detail)}</div></div><span class="tier-badge">${esc(topoInfo.title)}</span></header><div class="card-body dag-stage" data-n="projectDag"></div></section>` : ""}
 				<section class="card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">分工表</h2>
 						<div class="card-sub">${tasks.length ? `<span><b>${done}</b>/${tasks.length} 完成</span><span><b>${count("doing")}</b> 进行中</span><span><b>${count("review")}</b> 待验收</span>${count("blocked") ? `<span class="err-t"><b>${count("blocked")}</b> 受阻</span>` : ""}` : "<span>还没有任务</span>"}</div></div>
-						<span class="card-note mono">${esc(p.assignPath)}</span></header>
+						<div class="row-actions"><span class="card-note mono">${esc(p.assignPath)}</span>${tasks.length ? `<a class="ghost-btn tiny" href="#/topology">在协作拓扑看 DAG →</a>` : ""}</div></header>
 					<div class="card-body">
 						${tasks.length ? `<div class="board-progress"><i style="width:${pct}%"></i></div>` : ""}
 						${
@@ -468,20 +466,6 @@ function project() {
 						})
 						.join("")}</tbody></table></div>
 				</section>`;
-			const dagEl = root.querySelector('[data-n="projectDag"]');
-			if (dagEl) {
-				renderTaskDag(dagEl, {
-					tasks: p.tasks,
-					integrations: activeIntegrations,
-					readinessMap,
-					onSelectTask(t) {
-						const card = root.querySelector(`.task-card[data-task-id="${CSS.escape(t.id)}"]`);
-						card?.scrollIntoView({ behavior: "smooth", block: "center" });
-						card?.classList.add("flash");
-						setTimeout(() => card?.classList.remove("flash"), 1200);
-					},
-				});
-			}
 			const loopWrap = root.querySelector('[data-n="reviewLoopWrap"]');
 			if (loopWrap) bindDagPanelEvents(loopWrap);
 		},
