@@ -87,7 +87,9 @@ export function refreshChanges(delay = 0) {
 	}, delay);
 }
 export function pendingChanges() {
-	return store.changes.filter((c) => c.status === "pending" || c.status === "conflict");
+	const bundles = store.changes.filter((c) => c.integration && !c.integration.supersededBy && !["applied", "dropped"].includes(c.status));
+	const covered = new Set(bundles.flatMap((c) => [...c.integration.sources.map((s) => s.id), ...(c.integration.repair?.changeId ? [c.integration.repair.changeId] : [])]));
+	return store.changes.filter((c) => (c.status === "pending" || c.status === "conflict") && !c.integration?.supersededBy && (!covered.has(c.id) || !!c.integration));
 }
 
 export async function loadEarlier() {

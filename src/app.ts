@@ -14,8 +14,15 @@ import { JobHub } from "./jobs.ts";
 import { writeLine } from "./printer.ts";
 import type { AppConfig } from "./config.ts";
 import { createLocalAgentsExtension, type AgentAvailability } from "./tools.ts";
+import { Workflow } from "./task-workflow.ts";
+import { Integrations } from "./integrations.ts";
 
 export interface App {
+	integrate: ReturnType<typeof createLocalAgentsExtension>["integrations"]["start"];
+	rerunIntegration: ReturnType<typeof createLocalAgentsExtension>["integrations"]["startRerun"];
+	repairIntegration: ReturnType<typeof createLocalAgentsExtension>["integrations"]["startRepair"];
+	cancelIntegration: ReturnType<typeof createLocalAgentsExtension>["integrations"]["cancel"];
+	workflow(action: "status" | "pause" | "resume", context: Context): Promise<{ paused: boolean }>;
 	recoverTask: ReturnType<typeof createLocalAgentsExtension>["recover"];
 	/** Stage an idle-host update; applying retains the same Harness and conversation IDs. */
 	prepareMembers(config: AppConfig): () => void;
@@ -76,7 +83,7 @@ export async function openApp(
 	const changes = new ChangeStore(`${config.storage}.changes.json`);
 	const project = new ProjectFiles(config.workdir, config.projectStateDir);
 	const jobs = new JobHub();
-	let { extension, agents, memberExtensions, recover } = createLocalAgentsExtension(config, changes, project, jobs);
+	let { extension, agents, memberExtensions, recover, ensureWorkflow, integrations } = createLocalAgentsExtension(config, changes, project, jobs);
 	const registry = createRegistry();
 	registry.install(extension);
 	for (const extra of options.extensions ?? []) registry.install(extra);
@@ -124,7 +131,18 @@ export async function openApp(
 		if (board) try { project.writeAssign(board); } catch { writeLine("分工数据已恢复，ASSIGN.md 暂时无法导出。"); }
 	}
 	jobs.harness = harness;
-	return { harness, root, agents, changes, project, jobs, recoverTask: (...args) => recover(...args), prepareMembers(next) {
+	if (!options.readOnly) for (const record of Object.values((await harness.snapshot(Integrations, context))?.records ?? {})) {
+		if (!["applied", "dropped"].includes(changes.get(record.id)?.status ?? "")) try { changes.upsert(record); } catch { writeLine("集成状态已保存，改动索引暂时无法导出。"); }
+	}
+	if (!options.readOnly) await harness.commit((tx) => ensureWorkflow(tx, root.id), context);
+	return { harness, root, agents, changes, project, jobs, integrate: (...args) => integrations.start(...args), rerunIntegration: (...args) => integrations.startRerun(...args), repairIntegration: (...args) => integrations.startRepair(...args), cancelIntegration: (...args) => integrations.cancel(...args), recoverTask: (...args) => recover(...args), async workflow(action, context) {
+		if (action === "status") return { paused: (await harness.snapshot(Workflow, context))?.controllers[String(root.id)]?.paused ?? false };
+		await harness.commit(async (tx) => {
+			const state = await tx.doc(Workflow); state.controllers[String(root.id)] ??= {}; state.controllers[String(root.id)]!.paused = action === "pause";
+			if (action === "resume") await ensureWorkflow(tx, root.id);
+		}, context);
+		harness.resume(); return { paused: action === "pause" };
+	}, prepareMembers(next) {
 		const prepared = createLocalAgentsExtension(next, changes, project, jobs);
 		return () => {
 			for (const old of memberExtensions) registry.uninstall(old);
@@ -134,6 +152,8 @@ export async function openApp(
 			for (const member of prepared.memberExtensions) registry.install(member);
 			extension = prepared.extension; memberExtensions = prepared.memberExtensions;
 			recover = prepared.recover;
+			ensureWorkflow = prepared.ensureWorkflow;
+			integrations = prepared.integrations;
 			agents.splice(0, agents.length, ...prepared.agents);
 			Object.assign(config, next);
 		};

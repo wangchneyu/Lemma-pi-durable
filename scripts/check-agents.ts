@@ -61,20 +61,27 @@ for (const agent of detectAgents(config)) {
 		const label = `${agent.kind}${model ? ` / ${model}` : ""}`;
 		console.log(`… ${label}: ${command.join(" ")}`);
 		let reported: string | undefined;
-		const result = await runCli({
-			command: command[0]!,
-			args: [...command.slice(1), ...adapter.buildArgs({ model, extraArgs: c.extraArgs })],
-			cwd: config.workdir,
-			stdin: "Reply with exactly the single word PONG and nothing else. Do not use any tools.",
-			env: cleanEnv(config.stripEnv),
-			timeoutMs: 180_000,
-			onLine: (line, stream) => {
-				if (verbose) console.log(`   [${stream}] ${line.slice(0, 300)}`);
-				const p = adapter.progress(line);
-				if (p.model) reported = p.model;
-				if (!verbose && p.summary) console.log(`   ${p.summary}`);
-			},
-		});
+		let result;
+		try {
+			result = await runCli({
+				command: command[0]!,
+				args: [...command.slice(1), ...adapter.buildArgs({ model, extraArgs: c.extraArgs })],
+				cwd: config.workdir,
+				stdin: "Reply with exactly the single word PONG and nothing else. Do not use any tools.",
+				env: cleanEnv(config.stripEnv),
+				timeoutMs: 180_000,
+				onLine: (line, stream) => {
+					if (verbose) console.log(`   [${stream}] ${line.slice(0, 300)}`);
+					const p = adapter.progress(line);
+					if (p.model) reported = p.model;
+					if (!verbose && p.summary) console.log(`   ${p.summary}`);
+				},
+			});
+		} catch (error) {
+			failed++;
+			console.log(`✗ ${label}: 启动失败（${error instanceof Error ? error.message : String(error)}）`);
+			continue;
+		}
 		const parsed = adapter.parse(result.stdout, result.stderr, result.exitCode);
 		const ok = !parsed.isError && /PONG/i.test(parsed.text);
 		if (!ok) failed++;

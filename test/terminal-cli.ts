@@ -48,6 +48,11 @@ async function runCase(tui: boolean, real = false): Promise<void> {
 			await until("后台派工和验收完成", () => terminalText(output).includes("汇报"), 30_000);
 			send("/tasks");
 			await until("任务命令完成", () => terminalText(output).includes("完整分工表"));
+			send("/ready");
+			send("/workflow pause");
+			await until("暂停自动协作", () => terminalText(output).includes("自动协作已暂停"));
+			send("/workflow resume");
+			await until("恢复自动协作", () => terminalText(output).includes("自动协作已启用"));
 			send("/changes");
 			await until("改动命令完成", () => terminalText(output).includes("待合并"));
 		}

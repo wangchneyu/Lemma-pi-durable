@@ -27,11 +27,11 @@ export { AssistantMessageComponent, UserMessageComponent, ToolExecutionComponent
 /** Keep only presentation hooks: tool execution is always owned by Pi Durable. */
 export function nativeToolRenderers(name: string, cwd: string): ToolRenderers {
 	const factory = { read: createReadToolDefinition, write: createWriteToolDefinition, edit: createEditToolDefinition, bash: createBashToolDefinition }[name];
-	if (name.startsWith("ask_") || ["plan_tasks", "update_task", "review_task", "recover_task", "read_result", "wait_jobs"].includes(name)) return {
+	if (name.startsWith("ask_") || ["plan_tasks", "update_task", "review_task", "recover_task", "read_result", "wait_jobs", "integrate_changes", "read_integration", "repair_integration", "list_files", "search_code", "git_diff", "outline_file", "find_symbol"].includes(name)) return {
 		renderCall(rawArgs, theme, context) {
 			const args = rawArgs && typeof rawArgs === "object" ? rawArgs as Record<string, unknown> : {};
-			const label = name.startsWith("ask_") ? `派工 → ${name.slice(4)}` : ({ plan_tasks: "任务规划", update_task: "更新任务", review_task: "验收任务", recover_task: "恢复任务", read_result: "读取成果", wait_jobs: "等待后台" }[name] ?? name);
-			const detail = args.task ?? args.id ?? args.result_id ?? (Array.isArray(args.tasks) ? `${args.tasks.length} 项任务` : "");
+			const label = name.startsWith("ask_") ? `派工 → ${name.slice(4)}` : ({ plan_tasks: "任务规划", update_task: "更新任务", review_task: "验收任务", recover_task: "恢复任务", read_result: "读取成果", wait_jobs: "等待后台", integrate_changes: "联合集成与测试", read_integration: "读取集成结果", repair_integration: "修复联合集成", list_files: "目录浏览", search_code: "代码搜索", git_diff: "代码差异", outline_file: "文件大纲", find_symbol: "符号定位" }[name] ?? name);
+			const detail = args.task ?? args.symbol ?? args.query ?? args.path ?? args.id ?? args.result_id ?? (Array.isArray(args.tasks) ? `${args.tasks.length} 项任务` : "");
 			const summary = cleanText(String(detail)).replace(/\s+/g, " ");
 			const metadata = [args.task_id, args.model, args.background ? "后台" : undefined, args.session_id ? "续接" : undefined, args.action, args.field].filter(Boolean).map((value) => cleanText(String(value)).replace(/\s+/g, " "));
 			const text = theme.fg("toolTitle", label) + (metadata.length ? theme.fg("muted", ` · ${metadata.join(" · ")}`) : "");

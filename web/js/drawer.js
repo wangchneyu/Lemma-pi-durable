@@ -27,9 +27,26 @@ function render() {
 	const started = slot ? slotStart.get(d.callId) : job?.startedAt;
 	drawer.style.setProperty("--c", agentColor(d.agent));
 	$("#drawerTitle").innerHTML = `<span class="agent-chip">${esc(AGENT_LABEL[d.agent] ?? d.agent)}</span><span class="ticket-no">#${esc(d.callId.slice(-6))}</span><span class="pill" data-s="${status === "running" ? "running" : status === "done" ? "done" : status === "error" ? "error" : "aborted"}">${esc(STATUS_LABEL[status] ?? status)}${status === "running" && started ? ` ${duration(Date.now() - started)}` : ""}</span>`;
+	const roleLabel = d.callId?.startsWith("checker:")
+		? "独立复核（Maker-Checker）"
+		: d.callId?.startsWith("integration-repair:")
+			? "联合集成冲突/联调修复"
+			: d.callId?.startsWith("workflow:")
+				? "Durable 自动依赖推进"
+				: d.job
+					? `后台派工 <code>${esc(d.job)}</code>`
+					: "同步（总调度等结果）";
+	const boardTask = d.taskId ? (store.state?.project?.tasks ?? []).find((t) => t.id === d.taskId) : undefined;
+	const scopeText = boardTask?.scope && (boardTask.scope.allow?.length || boardTask.scope.forbid?.length)
+		? [
+				boardTask.scope.allow?.length ? `允许: <code>${esc(boardTask.scope.allow.join(", "))}</code>` : "",
+				boardTask.scope.forbid?.length ? `禁止: <code>${esc(boardTask.scope.forbid.join(", "))}</code>` : "",
+			].filter(Boolean).join(" · ")
+		: null;
 	const rows = [
-		["方式", d.job ? `后台派工 <code>${esc(d.job)}</code>` : "同步（总调度等结果）"],
-		["分工任务", d.taskId ? esc(d.taskId) : "—"],
+		["方式", roleLabel + (d.job && !roleLabel.includes(d.job) ? ` · <code>${esc(d.job)}</code>` : "")],
+		["分工任务", d.taskId ? `${esc(d.taskId)}${boardTask ? ` · ${esc(boardTask.title)}` : ""}` : "—"],
+		...(scopeText ? [["路径契约", scopeText]] : []),
 		["模型", d.model ? `<code>${esc(d.model)}</code>` : "CLI 默认"],
 		["派工时间", stamp(d.at)],
 		["结束时间", d.endAt ? stamp(d.endAt) : "—"],

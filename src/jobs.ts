@@ -35,7 +35,9 @@ export type JobRecord = {
 	result?: string;
 	isError?: boolean;
 	/** 结果怎么交给总调度的：自动发回（report）或 wait_jobs 收走（wait） */
-	delivered?: "report" | "wait";
+	delivered?: "report" | "wait" | "workflow";
+	/** Coordinator consumes intermediate results without another controller model call. */
+	workflow?: true;
 	/** 正在等它的 wait_jobs 调用：做完时给它发信号，而不是另发一条消息 */
 	waiter?: { task: string; key: string };
 	/** 谁取消的 */

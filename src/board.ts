@@ -8,10 +8,22 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFil
 import { dirname, join } from "node:path";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { AcceptanceCheck, TaskVerification } from "./acceptance.ts";
+import { formatScopeSummary, type TaskScope } from "./scope.ts";
 
 export type TaskStatus = "todo" | "doing" | "review" | "done" | "blocked" | "dropped";
 
 export type BoardTask = {
+	/** Controller that planned this task; omitted in legacy boards. */
+	controllerId?: string;
+	/** Explicit opt-in: the Durable coordinator may dispatch this task when dependencies are accepted. */
+	automation?: { member: string; model?: string; maxReworks: number };
+	/** Independent checker, locked after the first dispatch. */
+	reviewer?: { member: string; model?: string; blind?: boolean };
+	/** Enforced file path contract (allow/forbid) for code changes on this task. */
+	scope?: TaskScope;
+	checksByMember?: { sourceResultId: string; sourceChangeId?: string; sourceHead?: string; resultId?: string; jobId?: string; member: string; status: "running" | "accepted" | "rework" | "blocked" | "failed"; evidence?: string; at: number }[];
+	workflowJobs?: { jobId: string; kind: "execute" | "review"; sourceResultId?: string }[];
+	integrationId?: string;
 	lastAttempt?: { callId: string; controllerId: string; dispatchTaskId: string; member: string; task: string; cwd?: string; model?: string; sessionId?: string; changeId?: string; structured?: boolean; inputs?: { result_id: string; field?: string; offset?: number; limit?: number }[] };
 	recoveries?: { id: string; controllerId: string; action: "resume" | "reassign" | "supply"; member: string; note: string; fromResult: string | null; reviewEvidence?: string; sessionId?: string; basedOn?: string; cwd?: string; model?: string; status: "prepared" | "running" | "finished" | "cancelled"; at: number; callId?: string; cancelledByCall?: string; resultId?: string; previousStatus: TaskStatus; originalTask: string; originalInputs?: { result_id: string; field?: string; offset?: number; limit?: number }[]; structured?: boolean }[];
 	id: string;
@@ -157,6 +169,10 @@ export function renderAssign(tasks: BoardTask[], updatedAt: number): string {
 		lines.push(`- 状态：${STATUS_LABEL[t.status]}${t.role ? ` · 角色：${t.role}` : ""}${t.owner ? ` · 负责：${t.owner}` : ""}`);
 		if (t.deps.length) lines.push(`- 依赖：${t.deps.join("、")}`);
 		if (t.acceptance) lines.push(`- 验收标准：${t.acceptance}`);
+		if (t.scope && (t.scope.allow?.length || t.scope.forbid?.length)) lines.push(`- 路径契约：${formatScopeSummary(t.scope)}`);
+		if (t.automation) lines.push(`- 就绪自动执行：${t.automation.member}；独立复核返工上限 ${t.automation.maxReworks} 次`);
+		if (t.reviewer) lines.push(`- 独立复核成员：${t.reviewer.member}${t.reviewer.model ? ` / ${t.reviewer.model}` : ""}${t.reviewer.blind ? "（代码盲审）" : ""}`);
+		for (const check of t.checksByMember?.slice(-3) ?? []) lines.push(`- 独立复核：${check.sourceResultId} → ${check.member} · ${check.status}${check.evidence ? ` · ${check.evidence.replace(/\n+/g, " ")}` : ""}`);
 		if (t.latestResult) lines.push(`- 最新结果：${t.latestResult}（终端 /result ${t.latestResult} 查看）`);
 		if (t.activeDispatch) lines.push(`- 当前派工：${t.activeDispatch}（执行与收尾由 Durable 管理）`);
 		if (t.verification) lines.push(`- 机器检查：${t.verification.passed ? "通过，仍需复核依据" : "未通过"}；${t.verification.checks.map((check) => `${check.name}：${check.passed ? "通过" : "失败"}（${check.evidence}）`).join("；")}`);
@@ -199,6 +215,7 @@ export function taskBrief(goal: string | undefined, board: BoardState | undefine
 			[
 				`【你负责的任务】${task.id} · ${task.title}${task.role ? `（角色：${task.role}）` : ""}`,
 				task.acceptance ? `验收标准：${task.acceptance}` : "",
+				task.scope && (task.scope.allow?.length || task.scope.forbid?.length) ? `代码路径契约（硬性边界，首次派工后锁定）：${formatScopeSummary(task.scope)}` : "",
 				task.detail ? `任务说明：${task.detail}` : "",
 				task.checks?.length ? `机器验收规则（首次派工后锁定）：${JSON.stringify(task.checks)}` : "",
 				deps.length ? `前置任务：${deps.map((d) => `${d.id} ${d.title}（${STATUS_LABEL[d.status]}）`).join("；")}` : "",

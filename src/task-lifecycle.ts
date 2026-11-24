@@ -3,17 +3,22 @@ import type { BoardState, BoardTask, TaskStatus } from "./board.ts";
 import type { ChangeStore } from "./changes.ts";
 import type { AppConfig } from "./config.ts";
 import type { MemberResult } from "./results.ts";
+import { checkFilesScope } from "./scope.ts";
 
 /** Shared by both review_task and the backwards-compatible update_task entry. */
 export function completionRefusal(board: BoardState, task: BoardTask, report: MemberResult | null | undefined, evidence: string, config: AppConfig, changes: ChangeStore): string | undefined {
 	if (!evidence.trim()) return "完成任务必须记录验收依据。";
 	if (!report || task.latestResult !== report.id || report.status !== "done") return "没有成功的最新交付结果，不能完成任务。";
+	if (task.reviewer && !task.checksByMember?.some((check) => check.sourceResultId === report.id && check.member === task.reviewer!.member && check.member !== report.member && check.status === "accepted" && !!check.resultId && !!check.evidence?.trim())) return "该任务要求独立复核，当前交付尚无有效通过结论，不能绕过复核标完成。";
+	const independent = task.checksByMember?.findLast((check) => check.sourceResultId === report.id && check.status === "accepted");
+	if (independent?.sourceChangeId && changes.get(independent.sourceChangeId)?.head !== independent.sourceHead) return "代码版本已变化，旧独立复核结论不能验收新的代码版本。";
 	if (task.activeDispatch || !["review", "done"].includes(task.status)) return "任务仍在执行或未进入待验收状态，不能完成。";
 	if (task.recoveries?.some((recovery) => ["prepared", "running"].includes(recovery.status))) return "任务恢复计划尚未收尾，不能验收旧结果。";
 	if (task.deps.some((id) => board.tasks[id]?.status !== "done")) return "前置任务尚未验收完成。";
 	if (Object.values(board.tasks).some((child) => child.parent === task.id && !["done", "dropped"].includes(child.status))) return "还有未验收的子任务，不能完成上级任务。";
 	if (task.checks?.length && !verifyReport(report.id, report.text, task.acceptance, task.checks, report.createdAt).passed) return "机器验收检查尚未通过，不能完成任务。";
-	if (config.autonomy.enabled && task.changes.some((id) => { const change = changes.get(id); return change && change.files.length > 0 && config.autonomy.checks.length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed); })) return "代码验收检查尚未通过，不能完成任务。";
+	if (task.scope && task.changes.some((id) => { const change = changes.get(id); return change && change.status !== "dropped" && checkFilesScope(change.files, task.scope).length > 0; })) return "代码改动超出任务路径契约（scope），不能完成任务。";
+	if (config.autonomy.enabled && task.changes.some((id) => { const change = changes.get(id); return change && change.status !== "dropped" && change.files.length > 0 && config.autonomy.checks.length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed); })) return "代码验收检查尚未通过，不能完成任务。";
 }
 
 export function recordReview(task: BoardTask, report: MemberResult, action: "accept" | "rework" | "block", evidence: string, at: number): void {

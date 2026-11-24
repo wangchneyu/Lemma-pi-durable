@@ -8,6 +8,7 @@ import type { ChangeStore } from "./changes.ts";
 import type { AppConfig } from "./config.ts";
 import { completionRefusal, recordReview } from "./task-lifecycle.ts";
 import { pendingRecovery } from "./task-recovery.ts";
+import { readyTasks } from "./task-readiness.ts";
 
 export function createTaskReviewTool(project: ProjectFiles, config: AppConfig, changes: ChangeStore) {
 	return defineTool({
@@ -20,6 +21,8 @@ export function createTaskReviewTool(project: ProjectFiles, config: AppConfig, c
 			const report = (await api.snapshot(Results, api.conversationId, args.result_id, context))?.result;
 			const fail = (message: string) => ({ output: [{ type: "text" as const, text: message }], isError: true });
 			if (!task || !report || task.latestResult !== args.result_id) return fail("任务或最新结果不匹配，不能验收其他任务、会话或旧结果。");
+			if (task.controllerId && task.controllerId !== String(api.conversationId)) return fail("不能跨总控验收其他任务。");
+			if (task.checksByMember?.some((check) => check.status === "running") && ["accept", "rework"].includes(args.action)) return fail("独立复核正在进行，等待其结论；需要人工停止时可 block。");
 			if (pendingRecovery(task)) return fail("任务已有恢复计划，等待派工收尾后再验收。");
 			const verdict = args.action === "accept" ? "accepted" : args.action === "rework" ? "rework" : args.action === "block" ? "blocked" : undefined;
 			if (verdict && task.review?.resultId === report.id && task.review.verdict === verdict && task.review.evidence === args.evidence?.trim().slice(0, 6000) && task.status === (args.action === "accept" ? "done" : args.action === "rework" ? "todo" : "blocked")) return { output: [{ type: "text" as const, text: JSON.stringify({ task: args.id, action: args.action, resultId: report.id, alreadyRecorded: true }) }] };
@@ -31,9 +34,10 @@ export function createTaskReviewTool(project: ProjectFiles, config: AppConfig, c
 			})) return fail("代码验收尚未通过，不能通过业务验收绕过代码检查。");
 			const contract = acceptanceContract(task.acceptance, task.checks);
 			const verification = task.checks?.length ? verifyReport(report.id, report.text, task.acceptance, task.checks, api.now()) : undefined;
-			const { result } = await commitBoard(project, { now: () => api.now(), output: (chunk) => api.output(chunk), commit: (change) => api.commit(change, context) }, async (board, tx) => {
+			const { result, board } = await commitBoard(project, { now: () => api.now(), output: (chunk) => api.output(chunk), commit: (change) => api.commit(change, context) }, async (board, tx) => {
 				const current = board.tasks[args.id];
 				if (!current || current.latestResult !== args.result_id || current.status !== task.status || acceptanceContract(current.acceptance, current.checks) !== contract) return "任务已变化，请重新读取后验收。";
+				if (current.checksByMember?.some((check) => check.status === "running") && ["accept", "rework"].includes(args.action)) return "独立复核已开始，等待其结论或明确标为受阻。";
 				if (current.activeDispatch) return "任务仍在执行，请等待收尾。";
 				if (args.action === "accept") {
 					const latest = (await tx.doc(Results, api.conversationId, args.result_id, null)).result;
@@ -47,7 +51,7 @@ export function createTaskReviewTool(project: ProjectFiles, config: AppConfig, c
 				return null;
 			});
 			if (result) return fail(result);
-			return { output: [{ type: "text" as const, text: JSON.stringify({ task: args.id, action: args.action, resultId: report.id, verification: verification ?? null, evidence: args.evidence ?? null }) }], isError: args.action === "check" && !!verification && !verification.passed };
+			return { output: [{ type: "text" as const, text: JSON.stringify({ task: args.id, action: args.action, resultId: report.id, verification: verification ?? null, evidence: args.evidence ?? null, ready: readyTasks(board, String(api.conversationId)).filter((task) => task.ready) }) }], isError: args.action === "check" && !!verification && !verification.passed };
 		},
 	});
 }

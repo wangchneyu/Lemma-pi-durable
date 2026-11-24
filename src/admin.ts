@@ -21,6 +21,9 @@ import { Jobs, type JobRecord, type JobsState } from "./jobs.ts";
 import { LEAD_TOOL } from "./lead.ts";
 import { AgentSessions, RunBudget } from "./tools.ts";
 import { Learning } from "./learning.ts";
+import { Integrations, integrationSummary } from "./integrations.ts";
+import { readyTasks } from "./task-readiness.ts";
+import { Workflow } from "./task-workflow.ts";
 import { parseToolResult, toViewItem, toViewLive, type Dispatch, type ViewItem, type ViewLive } from "./view.ts";
 
 const WEB_DIR = fileURLToPath(new URL("../web/", import.meta.url));
@@ -321,7 +324,39 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			preview: j.result ? j.result.slice(0, 280) : d.preview,
 		};
 	}
-	const allDispatches = () => [...dispatches.values()].map(withJob);
+	function jobToDispatch(j: JobRecord): Dispatch {
+		const status: Dispatch["status"] = j.status === "running" ? "open" : j.status === "done" ? "done" : j.status === "failed" ? "error" : "aborted";
+		const checkerMatch = j.callId.match(/^checker:(T\d+):/);
+		return {
+			key: `job:${j.id}`,
+			callId: j.callId,
+			job: j.id,
+			agent: j.agent,
+			task: j.task,
+			taskId: j.taskId ?? checkerMatch?.[1],
+			basedOn: j.basedOn,
+			resume: j.resume ?? null,
+			at: j.startedAt,
+			endAt: j.endedAt,
+			durationMs: j.durationMs,
+			status,
+			model: j.model ?? config.agents[j.agent as AgentKind]?.defaultModel,
+			cost: j.costUsd,
+			costEstimated: j.costEstimated,
+			sessionId: j.sessionId,
+			changeId: j.changeId,
+			preview: j.result ? j.result.slice(0, 280) : undefined,
+		};
+	}
+	const allDispatches = () => {
+		const explicit = [...dispatches.values()].map(withJob);
+		const seenJobs = new Set(explicit.map((d) => d.job).filter(Boolean));
+		const seenCalls = new Set(explicit.map((d) => d.callId));
+		const internal = Object.values(jobs)
+			.filter((j) => (!j.conversation || j.conversation === String(root.id)) && !seenJobs.has(j.id) && !seenCalls.has(j.callId))
+			.map(jobToDispatch);
+		return [...explicit, ...internal];
+	};
 	let cursor: any;
 	do {
 		const page = await root.entries({ order: "ascending" }, 500, cursor, context);
@@ -380,6 +415,8 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 	};
 	const resourceChanges = harness.observeCommits({ advance(publication) {
 		if (publication.changes.some((change) => change.type === "document" && ["lemma.resources", "lemma.cost-ledger", "lemma.business-operations"].includes(change.record.kind))) broadcast("resources", null);
+		if (publication.changes.some((change) => change.type === "document" && ["lemma.integrations", "lemma.task-workflow", "pi-agent.board"].includes(change.record.kind))) broadcast("project", null);
+		if (publication.changes.some((change) => change.type === "document" && change.record.kind === "pi-agent.jobs")) onJobs();
 	}, end() {} });
 	cleanup.push(() => resourceChanges.detach());
 	const watch = await root.watch(context);
@@ -474,8 +511,11 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 	 * 同一个成员的多条泳道 = 它同时 / 先后开的多个会话；时间条重叠 = 并行。
 	 */
 	async function topology(limit = 80) {
+		await refreshJobs();
 		const controller = await root.agent(context);
 		const sessions = ((await harness.snapshot(AgentSessions, context)) as any)?.sessions ?? {};
+		const boardDoc = (await harness.snapshot(Board, context)) as BoardState | undefined;
+		const integrationsDoc = await harness.snapshot(Integrations, context);
 		const live = lastLive;
 		const now = Date.now();
 		const list = allDispatches()
@@ -531,6 +571,41 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 				resume: d.resume,
 				model: d.model ?? null,
 				cost: d.cost ?? null,
+				reviewRole: d.callId.startsWith("checker:"),
+			};
+		});
+		// 联合集成：合并多成员分支并运行检查
+		const integrationRecords = Object.values(integrationsDoc?.records ?? {})
+			.filter((r) => r.integration?.controllerId === String(root.id))
+			.sort((a, b) => a.createdAt - b.createdAt)
+			.slice(-Math.max(10, Math.floor(limit / 2)));
+		const integrationBars = integrationRecords.map((r) => {
+			const current = changes.get(r.id) ?? r;
+			const st = current.integration!.status;
+			const running = ["preparing", "merging", "repairing", "testing"].includes(st);
+			const end = running ? now : Math.max(current.createdAt + 80, current.updatedAt);
+			const laneId = `integration:${current.id}`;
+			lanes.set(laneId, { id: laneId, agent: "integration", session: current.id, rounds: current.integration!.checks.length || 1, first: current.createdAt, last: end, running, lastTask: current.task.slice(0, 80), tasks: [], model: st });
+			const barStatus: Dispatch["status"] = running ? "open" : st === "passed" ? "done" : st === "cancelled" ? "aborted" : "error";
+			return {
+				key: `integration:${current.id}`,
+				lane: laneId,
+				agent: "integration",
+				lead: undefined as string | undefined,
+				start: current.createdAt,
+				end,
+				running,
+				status: barStatus,
+				mode: "integration" as const,
+				job: null,
+				task: `${current.task} · ${st}`,
+				taskId: null,
+				changeId: current.id,
+				basedOn: current.integration!.repair?.fromId ?? null,
+				resume: null,
+				model: `${current.integration!.reports.filter((rep) => rep.passed).length}/${current.integration!.checks.length} 检查`,
+				cost: null,
+				reviewRole: false,
 			};
 		});
 		// 子调度：每个一条泳道，时间条覆盖它从接手到汇报的整段
@@ -559,16 +634,34 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					resume: null,
 					model: null,
 					cost: null,
+					reviewRole: false,
 				};
 			});
-		// 依赖：基于某次改动开工的派工 ← 产出那次改动的派工
-		const byChange = new Map(bars.filter((b) => b.changeId).map((b) => [b.changeId!, b.key]));
-		const links: { from: string; to: string; change?: string | null; type: "based_on" | "spawn" }[] = [
+		// 依赖：基于某次改动开工的派工 ← 产出那次改动的派工 / 联合集成
+		const byChange = new Map<string, string>([
+			...bars.filter((b) => b.changeId).map((b) => [b.changeId!, b.key] as const),
+			...integrationBars.map((b) => [b.changeId!, b.key] as const),
+		]);
+		const byJob = new Map(bars.filter((b) => b.job).map((b) => [b.job!, b]));
+		const reviewLinks: { from: string; to: string; change?: string | null; type: "review" }[] = [];
+		for (const t of Object.values(boardDoc?.tasks ?? {})) {
+			const execBars = bars.filter((b) => b.taskId === t.id && !b.reviewRole);
+			for (const check of t.checksByMember ?? []) {
+				const checkerBar = check.jobId ? byJob.get(check.jobId) : undefined;
+				const sourceBar = (check.sourceChangeId ? bars.find((b) => b.changeId === check.sourceChangeId) : undefined) ?? execBars.filter((b) => b.end <= (checkerBar?.start ?? Infinity)).at(-1) ?? execBars[0];
+				if (sourceBar && checkerBar && !sourceBar.basedOn) {
+					reviewLinks.push({ from: sourceBar.key, to: checkerBar.key, change: check.sourceChangeId ?? t.id, type: "review" });
+				}
+			}
+		}
+		const links: { from: string; to: string; change?: string | null; type: "based_on" | "spawn" | "integrate" | "review" }[] = [
 			...bars.filter((b) => b.basedOn && byChange.has(b.basedOn)).map((b) => ({ from: byChange.get(b.basedOn!)!, to: b.key, change: b.basedOn, type: "based_on" as const })),
+			...integrationRecords.flatMap((r) => r.integration!.sources.filter((s) => byChange.has(s.id)).map((s) => ({ from: byChange.get(s.id)!, to: `integration:${r.id}`, change: s.id, type: "integrate" as const }))),
+			...reviewLinks,
 			// 子调度 → 它派的工
 			...bars.filter((b) => b.lead && leads.has(b.lead)).map((b) => ({ from: b.lead!, to: b.key, type: "spawn" as const })),
 		];
-		bars.push(...(leadBars as any[]));
+		bars.push(...(integrationBars as any[]), ...(leadBars as any[]));
 		// 同一时刻最多有几个派工在跑
 		const edges = bars.flatMap((b) => [
 			{ t: b.start, d: 1 },
@@ -583,6 +676,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			orchestrator: { model: controller.model?.modelId ?? config.orchestrator.modelId, busy: live.busy, turns: live.turns },
 			members: [
 				...agents.map((a) => ({ kind: a.kind, label: agentAdapter(a.kind, config.agents[a.kind]).label, available: a.available })),
+				...(integrationBars.length ? [{ kind: "integration", label: "联合集成", available: true }] : []),
 				...(leads.size ? [{ kind: "lead", label: "子调度", available: true }] : []),
 			],
 			lanes: [...lanes.values()].map((l) => ({ ...l, known: l.session ? !!sessions[l.session] : false })),
@@ -600,7 +694,16 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 		const useCount = new Map<string, number>();
 		for (const d of allDispatches()) if (d.sessionId) useCount.set(d.sessionId, (useCount.get(d.sessionId) ?? 0) + 1);
 		const o = config.orchestrator;
+		const boardDoc = (await harness.snapshot(Board, context)) as BoardState | undefined;
+		const workflowDoc = await harness.snapshot(Workflow, context);
+		const integrationsDoc = await harness.snapshot(Integrations, context);
 		return {
+			workflow: { paused: workflowDoc?.controllers[String(root.id)]?.paused ?? false },
+			readyTasks: boardDoc ? readyTasks(boardDoc, String(root.id)) : [],
+			integrations: Object.values(integrationsDoc?.records ?? {})
+				.filter((r) => r.integration?.controllerId === String(root.id))
+				.sort((a, b) => b.createdAt - a.createdAt)
+				.map((r) => integrationSummary(changes.get(r.id) ?? r)),
 			operations: operationList(await harness.snapshot(Operations, context)).map(({ id, member, tool, method, status, createdAt, updatedAt, result, resolution }) => ({ id, member, tool, method, status, createdAt, updatedAt, failure: result?.failure, resolution })),
 			pid: process.pid,
 			startedAt,
@@ -631,7 +734,7 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 				goal: project.goal() ?? null,
 				goalPath: project.goalPath,
 				assignPath: project.assignPath,
-				tasks: boardTasks((await harness.snapshot(Board, context)) as BoardState | undefined),
+				tasks: boardTasks(boardDoc),
 				roles: config.roles,
 			},
 			changeCounts: changes.list().reduce<Record<string, number>>((m, ch) => ((m[ch.status] = (m[ch.status] ?? 0) + 1), m), {}),
@@ -654,7 +757,15 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					models: c.models,
 					defaultModel: c.defaultModel ?? null,
 					api: c.api
-						? { type: c.api.type, host: hostOf(c.api.baseUrl), keySource: memberKey(c.api).source, bash: c.api.bash, bashAllow: c.api.bashAllow, tools: [...memberToolNames(c.api), ...(c.api.httpTools ?? []).map((tool) => tool.id), ...(c.api.mcpServers ?? []).flatMap((grant) => grant.tools.map((tool) => `mcp_${grant.id}_${tool.name}`))] }
+						? {
+								type: c.api.type,
+								host: hostOf(c.api.baseUrl),
+								keySource: memberKey(c.api).source,
+								bash: c.api.bash,
+								bashAllow: c.api.bashAllow,
+								tools: [...memberToolNames(c.api), ...(c.api.httpTools ?? []).map((tool) => tool.id), ...(c.api.mcpServers ?? []).flatMap((grant) => grant.tools.map((tool) => `mcp_${grant.id}_${tool.name}`))],
+								codeTools: (c.workspace ?? "code") !== "none" && memberToolNames(c.api).includes("read") ? ["list_files", "search_code", "git_diff", "outline_file", "find_symbol"] : [],
+							}
 						: null,
 				};
 			}),
@@ -689,7 +800,12 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 	/** 按 key 查；也接受 callId（取最近一次） */
 	async function dispatchDetail(id: string) {
 		const raw = dispatches.get(id) ?? dispatches.get(latestByCall.get(id) ?? "");
-		const d = raw ? withJob(raw) : undefined;
+		let d = raw ? withJob(raw) : undefined;
+		if (!d) {
+			const jobKey = id.startsWith("job:") ? id.slice(4) : Object.values(jobs).find((j) => j.callId === id)?.id;
+			const j = jobKey ? jobs[jobKey] : undefined;
+			if (j && (!j.conversation || j.conversation === String(root.id))) d = jobToDispatch(j);
+		}
 		if (!d) return undefined;
 		let result: string | undefined;
 		if (d.resultEntryId !== undefined) {

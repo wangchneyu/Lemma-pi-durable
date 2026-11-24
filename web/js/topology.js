@@ -119,12 +119,14 @@ export function topology() {
 		if (!data) return;
 		const s = data.stats;
 		const jobs = runningJobs().length;
+		const integrationsCount = data.bars.filter((b) => b.mode === "integration").length;
+		const reviewsCount = data.bars.filter((b) => b.reviewRole).length;
 		box.innerHTML = [
 			[`总调度`, data.orchestrator.busy ? `<b class="live">调度中</b>` : "待命"],
 			[`正在执行`, `<b>${s.running}</b> 路${jobs ? `（后台 ${jobs}）` : ""}`],
 			[`并行峰值`, `<b>${s.peak}</b> 路`],
-			[`会话`, `<b>${data.lanes.filter((l) => l.session).length}</b> 个`],
-			[`后台派工`, `<b>${s.async}</b> / ${s.total} 次`],
+			[`会话`, `<b>${data.lanes.filter((l) => l.session && l.agent !== "integration").length}</b> 个`],
+			[`后台 / 复核 / 集成`, `<b>${s.async}</b> 后台${reviewsCount ? ` · <b>${reviewsCount}</b> 复核` : ""}${integrationsCount ? ` · <b>${integrationsCount}</b> 集成` : ""}`],
 		]
 			.map(([k, v]) => `<div class="topo-stat"><span>${k}</span><strong>${v}</strong></div>`)
 			.join("");
@@ -141,7 +143,7 @@ export function topology() {
 		const width = Math.max(980, stage.clientWidth - 12);
 		const timeW = width - COL.time - 24;
 		// ---- 布局：成员分组，组内按会话最早开始时间排 ----
-		const members = [...new Set(["lead", ...KINDS, ...data.members.map((m) => m.kind), ...data.lanes.map((lane) => lane.agent)])].map((k) => ({ kind: k, info: data.members.find((m) => m.kind === k), lanes: data.lanes.filter((l) => l.agent === k).sort((a, b) => a.first - b.first) })).filter(
+		const members = [...new Set(["lead", "integration", ...KINDS, ...data.members.map((m) => m.kind), ...data.lanes.map((lane) => lane.agent)])].map((k) => ({ kind: k, info: data.members.find((m) => m.kind === k), lanes: data.lanes.filter((l) => l.agent === k).sort((a, b) => a.first - b.first) })).filter(
 			(m) => m.lanes.length || m.info?.available,
 		);
 		let y = TOP;
@@ -254,7 +256,13 @@ export function topology() {
 				const cy = laneY.get(l.id);
 				const g = svg("g", { class: `topo-lane${l.running ? " busy" : ""}`, transform: `translate(${COL.lane},${cy - LANE_H / 2 + 3})`, style: `--c:${agentColor(m.kind)}` });
 				g.append(svg("rect", { width: width - COL.lane - 16, height: LANE_H - 6, rx: 6, class: "track" }));
-				const label = l.session ? `会话 ${l.session.slice(0, 8)}` : "一次性";
+				const label = m.kind === "integration"
+					? `集成 #${(l.session ?? l.id).slice(0, 8)}`
+					: m.kind === "lead"
+						? `子调度 ${l.model ?? ""}`
+						: l.session
+							? `会话 ${l.session.slice(0, 8)}`
+							: "一次性";
 				g.append(svg("text", { x: 10, y: 12, class: "name" }, label));
 				g.append(svg("text", { x: 10, y: 22, class: "sub" }, `${l.rounds} 轮${l.tasks.length ? ` · ${l.tasks.join(" ")}` : ""}${l.model ? ` · ${short(l.model, 16)}` : ""}`));
 				const title = svg("title", {}, `${label}\n${l.rounds} 轮，最近：${l.lastTask ?? ""}${l.session ? `\n${l.session}` : ""}`);
@@ -281,8 +289,8 @@ export function topology() {
 				links.append(svg("path", { class: "spawn", d: `M${xs},${y1 + 8} C${xs},${(y1 + y2) / 2} ${xOf(b.start)},${(y1 + y2) / 2} ${xOf(b.start)},${y2 - 8}`, "marker-end": "url(#topoArrow)" }));
 				continue;
 			}
-			links.append(svg("path", { d: curve(x1, y1, x2, y2), "marker-end": "url(#topoArrow)" }));
-			links.append(svg("text", { x: (x1 + x2) / 2 + 4, y: (y1 + y2) / 2 - 3 }, `#${link.change}`));
+			links.append(svg("path", { class: link.type === "integrate" || link.type === "review" ? link.type : "", d: curve(x1, y1, x2, y2), "marker-end": "url(#topoArrow)" }));
+			if (link.change) links.append(svg("text", { x: (x1 + x2) / 2 + 4, y: (y1 + y2) / 2 - 3 }, link.type === "review" ? `复核 ${link.change}` : `#${link.change}`));
 		}
 
 		// ---- 派工时间条 ----
@@ -301,14 +309,20 @@ export function topology() {
 			});
 			g.append(svg("rect", { width: w, height: 16, rx: 4, class: "body" }));
 			if (b.mode === "async") g.append(svg("rect", { width: w, height: 16, rx: 4, class: "stripe", fill: "url(#topoStripe)" }));
-			const label = b.mode === "lead" ? `🧭 ${b.task.split("：")[0]}${b.taskId ? ` ${b.taskId}` : ""}` : [b.job, b.taskId].filter(Boolean).join(" ") || (b.resume ? "续" : "");
+			const label = b.mode === "lead"
+				? `🧭 ${b.task.split("：")[0]}${b.taskId ? ` ${b.taskId}` : ""}`
+				: b.mode === "integration"
+					? `🔀 #${b.changeId}`
+					: b.reviewRole
+						? `🔎 ${[b.job, b.taskId].filter(Boolean).join(" ")}`
+						: [b.job, b.taskId].filter(Boolean).join(" ") || (b.resume ? "续" : "");
 			if (label && w > 26) g.append(svg("text", { x: 5, y: 12 }, short(label, Math.max(2, Math.floor(w / 7)))));
 			g.append(
 				svg(
 					"title",
 					{},
 					[
-						`${AGENT_LABEL[b.agent] ?? b.agent}${b.mode === "lead" ? " · 接手子目标，自己拆任务派工" : b.job ? ` · 后台 ${b.job}` : " · 同步"}${b.lead ? " · 由子调度派出" : ""}${b.taskId ? ` · ${b.taskId}` : ""}`,
+						`${AGENT_LABEL[b.agent] ?? b.agent}${b.mode === "lead" ? " · 接手子目标，自己拆任务派工" : b.mode === "integration" ? " · 多分支合并与联合测试" : b.reviewRole ? ` · 独立复核 ${b.job ?? ""}` : b.job ? ` · 后台 ${b.job}` : " · 同步"}${b.lead ? " · 由子调度派出" : ""}${b.taskId ? ` · ${b.taskId}` : ""}`,
 						b.task,
 						`${stamp(b.start)} → ${b.running ? "进行中" : stamp(b.end)}（${duration(b.end - b.start)}）`,
 						[b.model, b.cost != null ? money(b.cost) : null, b.changeId ? `改动 #${b.changeId}` : null, b.basedOn ? `基于 #${b.basedOn}` : null].filter(Boolean).join(" · "),
@@ -317,7 +331,7 @@ export function topology() {
 						.join("\n"),
 				),
 			);
-			g.addEventListener("click", () => (b.mode === "lead" ? toast("子调度：它派出的工见下方连线；点那些时间条看详情") : openDispatch(b.key)));
+			g.addEventListener("click", () => (b.mode === "lead" ? toast("子调度：它派出的工见下方连线；点那些时间条看详情") : b.mode === "integration" ? (location.hash = `#/changes/${encodeURIComponent(b.changeId)}`) : openDispatch(b.key)));
 			g.addEventListener("keydown", (e) => {
 				if (e.key === "Enter") openDispatch(b.key);
 			});
@@ -366,7 +380,7 @@ export function topology() {
 					</header>
 					<div class="card-body topo-stage" data-n="stage"><div class="empty-inline"><span class="dot"></span>加载中…</div></div>
 					<footer class="topo-legend">
-						<span><i class="lg sync"></i>同步派工</span><span><i class="lg async"></i>后台派工</span><span><i class="lg run"></i>进行中</span><span><i class="lg dep"></i>基于另一次改动</span><span><i class="lg spawn"></i>子调度派出的工</span>
+						<span><i class="lg sync"></i>同步派工</span><span><i class="lg async"></i>后台派工</span><span><i class="lg run"></i>进行中</span><span><i class="lg dep"></i>基于另一次改动</span><span><i class="lg integrate"></i>多分支合流集成</span><span><i class="lg review"></i>独立复核 / 盲审</span><span><i class="lg spawn"></i>子调度派出的工</span>
 					</footer>
 				</section>
 				<section class="card"><header class="card-head"><h2 class="card-title">后台派工</h2><span class="card-note">终端：/jobs、/jobs cancel &lt;编号&gt;</span></header><div class="card-body flush" data-n="jobs"></div></section>`;
@@ -419,7 +433,7 @@ export function topology() {
 				}
 				return;
 			}
-			if (kind === "jobs" || kind === "dispatches" || kind === "live" || kind === "items") {
+			if (kind === "jobs" || kind === "dispatches" || kind === "changes" || kind === "state" || kind === "live" || kind === "items") {
 				jobsPanel();
 				reload(kind === "live" ? 600 : 250);
 			}

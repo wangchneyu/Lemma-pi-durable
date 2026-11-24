@@ -28,10 +28,14 @@ import { conversationIdentity, CONVERSATION_POLICY } from "./conversation.ts";
 import { createReadResultTool, Results } from "./results.ts";
 import { completionRefusal, manualTransitionRefusal, recordReview } from "./task-lifecycle.ts";
 import { validateAcceptanceChecks, type AcceptanceCheck } from "./acceptance.ts";
+import { validateTaskScope, type TaskScope } from "./scope.ts";
 import { createTaskReviewTool } from "./task-review.ts";
 import { admit, releaseClaim } from "./resources.ts";
 import { RunBudget } from "./dispatch.ts";
 import { createTaskRecoveryTool, pendingRecovery, prepareRecovery, type RecoveryRequest } from "./task-recovery.ts";
+import { readyTasks } from "./task-readiness.ts";
+import { createTaskWorkflow } from "./task-workflow.ts";
+import { createIntegrations, type IntegrationHooks } from "./integrations.ts";
 
 export { AgentSessions, estimateCost, RunBudget } from "./dispatch.ts";
 
@@ -84,7 +88,7 @@ function toolIO(api: any, context: any): DispatchIO {
 type JobInput = { job: string; kind: AgentKind; callId: string; args: DispatchArgs };
 
 /** 后台派工任务：在 Pi Durable 里作为后台任务运行，做完后把结果交给总调度 */
-function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>) {
+function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>, onSettled?: (controller: ConversationId) => Promise<void>) {
 	const { hub, changes } = deps;
 	/** 后台任务提供的持久化能力 */
 	const jobIO = (runtime: any, context: Context, input: JobInput, signal: AbortSignal): DispatchIO => ({
@@ -152,6 +156,10 @@ function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>) {
 					const doc = (await tx.doc(Jobs)) as JobsState;
 					await releaseClaim(tx, String(runtime.taskId));
 					const boardTask = input.args.task_id ? (await tx.doc(Board)).tasks[input.args.task_id] : undefined;
+					if (boardTask?.activeDispatch === input.callId) {
+						boardTask.status = result.aborted ? "todo" : "blocked"; delete boardTask.activeDispatch;
+						boardTask.notes.push(`派工未产生成功回执：${result.text.slice(0, 1500)}`); boardTask.updatedAt = runtime.now();
+					}
 					const recovery = boardTask ? pendingRecovery(boardTask) : undefined;
 					if (recovery?.callId === input.callId) { recovery.status = "finished"; if (boardTask && !recovery.resultId) { boardTask.status = result.aborted ? "todo" : "blocked"; boardTask.notes.push(result.text.slice(0, 1500)); } }
 					const current = doc.jobs[input.job];
@@ -177,6 +185,8 @@ function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>) {
 					const waiterTask = waiter ? await tx.task(Number(waiter.task) as any) : undefined;
 					if (waiter && waiterTask && waiterTask.state.status !== "terminal" && waiterTask.state.status !== "completing") {
 						await tx.signal(Number(waiter.task) as any, JobDone, waiter.key, { id: input.job });
+					} else if (current.workflow) {
+						next.delivered = "workflow";
 					} else if (!(status === "cancelled" && next.cancelledBy === "orchestrator") && conversation) {
 						await conversation.submit(tx, {
 							type: "input",
@@ -191,6 +201,7 @@ function createJobTask(deps: DispatchDeps, commands: Map<AgentKind, string[]>) {
 					doc.jobs[input.job] = next;
 					return { status: "terminal", outcome: { status: "completed", result: { job: input.job, status } } };
 				}, context);
+				if (!hub.closing) await onSettled?.(runtime.conversationId);
 				hub.changed();
 			},
 		},
@@ -370,6 +381,7 @@ function createJobTools(hub: JobHub) {
 				return { sleep: { signals: state.running.map((id) => JobDone.key(`${id}.${round}`)), until: deadline, checkpoint: { round, deadline, ids: state.ids } } } as any;
 			}
 			const blocks = state.jobs.map((j) => {
+				if (j.delivered === "workflow") return `【后台结果 ${j.id}】已由 Durable 协作流程处理；/tasks 或 ready_tasks 查看任务与复核状态。`;
 				if (j.status === "running") return `【${j.id} · 进行中】${j.agent}${j.taskId ? ` · 任务 ${j.taskId}` : ""}：${clip(j.task, 60)}`;
 				if (j.delivered === "report") return `【后台结果 ${j.id}】已经自动发给过你（见前面的消息），这里不重复全文。`;
 				return jobReport(j);
@@ -425,6 +437,9 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 					checks: opt(arr(obj({ name: str(), kind: oneOf(["contains", "json_exists", "json_equals"]), path: opt(str()), value: opt(str({ description: "contains 用文本；json_equals 用 JSON 文本" })) }), { maxItems: 20 })),
 					role: opt(str({ description: "角色" })),
 					owner: opt(str({ description: "指定成员：claude / codex / gemini；不填按角色" })),
+					automation: opt(obj({ member: str(), model: opt(str()), maxReworks: opt(num({ minimum: 0, maximum: 3 })) }, { description: "明确授权依赖就绪后自动派发；maxReworks 限制独立复核后的自动返工，默认 0" })),
+					reviewer: opt(obj({ member: str(), model: opt(str()), blind: opt(bool({ description: "代码盲审模式：为 true 时不向复核员传递执行者的自述文本，仅基于需求与 git_diff 客观代码变更做盲审，消除迎合偏见" })) }, { description: "交付后自动派给另一独立成员复核；首次派工后锁定" })),
+					scope: opt(obj({ allow: opt(arr(str(), { minItems: 1, maxItems: 16, description: "仅允许修改的相对路径前缀或文件" })), forbid: opt(arr(str(), { minItems: 1, maxItems: 16, description: "禁止修改的相对路径前缀或文件（如契约文件或测试目录）" })) }, { description: "任务级代码路径契约（硬性边界，首次派工后锁定）" })),
 					deps: opt(arr(str(), { description: "依赖的任务" })),
 					detail: opt(str({ description: "补充说明" })),
 					parent: opt(str({ description: "属于哪项上级任务（子调度拆子任务时传它负责的任务编号）" })),
@@ -432,8 +447,17 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 			),
 		}),
 		replay: "safe",
-		execute: async (args: { tasks: { title: string; acceptance?: string; checks?: AcceptanceCheck[]; role?: string; owner?: string; deps?: string[]; detail?: string; parent?: string }[] }, api, context) => {
-			for (const task of args.tasks) validateAcceptanceChecks(task.checks ?? []);
+		execute: async (args: { tasks: { title: string; acceptance?: string; checks?: AcceptanceCheck[]; role?: string; owner?: string; automation?: { member: string; model?: string; maxReworks?: number }; reviewer?: { member: string; model?: string; blind?: boolean }; scope?: TaskScope; deps?: string[]; detail?: string; parent?: string }[] }, api, context) => {
+			for (const task of args.tasks) {
+				validateAcceptanceChecks(task.checks ?? []);
+				validateTaskScope(task.scope);
+				for (const policy of [task.automation, task.reviewer]) if (policy) {
+					const member = config.agents[policy.member];
+					if (!member?.enabled || policy.model && !member.models.some((model) => model.id === policy.model) && policy.model !== member.defaultModel) throw new Error("自动执行或复核成员未启用，或指定模型不在清单中。");
+				}
+				if (task.automation && (!Number.isInteger(task.automation.maxReworks ?? 0) || (task.automation.maxReworks ?? 0) < 0 || (task.automation.maxReworks ?? 0) > 3)) throw new Error("maxReworks 必须为 0–3 的整数。");
+				if (task.reviewer && task.reviewer.member === (task.automation?.member ?? task.owner)) throw new Error("执行成员与独立复核成员不能相同。");
+			}
 			const { result } = await commitBoard(project, toolIO(api, context), (b) => {
 				// 同一次调用重放时不重复建任务
 				const done = (b as any).calls?.[api.callId] as string[] | undefined;
@@ -453,6 +477,10 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 					const id = ids[index]!, deps = dependencies[index]!;
 					b.tasks[id] = defined({
 						id,
+						controllerId: String(api.conversationId),
+						automation: t.automation ? defined({ ...t.automation, maxReworks: t.automation.maxReworks ?? 0 }) : undefined,
+						reviewer: t.reviewer ? defined(t.reviewer) : undefined,
+						scope: t.scope && (t.scope.allow?.length || t.scope.forbid?.length) ? defined(t.scope) : undefined,
 						title: t.title,
 						detail: t.detail,
 						role: t.role,
@@ -470,7 +498,7 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 					}) as BoardTask;
 					b.order.push(id);
 				}
-				((b as any).calls ??= {})[api.callId] = ids;
+				(b as any).calls ??= {}; (b as any).calls[api.callId] = ids;
 				return ids;
 			});
 			const board = await api.commit(async (tx) => JSON.parse(JSON.stringify(await tx.doc(Board))) as BoardState, context);
@@ -506,6 +534,8 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 			const { result, board } = await commitBoard(project, toolIO(api, context), async (b, tx) => {
 				const t = b.tasks[args.id];
 				if (!t) return false;
+				if (t.controllerId && t.controllerId !== String(api.conversationId)) return "不能跨总控修改任务。";
+				if (t.checksByMember?.some((check) => check.status === "running") && args.status && !["blocked", "dropped"].includes(args.status)) return "独立复核正在进行，等待结论或明确标为受阻/取消。";
 				if (pendingRecovery(t) && (args.status || args.owner || args.acceptance || args.title)) return "任务已有恢复计划，请执行或 /task cancel 取消后再调整。";
 				if (args.acceptance !== undefined && args.acceptance !== t.acceptance && t.dispatches.length) return "首次派工后验收标准已锁定；请保留失败证据，需求变化时新建任务。";
 				if (args.status === "done" && t.checks?.length && t.status !== "done") return "该任务配置了机器验收规则，请使用 review_task 对最新结果验收，不能直接标完成。";
@@ -542,7 +572,11 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 			return { output: [{ type: "text", text: r.ok ? `${r.message}。告诉用户：目标是你起草的，请他确认或修改。` : r.message }], isError: !r.ok };
 		},
 	});
-	return [planTasks, updateTask, setGoal];
+	const ready = defineTool({ name: "ready_tasks", description: "读取当前总控的就绪队列、依赖等待原因与已验收结果引用，不调用成员。自动执行只对 plan_tasks 中显式声明 automation 的任务启用。", parameters: obj({}), replay: "safe", execute: async (_args, api, context) => {
+		const board = await api.snapshot(Board, context);
+		return { output: [{ type: "text" as const, text: JSON.stringify(board ? readyTasks(board, String(api.conversationId)) : []) }] };
+	} });
+	return [planTasks, updateTask, setGoal, ready];
 }
 
 export function createLocalAgentsExtension(
@@ -550,18 +584,31 @@ export function createLocalAgentsExtension(
 	changes: ChangeStore,
 	project: ProjectFiles,
 	hub: JobHub,
-): { extension: Extension; agents: AgentAvailability[]; memberExtensions: Extension[]; recover(controller: ConversationId, args: RecoveryRequest, key: string, context: Context): Promise<JobRecord> } {
+): { extension: Extension; agents: AgentAvailability[]; memberExtensions: Extension[]; integrations: ReturnType<typeof createIntegrations>; ensureWorkflow(tx: Tx, controller: ConversationId): Promise<void>; recover(controller: ConversationId, args: RecoveryRequest, key: string, context: Context): Promise<JobRecord> } {
 	const agents = detectAgents(config);
 	// API 成员的工具扩展：只装给它们自己的子对话，总调度看不到
 	const memberTools = new Map<AgentKind, Extension>();
 	for (const a of agents) {
 		const api = config.agents[a.kind].api;
-		if (a.available && api) memberTools.set(a.kind, createMemberTools(a.kind, api));
+		if (a.available && api) memberTools.set(a.kind, createMemberTools(a.kind, api, { workspace: config.agents[a.kind].workspace ?? "code", changes }));
 	}
 	const deps: DispatchDeps = { config, changes, project, hub, memberTools };
+	const integrationHooks: IntegrationHooks = {};
+	const integrations = createIntegrations(deps, integrationHooks);
+	deps.integrations = integrations;
 	const commands = new Map(agents.filter((a) => a.available).map((a) => [a.kind, a.command!] as const));
-	const jobTask = createJobTask(deps, commands);
+	const enqueueInternal = async (tx: Tx, controller: ConversationId, key: string, member: string, args: DispatchArgs, model?: string) => {
+		const job = await enqueueJob(tx, jobTask, controller, key, member, args, model, Date.now());
+		(await tx.doc(Jobs)).jobs[job.id]!.workflow = true; return job;
+	};
+	const jobTask = createJobTask(deps, commands, async (controller) => { if (hub.harness) await hub.harness.commit((tx) => workflow.ensure(tx, controller), BACKGROUND_CONTEXT); });
+	const availableSet = new Set(commands.keys());
+	const workflow = createTaskWorkflow(deps, availableSet, enqueueInternal);
+	integrationHooks.available = availableSet;
+	integrationHooks.enqueue = enqueueInternal;
+	integrationHooks.ensureWorkflow = workflow.ensure;
 	const tools = [
+		...integrations.tools,
 		createReadResultTool(),
 		createTaskReviewTool(project, config, changes),
 		createTaskRecoveryTool(project, config, changes),
@@ -596,6 +643,7 @@ export function createLocalAgentsExtension(
 		name: "local-agents",
 		tools,
 		hooks: [hook(ToolTask, { afterTool: async (call, result, api, context) => {
+			if (hub.harness && !hub.closing && (["plan_tasks", "review_task", "update_task", LEAD_TOOL].includes(call.name) || call.name.startsWith("ask_"))) await hub.harness.commit((tx) => workflow.ensure(tx, api.conversationId), BACKGROUND_CONTEXT);
 			if (call.name.startsWith("ask_") && hub.harness) await hub.harness.commit((tx) => releaseClaim(tx, String(api.taskId)), BACKGROUND_CONTEXT);
 			if (call.name.startsWith("ask_") && !(call.arguments as any).background && hub.harness && !hub.closing) await hub.harness.commit(async (tx) => {
 				const id = (call.arguments as any).task_id, task = id ? (await tx.doc(Board)).tasks[id] : undefined, recovery = task ? pendingRecovery(task) : undefined;
@@ -621,7 +669,7 @@ export function createLocalAgentsExtension(
 			}, BACKGROUND_CONTEXT);
 			if (out) { try { project.writeAssign(out); } catch {} }
 		} })],
-		tasks: [jobTask],
+		tasks: [jobTask, workflow.task, integrations.task],
 		sections: [
 			section("identity", conversationIdentity),
 			section("conversation", () => CONVERSATION_POLICY),
@@ -646,6 +694,10 @@ export function createLocalAgentsExtension(
 						"5a. 跨成员交接使用 ask_* 的 inputs，按 result_id、offset、limit 交付原文片段；保留来源，避免手工转述失真。有依赖的任务必须等前置任务验收完成才能派工。业务工具 POST 失败时可能已在远端生效，先核对状态，不自动重试。",
 						"5b. 优先复用同一任务已验收结果及可信证据；结构化交接优先 inputs.field，只送必要字段。资料过期、来源冲突或任务要求独立核查时才重查，并说明原因；不要用未经核验的缓存替代独立审查。",
 						"5c. 受阻或被取消后，用 recover_task inspect 查清失败依据；resume 续接原成员、supply 补资料、reassign 换人。按返回的 dispatch 参数调用对应 ask_*，只修失败部分；不重跑已验收前置任务，不降低验收标准。恢复同一任务不要重复 plan_tasks。",
+						"5d. ready_tasks 返回系统计算的就绪队列与等待原因。明确授权自动执行时，plan_tasks 为对应任务声明 automation:{member,model?,maxReworks?}；依赖验收通过后 Durable 自动交接结果并派工。未声明不自动执行，不要再对自动执行中的任务重复 ask_*。",
+						"5e. 要求独立复核时，plan_tasks 声明 reviewer:{member,model?,blind?}，成员必须不同于执行者。代码任务可设 blind:true 开启盲审（不向复核员传递执行者的主观自述解释，仅审需求契约与 git_diff 客观代码变更，消除迎合偏见）。交付后系统在独立会话复核并绑定 result_id；通过才完成，返工仅在已授权次数内续接原成员，不可绕过复核标 done。",
+						"5f. 多个成员代码分支先 integrate_changes changes:[完整改动编号]，read_integration id:集成编号 wait:true 原生挂起等待联合检查；若主目录或来源更新导致过期，传 rerun_id 重验；若出现合并冲突（conflict）或跨模块检查失败（failed），可用 repair_integration 在独立修复副本派编码成员解决并重跑全部检查。自动依赖任务包含多分支时由 Durable 先集成，通过才派下游。集成只改独立副本，最终应用必须用户终端 /apply，模型无权代替确认。",
+						"5g. 自适应编码拓扑与路径契约（scope）：单文件低风险任务走 L0（单成员直派）；核心逻辑走 L1（automation + reviewer:{member,blind:true} 异构盲审）；多模块并行或高风险开发走 L2（先建 T1 契约任务冻结接口定义 → 并行派发 T2 功能实现 scope:{allow:['src/'],forbid:['test/']} 与 T3 独立测试 scope:{allow:['test/'],forbid:['src/']} → 下游联合集成测试），用硬性路径边界防止越界改动与篡改测试。",
 						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
 						"6a. 成员结果默认只带限长预览；全文按 result_id 持久保存。缺少证据时用 read_result 分页读取，不能把截断预览当全文。续接只发送变更和必要证据，避免重复复制整段历史。",
 						"6b. ask_* 默认自动省略原成员会话里未变化的项目背景与相同交接片段；改了目标/约束会重发。怀疑原会话缺失或用户要求完整核对时用 context_mode=full；不能把少传字符当作真实 token/费用节省结论。",
@@ -697,6 +749,7 @@ export function createLocalAgentsExtension(
 					"",
 					"当前分工表（.pi-agent/ASSIGN.md 由你通过 plan_tasks / update_task 维护）：",
 					boardSummary(board),
+					board ? `就绪队列与等待原因（系统计算）：${JSON.stringify(readyTasks(board, String(input.conversationId)))}` : "",
 					...(running.length || unread.length
 						? [
 								"",
@@ -709,7 +762,7 @@ export function createLocalAgentsExtension(
 			}),
 		],
 	});
-	return { extension, agents, memberExtensions: [...memberTools.values()], async recover(controller, args, key, context) {
+	return { extension, agents, memberExtensions: [...memberTools.values()], integrations, ensureWorkflow: workflow.ensure, async recover(controller, args, key, context) {
 		if (!hub.harness) throw new Error("运行时尚未就绪。");
 		const job = await hub.harness.commit(async (tx) => {
 			const prepared = await prepareRecovery(tx, controller, config, changes, args, key, Date.now());

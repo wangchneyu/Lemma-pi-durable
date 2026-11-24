@@ -288,16 +288,23 @@ const COLUMNS = [
 	{ s: "done", label: "完成" },
 ];
 
-function taskCard(t, all) {
+function taskCard(t, all, readinessMap) {
 	const deps = t.deps.map((d) => all.find((x) => x.id === d)).filter(Boolean);
 	const waiting = deps.filter((dependency) => dependency.status !== "done");
+	const readiness = readinessMap?.get(t.id);
+	const waitReasons = t.status === "todo" && readiness && !readiness.ready ? readiness.reasons : [];
 	return `<article class="task-card" data-s="${t.status}">
-		${waiting.length ? `<p class="task-note">等待前置验收：${waiting.map((dependency) => esc(dependency.id)).join("、")}</p>` : ""}
+		${waiting.length ? `<p class="task-note">等待前置验收：${waiting.map((dependency) => esc(dependency.id)).join("、")}</p>` : waitReasons.length ? `<p class="task-note">${esc(waitReasons.join("；"))}</p>` : ""}
 		<header><span class="mono task-id">${esc(t.id)}</span>${t.role ? `<span class="role-chip">${esc(t.role)}</span>` : ""}${t.owner ? agentTag(t.owner) : ""}</header>
 		<h3>${esc(t.title)}</h3>
 		${t.acceptance ? `<p class="task-accept" title="${esc(t.acceptance)}"><span>验收</span>${esc(short(t.acceptance, 90))}</p>` : ""}
+		${t.scope && (t.scope.allow?.length || t.scope.forbid?.length) ? `<p class="task-note mono" title="${esc(JSON.stringify(t.scope))}">路径契约${t.scope.allow?.length ? ` 允许:${esc(t.scope.allow.join(","))}` : ""}${t.scope.forbid?.length ? ` 禁止:${esc(t.scope.forbid.join(","))}` : ""}</p>` : ""}
 		${t.verification ? `<p class="task-accept" title="${esc(t.verification.checks.map((c) => `${c.name}：${c.passed ? "通过" : "失败"} · ${c.evidence}`).join("\n"))}"><span>机器检查</span>${t.verification.passed ? "通过，仍需复核" : "未通过，需要返工"}</p>` : ""}
 		${t.review ? `<p class="task-note" title="${esc(t.review.evidence)}">复核 ${esc(t.review.verdict)} · ${esc(short(t.review.evidence, 90))}</p>` : ""}
+		${t.status === "todo" && (!readiness ? !waiting.length : readiness.ready) ? `<p class="task-note">就绪 · ${t.automation ? "已授权自动派发" : "等待总控派发"}</p>` : ""}
+		${t.automation ? `<p class="task-note">自动执行 ${esc(t.automation.member)} · 返工上限 ${esc(String(t.automation.maxReworks))}</p>` : ""}
+		${t.reviewer ? `<p class="task-note" title="${esc(t.checksByMember?.at(-1)?.evidence ?? "")}">独立${t.reviewer.blind ? "盲审" : "复核"} ${esc(t.reviewer.member)} · ${esc(t.checksByMember?.at(-1)?.status ?? "等待交付")}${t.checksByMember?.at(-1)?.sourceResultId ? ` · ${esc(t.checksByMember.at(-1).sourceResultId)}` : ""}</p>` : ""}
+		${t.integrationId ? `<p class="task-note">前置联合集成 ${changeLink(t.integrationId)}</p>` : ""}
 		${t.latestResult ? `<p class="task-note mono" title="${esc(t.latestResult)}">结果 ${esc(t.latestResult)}</p>` : ""}
 		${t.recoveries?.length ? `<p class="task-note">恢复 ${esc(t.recoveries.at(-1).action)} → ${esc(t.recoveries.at(-1).member)} · ${esc(t.recoveries.at(-1).status)}</p>` : ""}
 		${["todo", "blocked"].includes(t.status) && t.lastAttempt ? `<p class="task-note mono">终端 /task inspect ${esc(t.id)} 查看失败证据与恢复入口</p>` : ""}
@@ -333,8 +340,20 @@ function project() {
 			const available = new Set((store.state.agents ?? []).filter((a) => a.available).map((a) => a.kind));
 			const uncertain = (store.state.operations ?? []).filter((operation) => operation.method === "POST" && ["pending", "unknown"].includes(operation.status));
 			const resources = store.state.resources ?? { running: [], queued: [], reservedUsd: 0 };
+			const wfPaused = !!store.state.workflow?.paused;
+			const readinessList = store.state.readyTasks ?? [];
+			const readinessMap = new Map(readinessList.map((r) => [r.id, r]));
+			const readyList = readinessList.filter((r) => r.ready);
+			const activeIntegrations = (store.state.integrations ?? []).filter((it) => !it.supersededBy && it.changeStatus !== "dropped");
 			root.innerHTML = `
-				<section class="card"><header class="card-head"><h2 class="card-title">执行与等待</h2><span class="card-note">${resources.running.length} 运行 · ${resources.queued.length} 排队 · 预留 $${Number(resources.reservedUsd).toFixed(4)}（估计）</span></header><div class="card-body">${resources.queued.map((claim) => `<p>${esc(claim.member)} · ${esc(claim.reason ?? "等待资源")}</p>`).join("") || "当前没有排队任务"}</div></section>
+				<section class="card"><header class="card-head"><h2 class="card-title">执行与协作推进</h2><span class="card-note">${wfPaused ? "自动推进已暂停（/workflow resume）" : "自动推进运行中"} · 就绪 ${readyList.length} 项 · ${resources.running.length} 运行 · ${resources.queued.length} 排队 · 预留 $${Number(resources.reservedUsd).toFixed(4)}（估计）</span></header><div class="card-body">${resources.queued.map((claim) => `<p>${esc(claim.member)} · ${esc(claim.reason ?? "等待资源")}</p>`).join("") || (readyList.length ? `<p class="muted">当前就绪任务：${readyList.map((r) => `<span class="mono">${esc(r.id)}</span>`).join("、")}（终端 <span class="mono">/ready</span> 查看详情）</p>` : "当前没有排队任务")}</div></section>
+				${activeIntegrations.length ? `<section class="card"><header class="card-head"><h2 class="card-title">多分支联合集成与联调</h2><span class="card-note">终端：/integrate create|rerun|repair|show|cancel</span></header><div class="card-body">${activeIntegrations.slice(0, 6).map((it) => {
+					const st = it.status ?? it.changeStatus;
+					const pillState = st === "passed" || it.changeStatus === "applied" ? "done" : ["preparing", "merging", "repairing", "testing"].includes(st) ? "running" : st === "cancelled" ? "aborted" : "error";
+					const srcs = (it.sources ?? []).map((s) => `<a href="#/changes/${esc(s.id)}">#${esc(s.id)}</a>`).join(" + ");
+					const cmd = it.changeStatus === "applied" ? "" : st === "passed" ? `/apply ${it.id}` : ["conflict", "failed"].includes(st) ? `/integrate repair ${it.id} ` : `/integrate show ${it.id}`;
+					return `<div class="job-row"><a class="mono" href="#/changes/${esc(it.id)}">#${esc(it.id)}</a><span class="pill" data-s="${pillState}">${esc(it.changeStatus === "applied" ? "已合并" : st)}</span><span class="job-task">来源 ${srcs}${it.repair ? ` · 修复自 #${esc(it.repair.fromId)}（${esc(it.repair.member)}）` : ""}${it.conflicts?.length ? ` · 冲突：${esc(it.conflicts.join("、"))}` : ""}${it.message ? ` · <span class="muted">${esc(short(it.message, 80))}</span>` : ""}</span>${cmd ? `<button type="button" class="copy-cmd mono" data-copy="${esc(cmd)}" title="复制终端命令">${esc(cmd.trim())}</button>` : `<span></span>`}</div>`;
+				}).join("")}</div></section>` : ""}
 				${uncertain.length ? `<section class="card"><header class="card-head"><h2 class="card-title err-t">外部操作待核对</h2></header><div class="card-body">${uncertain.map((operation) => `<p><span class="mono">${esc(operation.id)}</span> · ${esc(operation.member)}/${esc(operation.tool)} · ${esc(operation.failure?.message ?? "请求已发出但尚无确定回执")}</p>`).join("")}<p>查询远端流水后，在终端使用 /operations resolve 记录核对依据；核对前禁止重复提交同一接口。</p></div></section>` : ""}
 				<section class="card goal-card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">最终目标</h2><div class="card-sub"><span class="mono">${esc(p.goalPath)}</span></div></div>
@@ -355,7 +374,7 @@ function project() {
 							tasks.length
 								? `<div class="kanban">${COLUMNS.map((col) => {
 										const list = tasks.filter((t) => t.status === col.s);
-										return `<div class="kanban-col" data-s="${col.s}"><div class="kanban-head"><span>${col.label}</span><em>${list.length}</em></div>${list.map((t) => taskCard(t, p.tasks)).join("") || `<div class="kanban-empty">—</div>`}</div>`;
+										return `<div class="kanban-col" data-s="${col.s}"><div class="kanban-head"><span>${col.label}</span><em>${list.length}</em></div>${list.map((t) => taskCard(t, p.tasks, readinessMap)).join("") || `<div class="kanban-empty">—</div>`}</div>`;
 									}).join("")}</div>`
 								: `<div class="empty-inline"><span class="dot"></span>项目级、多步骤的任务，总调度会先拆成任务写进分工表（每项有角色、负责人、依赖和验收标准），再按依赖顺序派工。</div>`
 						}
@@ -554,7 +573,7 @@ function dispatches() {
 						<td class="mono">${stamp(d.at)}</td>
 						<td>${agentTag(d.agent)}</td>
 						<td class="hide-sm">${d.model ? `<span class="model-chip">${esc(d.model)}</span>` : `<span class="muted">—</span>`}</td>
-						<td class="w-task"><span class="cell-task">${d.resume ? `<span class="resume-tag">续接</span>` : ""}${d.basedOn ? `<span class="resume-tag">基于 #${esc(d.basedOn)}</span>` : ""}${esc(short(d.task, 140) || "—")}</span></td>
+						<td class="w-task"><span class="cell-task">${d.callId?.startsWith("checker:") ? `<span class="resume-tag">独立复核</span>` : d.callId?.startsWith("integration-repair:") ? `<span class="resume-tag">集成修复</span>` : d.callId?.startsWith("workflow:") ? `<span class="resume-tag">自动推进</span>` : ""}${d.resume ? `<span class="resume-tag">续接</span>` : ""}${d.basedOn ? `<span class="resume-tag">基于 #${esc(d.basedOn)}</span>` : ""}${esc(short(d.task, 140) || "—")}</span></td>
 						<td><span class="pill" data-s="${PILL[d.status]}">${STATUS_LABEL[d.status]}</span></td>
 						<td class="num mono">${took}</td>
 						<td class="num mono hide-sm" title="${d.costEstimated ? "按单价估算" : ""}">${money(d.cost)}${d.costEstimated ? "≈" : ""}</td>
@@ -653,11 +672,11 @@ function changes() {
 				box.innerHTML = `<div class="card-body">${empty("选择左侧的一个改动查看差异")}</div>`;
 				return;
 			}
-			const key = `${c.id}@${c.head}@${c.status}`;
+			const key = `${c.id}@${c.head}@${c.status}@${c.updatedAt}`;
 			if (shown === key) return;
 			shown = key;
 			const cmd = (verb) => `/${verb} ${c.id}`;
-			const actionable = c.status === "pending" || c.status === "conflict";
+			const actionable = (c.status === "pending" || c.status === "conflict") && !c.integration?.supersededBy && (!c.integration || c.integration.status === "passed");
 			const dispatch = store.dispatches.find((d) => d.changeId === c.id);
 			box.innerHTML = `<header class="detail-head">
 					<div><h2 class="eyebrow">改动 #${esc(c.id)}</h2><p class="detail-title"></p></div>
@@ -683,6 +702,7 @@ function changes() {
 							: ""
 					}
 					${c.message ? `<div class="change-msg${c.status === "conflict" ? " err" : ""}">${esc(c.message)}</div>` : ""}
+					${c.integration ? `<div class="change-msg"><strong>联合集成 · ${esc(c.integration.status)}${c.integration.supersededBy ? `（已被 #${esc(c.integration.supersededBy)} 替代）` : ""}</strong><p>来源：${c.integration.sources.map((source) => `<a href="#/changes/${esc(source.id)}">#${esc(source.id)}</a> <span class="mono">${esc(source.head.slice(0, 12))}</span>`).join(" + ")}</p>${c.integration.repair ? `<p>修复：来自 <a href="#/changes/${esc(c.integration.repair.fromId)}">#${esc(c.integration.repair.fromId)}</a> · 成员 ${esc(c.integration.repair.member)}${c.integration.repair.changeId ? ` · 副本 <a href="#/changes/${esc(c.integration.repair.changeId)}">#${esc(c.integration.repair.changeId)}</a>` : ""}</p>` : ""}${c.integration.conflicts?.length ? `<p>冲突：${c.integration.conflicts.map(esc).join("、")}</p>` : ""}${c.integration.reports.map((report) => `<details><summary>${esc(report.name)} · ${report.passed ? "通过" : "失败"} · exit ${esc(String(report.exitCode))}</summary><pre>${esc(report.output || "没有输出")}</pre></details>`).join("")}<p class="mono">${["conflict", "failed"].includes(c.integration.status) ? `/integrate repair ${esc(c.id)} &lt;成员ID&gt; 或 /integrate rerun ${esc(c.id)}` : `/integrate show ${esc(c.id)}`}</p></div>` : ""}
 					<h3 class="eyebrow">改了哪些文件 <span class="eyebrow-note">${c.files.length} 个 · +${c.add} −${c.del}</span></h3>
 					<div class="file-list">${
 						c.files.length
@@ -902,7 +922,7 @@ function agents() {
 							? [
 									["接入方式", `API 成员（Pi 子对话）· <code>${esc(a.api.type)}</code> · ${esc(a.api.host)}`],
 									["密钥", esc(a.api.keySource)],
-									["工具", esc((a.api.tools ?? []).join(" / ") || "未授予文件或命令工具")],
+									["工具", esc([...(a.api.tools ?? []), ...(a.api.codeTools ?? [])].join(" / ") || "未授予文件或命令工具")],
 									["工作方式", a.workspace === "none" ? "领域协作 · 无 Git 工作区" : "代码工作区"],
 								]
 							: []),
@@ -1177,7 +1197,7 @@ function config() {
 						.map((a) => {
 							const how = a.api ? `API · ${esc(a.api.type)} · ${esc(a.api.host)}<br><span class="muted">密钥：${esc(a.api.keySource)}</span>` : "本机 CLI";
 							const args = a.api
-								? esc((a.api.tools ?? []).join(" / ") || "未授予文件或命令工具")
+								? esc([...(a.api.tools ?? []), ...(a.api.codeTools ?? [])].join(" / ") || "未授予文件或命令工具")
 								: esc(a.extraArgs.join(" ") || "—");
 							return `<tr><td>${agentTag(a.kind)}</td><td class="nowrap">${a.available ? "可用" : `<span class="muted">${esc(a.reason)}</span>`}</td><td>${how}</td><td class="mono">${args}</td><td class="num mono">${a.timeoutMinutes}m</td><td class="num mono hide-sm">${num(a.maxOutputChars)}</td></tr>`;
 						})

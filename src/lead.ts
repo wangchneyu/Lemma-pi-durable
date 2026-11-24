@@ -96,6 +96,8 @@ export function createLeadTool(deps: DispatchDeps): ToolRegistration {
 			if (args.task_id) {
 				const exists = await api.commit(async (tx) => !!(await tx.doc((await import("./board.ts")).Board)).tasks[args.task_id!], context);
 				if (!exists) return fail(`分工表里没有任务 ${args.task_id}。`);
+				const task = (await api.snapshot((await import("./board.ts")).Board, context))?.tasks[args.task_id];
+				if (task?.controllerId && task.controllerId !== String(api.conversationId)) return fail("不能跨总控委派其他任务。");
 			}
 
 			// ---- 子对话：由这次调用拥有（中止调用就中止它；重放时按拥有者找回同一个） ----
@@ -117,6 +119,7 @@ export function createLeadTool(deps: DispatchDeps): ToolRegistration {
 				const { result: refusal } = await commitBoard(project, io as any, (b) => {
 					const t = b.tasks[args.task_id!];
 					if (!t || t.status === "done" || t.status === "dropped") return "任务已结束或不存在。";
+					if (t.controllerId && t.controllerId !== String(api.conversationId)) return "不能跨总控委派其他任务。";
 					if (t.activeDispatch && t.activeDispatch !== api.callId) return "该任务已有派工执行。";
 					if (t.deps.some((id) => b.tasks[id]?.status !== "done")) return "前置任务尚未验收。";
 					t.status = "doing";

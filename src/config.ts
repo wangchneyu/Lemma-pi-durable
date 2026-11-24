@@ -1,5 +1,5 @@
 // 读取 pi-agent.config.json，并自动找到本机 CLI 的真实入口（避开 .cmd/.ps1 外壳）。
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -388,7 +388,21 @@ const NPM_PACKAGES: Partial<Record<AgentKind, { pkg: string; bin: string }>> = {
 	gemini: { pkg: "@google/gemini-cli", bin: "gemini" },
 };
 
-/** 返回 [可执行文件, ...前置参数]；找不到返回 undefined */
+function isRunnableEntry(entry: string): boolean {
+	if (process.platform !== "win32" || !/\.exe$/i.test(entry)) return true;
+	let fd: number | undefined;
+	try {
+		fd = openSync(entry, "r");
+		const header = Buffer.alloc(2);
+		return readSync(fd, header, 0, 2, 0) === 2 && header[0] === 0x4d && header[1] === 0x5a;
+	} catch {
+		return false;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+/** 返回 [可执行文件, ...前置参数]；找不到或二进制未安装完整返回 undefined */
 export function resolveCommand(kind: AgentKind, agent: AgentConfig): string[] | undefined {
 	if (agent.api) return undefined; // API 成员不需要 CLI
 	if (agent.command && agent.command.length > 0) return agent.command;
@@ -405,7 +419,9 @@ export function resolveCommand(kind: AgentKind, agent: AgentConfig): string[] | 
 	if (!rel) return undefined;
 	const entry = join(pkgDir, rel);
 	if (!existsSync(entry)) return undefined;
-	return /\.(c|m)?js$/i.test(entry) ? [process.execPath, entry] : [entry];
+	if (/\.(c|m)?js$/i.test(entry)) return [process.execPath, entry];
+	if (!isRunnableEntry(entry)) return undefined;
+	return [entry];
 }
 
 /** 读取 ~/.claude/settings.json 里 Claude CLI 用的中转站地址和 token（不打印） */

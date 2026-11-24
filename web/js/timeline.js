@@ -5,15 +5,48 @@ import { clock, el, esc, markdown } from "./util.js";
 
 const STATUS_TEXT = { todo: "待办", doing: "进行中", review: "待验收", done: "完成", blocked: "受阻", dropped: "取消" };
 
-/** 分工表操作的一行摘要 */
+/** 分工表与协作编排操作的一行摘要 */
 function boardOpText(call) {
 	const a = call.args ?? {};
 	if (call.name === "plan_tasks") {
 		const tasks = Array.isArray(a.tasks) ? a.tasks : [];
-		return `<span class="op-icon">📋</span><b>拆解任务</b><span>${tasks.length} 项：${esc(tasks.map((t) => t.title).join("；").slice(0, 140))}</span>`;
+		const autoCount = tasks.filter((t) => t?.automation).length;
+		const reviewCount = tasks.filter((t) => t?.reviewer).length;
+		const blindCount = tasks.filter((t) => t?.reviewer?.blind).length;
+		const scopeCount = tasks.filter((t) => t?.scope && (t.scope.allow?.length || t.scope.forbid?.length)).length;
+		const tags = [
+			autoCount ? `自动派发 ${autoCount}` : "",
+			reviewCount ? `独立${blindCount ? "盲审" : "复核"} ${reviewCount}` : "",
+			scopeCount ? `路径契约 ${scopeCount}` : "",
+		].filter(Boolean).join(" · ");
+		return `<span class="op-icon">📋</span><b>拆解任务${tags ? `（${esc(tags)}）` : ""}</b><span>${tasks.length} 项：${esc(tasks.map((t) => t.title).join("；").slice(0, 140))}</span>`;
 	}
 	if (call.name === "update_task") {
 		return `<span class="op-icon">✔</span><b>${esc(a.id ?? "")}${a.status ? ` → ${esc(STATUS_TEXT[a.status] ?? a.status)}` : ""}</b><span>${esc(String(a.note ?? "").slice(0, 120))}</span>`;
+	}
+	if (call.name === "review_task") {
+		const verdict = { accept: "通过", rework: "打回返工", block: "受阻" }[a.action] ?? a.action ?? "";
+		return `<span class="op-icon">🔎</span><b>验收任务 ${esc(a.id ?? "")} → ${esc(verdict)}</b><span>${a.result_id ? `[${esc(a.result_id)}] ` : ""}${esc(String(a.evidence ?? "").slice(0, 130))}</span>`;
+	}
+	if (call.name === "recover_task") {
+		const act = { inspect: "查看缺口", resume: "续接原成员", supply: "补充资料", reassign: "换人接手", cancel: "取消计划" }[a.action] ?? a.action ?? "";
+		return `<span class="op-icon">🛟</span><b>恢复任务 ${esc(a.id ?? "")} · ${esc(act)}${a.member ? ` → ${esc(a.member)}` : ""}</b><span>${esc(String(a.note ?? "").slice(0, 120))}</span>`;
+	}
+	if (call.name === "ready_tasks") {
+		return `<span class="op-icon">🚦</span><b>检查就绪队列</b><span>计算各任务前置依赖与阻塞原因</span>`;
+	}
+	if (call.name === "read_result") {
+		return `<span class="op-icon">📄</span><b>读取成果 ${esc(a.result_id ?? "")}</b><span>${a.field ? `字段 ${esc(a.field)} · ` : ""}偏移 ${esc(String(a.offset ?? 0))}</span>`;
+	}
+	if (call.name === "integrate_changes") {
+		const target = a.rerun_id ? `重验 #${a.rerun_id}` : Array.isArray(a.changes) ? a.changes.map((id) => `#${id}`).join(" + ") : "";
+		return `<span class="op-icon">🔀</span><b>联合集成与测试</b><span>${esc(target)} · 独立副本合并并运行 autonomy.checks</span>`;
+	}
+	if (call.name === "read_integration") {
+		return `<span class="op-icon">🔍</span><b>查看联合集成${a.id ? ` #${esc(a.id)}` : ""}</b><span>${a.wait ? "原生挂起等待联合检查完成" : "读取集成状态与测试报告"}</span>`;
+	}
+	if (call.name === "repair_integration") {
+		return `<span class="op-icon">🛠</span><b>修复联合集成 #${esc(a.id ?? "")} → ${esc(a.member ?? "")}</b><span>${esc(String(a.note ?? "在独立修复副本解冲突并重跑全量检查").slice(0, 120))}</span>`;
 	}
 	if (call.name === "set_goal") return `<span class="op-icon">🎯</span><b>起草项目目标</b><span>GOAL.md，待你确认</span>`;
 	if (call.name === "wait_jobs") {
@@ -60,11 +93,13 @@ export class Timeline {
 		}
 		if (item.type === "divider") return el("div", "item divider", esc(item.label));
 		if (item.type === "job") {
-			// 后台派工的结果发回总调度
+			// 后台派工或自动协作推进的结果发回总调度
+			const isWorkflow = String(item.job ?? "").startsWith("workflow:");
 			const [head = "", ...rest] = item.text.split("\n");
 			const body = rest.join("\n").replace(/\n*（这是后台派工的结果[\s\S]*$/, "").trim();
 			const failed = item.status === "failed" || item.status === "cancelled";
-			const node = el("div", `item job${failed ? " failed" : ""}`, `${whoLine(`后台结果 · ${esc(item.job)}`, item.at)}<div class="job-card" style="--c:var(--${esc(item.agent)}, var(--muted))"><div class="job-head"></div><div class="job-body md"></div></div>`);
+			const who = isWorkflow ? "协作推进汇总 · 自动工作流" : `后台结果 · ${esc(item.job)}`;
+			const node = el("div", `item job${failed ? " failed" : ""}`, `${whoLine(who, item.at)}<div class="job-card" style="--c:var(--${esc(item.agent)}, var(--lead))"><div class="job-head"></div><div class="job-body md"></div></div>`);
 			node.querySelector(".job-head").textContent = head;
 			const bodyEl = node.querySelector(".job-body");
 			bodyEl.innerHTML = markdown(body.length > 1200 ? `${body.slice(0, 1200)}…` : body);

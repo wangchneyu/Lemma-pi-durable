@@ -82,7 +82,7 @@ orch.faux.setResponses([
 ]);
 await (await root.submit({ type: "input", content: "让 DeepSeek 改代码" }, context)).wait(context);
 check(orchTools.includes("ask_deepseek") && !orchTools.includes("write") && !orchTools.includes("bash"), "总调度有 ask_deepseek，但没有读写工具");
-check(["read", "write", "edit", "bash"].every((t) => memberTools.includes(t)) && !memberTools.includes("ask_deepseek"), "DeepSeek 子对话只有 read / write / edit / bash");
+check(["read", "write", "edit", "bash", "list_files", "search_code", "git_diff", "outline_file", "find_symbol"].every((t) => memberTools.includes(t)) && !memberTools.includes("ask_deepseek"), "DeepSeek 编码子对话具备读写、bash 及 ACI 代码感知工具（list_files / search_code / git_diff / outline_file / find_symbol）");
 check(firstPrompt.includes("新建 hello.ts"), "任务交给了 DeepSeek 子对话");
 check(refused.includes("不在允许清单"), "白名单外的 bash 命令在子对话里被拒绝");
 check(dsResult.includes("DS_OK") && /\[改动 #\w+：2 个文件/.test(dsResult), `结果带回 DeepSeek 的回答和隔离改动（${dsResult.match(/\[改动[^\]]*\]/)?.[0]}）`);
@@ -157,6 +157,38 @@ orch.faux.setResponses([
 ]);
 await (await root.submit({ type: "input", content: "后台" }, context)).wait(context);
 check(/【后台结果 J\d+ · 完成】deepseek/.test(waited) && waited.includes("DS_BG_OK"), "DeepSeek 也能放到后台，wait_jobs 收到结果");
+
+// ---- 4. 只读代码感知工具（list_files / search_code / git_diff / outline_file / find_symbol）及越界拦截 ----
+let inspectResults: { name: string; text: string; isError: boolean }[] = [];
+ds.setResponses([
+	() =>
+		fauxAssistantMessage(
+			[
+				fauxToolCall("list_files", {}, { id: "c1" }),
+				fauxToolCall("search_code", { query: "a = 42" }, { id: "c2" }),
+				fauxToolCall("git_diff", {}, { id: "c3" }),
+				fauxToolCall("search_code", { query: "secret", path: "../" }, { id: "c4" }),
+				fauxToolCall("outline_file", { path: "hello.ts" }, { id: "c5" }),
+				fauxToolCall("find_symbol", { symbol: "hello" }, { id: "c6" }),
+			],
+			{ stopReason: "toolUse" },
+		),
+	(ctx: any) => {
+		inspectResults = toolResults(ctx).slice(-6);
+		return fauxAssistantMessage(fauxText("DS_CODE_TOOLS_OK"));
+	},
+]);
+orch.faux.setResponses([
+	() => fauxAssistantMessage([fauxToolCall("ask_deepseek", { task: "查看当前代码结构与改动差异", session_id: sid! }, { id: "d4" })], { stopReason: "toolUse" }),
+	() => fauxAssistantMessage(fauxText("好")),
+]);
+await (await root.submit({ type: "input", content: "代码感知测试" }, context)).wait(context);
+check(!inspectResults[0]?.isError && inspectResults[0]!.text.includes("app.ts") && inspectResults[0]!.text.includes("hello.ts"), "list_files 返回 worktree 文件列表");
+check(!inspectResults[1]?.isError && inspectResults[1]!.text.includes("app.ts:1:") && inspectResults[1]!.text.includes("a = 42"), "search_code 返回匹配文件与行号");
+check(!inspectResults[2]?.isError && inspectResults[2]!.text.includes("-export const a = 1;") && inspectResults[2]!.text.includes("+export const a = 42;"), "git_diff 返回相对于基线的真实补丁");
+check(!!inspectResults[3]?.isError && inspectResults[3]!.text.includes("工作目录之外"), "代码检索工具同样拦截越界路径");
+check(!inspectResults[4]?.isError && inspectResults[4]!.text.includes("hello.ts") && inspectResults[4]!.text.includes("L1: export const hello"), "outline_file 返回代码结构大纲与行号");
+check(!inspectResults[5]?.isError && inspectResults[5]!.text.includes("【定义处") && inspectResults[5]!.text.includes("hello.ts:1:"), "find_symbol 定位符号定义与引用");
 
 await harness.close(context);
 console.log("\nAPI 成员测试通过 ✅");

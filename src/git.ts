@@ -97,7 +97,7 @@ export async function commitAll(path: string, message: string, exclude: string[]
 	return must(path, ["rev-parse", "HEAD"]);
 }
 
-export interface FileStat {
+export type FileStat = {
 	path: string;
 	add: number;
 	del: number;

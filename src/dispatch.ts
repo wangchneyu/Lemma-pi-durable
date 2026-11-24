@@ -21,6 +21,8 @@ import { parseDeliverable, resultExcerpt } from "./deliverables.ts";
 import { CostLedger } from "./resources.ts";
 import { pendingRecovery } from "./task-recovery.ts";
 import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
+import { integrationStale } from "./integration-git.ts";
+import { checkFilesScope, type TaskScope } from "./scope.ts";
 
 /** 子调度的提交前缀（和 lead.ts 一致；放在这里避免循环引用） */
 const LEAD_PREFIX = "pi-agent:lead:";
@@ -79,6 +81,7 @@ export interface DispatchIO {
 }
 
 export interface DispatchDeps {
+	integrations?: { create(tx: Tx, controller: ConversationId, ids: string[], key: string): Promise<ChangeRecord> };
 	config: AppConfig;
 	changes: ChangeStore;
 	project: ProjectFiles;
@@ -185,21 +188,31 @@ export async function validateDispatch(kind: AgentKind, deps: DispatchDeps, args
 		if (busy) return `会话 ${args.session_id} 正在被 ${busy} 使用，不能同时续接。等它结束（wait_jobs），或者开新会话。`;
 		const record = await io.commit(async (tx) => {
 			const found = (await tx.doc(AgentSessions)).sessions[args.session_id!];
-			return found ? { agent: found.agent, controllerId: found.controllerId ?? null } : undefined;
+			return found ? { agent: found.agent, controllerId: found.controllerId ?? null, change: found.change ?? null } : undefined;
 		});
 		if (!record) return "当前会话没有登记这个成员上下文，不能跨会话续接。请在所属会话继续，或新开一次派工。";
 		if (record.controllerId && record.controllerId !== String(io.conversationId)) return "这个成员上下文属于另一个总控对话，不能跨总控续接。";
 		if (record.agent !== kind) return `session_id ${args.session_id} 属于 ${record.agent}，不能交给 ${kind} 续接。`;
+		if (record.change) { const active = deps.changes.list().find((bundle) => bundle.integration && ["preparing", "merging", "repairing", "testing"].includes(bundle.integration.status) && bundle.integration.sources.some((source) => source.id === record.change)); if (active) return `来源正在集成 #${active.id} 中，请等待完成或取消集成后续接，避免联合检查期间修改来源。`; }
 	}
 	if (args.based_on) {
 		const from = deps.changes.get(args.based_on);
 		if (!from || from.status === "dropped") return `找不到可用的改动 ${args.based_on}。`;
+		if (from.integration) {
+			if (from.integration.controllerId !== String(io.conversationId)) return "集成改动属于其他总控，不能跨对话使用。";
+			const trustedRepair = from.integration.status === "repairing" && (from.integration.repair?.callId === io.callId || from.integration.repair?.callId === io.attemptOf);
+			if (!trustedRepair && (from.integration.status !== "passed" || !from.verification?.passed || from.verification.head !== from.head)) return "联合集成尚未通过完整检查，不能作为后续开发或审查的基础。";
+			if (!trustedRepair) { const stale = await integrationStale(deps.changes, from); if (stale) return stale; }
+		}
 	}
 	if (args.task_id) {
 		const invalid = await io.commit(async (tx) => {
 			const board = (await tx.doc(Board)) as BoardState;
 			const task = board.tasks[args.task_id!];
 			if (!task) return `分工表里没有任务 ${args.task_id}。先用 plan_tasks 建任务，或者不传 task_id。`;
+			if (task.controllerId && task.controllerId !== String(io.conversationId)) return "任务属于其他总控，不能跨对话派工。";
+			if (task.reviewer?.member === kind) return "执行成员不能同时担任本任务的独立复核成员。";
+			if (task.checksByMember?.some((check) => check.status === "running")) return "独立复核仍在进行，请先等待复核完成。";
 			if (task.lastAttempt && task.lastAttempt.controllerId !== String(io.conversationId)) return "该任务属于其他总控派工，请在原总控恢复或新建独立任务。";
 			const recovery = pendingRecovery(task);
 			const internalRepair = !!io.attemptOf && recovery?.callId === io.attemptOf;
@@ -311,7 +324,8 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 				if (args.based_on) {
 					const from = changes.get(args.based_on);
 					if (!from || from.status === "dropped") return fail(`找不到可用的改动 ${args.based_on}。`);
-					if (from.root !== root) return fail(`改动 ${args.based_on} 属于另一个仓库（${from.root}）。`);
+					const sameRepo = process.platform === "win32" ? resolve(from.root).toLowerCase() === resolve(root).toLowerCase() : resolve(from.root) === resolve(root);
+					if (!sameRepo) return fail(`改动 ${args.based_on} 属于另一个仓库（${from.root}）。`);
 					base = from.head;
 					basedOn = from.id;
 				} else {
@@ -366,11 +380,16 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	const goal = project.goal();
 	let brief = "";
 	let recoveryEvidence = "";
+	let taskScope: TaskScope | undefined;
 	if (args.task_id || goal) {
 		const { board, result: blocked } = await commitBoard(project, io, async (b, tx) => {
 			const t = args.task_id ? b.tasks[args.task_id] : undefined;
 			if (!t) return;
+			taskScope = t.scope ? JSON.parse(JSON.stringify(t.scope)) as TaskScope : undefined;
 			if (t.activeDispatch && t.activeDispatch !== io.callId) return "该任务已有派工占用，未重复开工。";
+			if (t.controllerId && t.controllerId !== String(io.conversationId)) return "任务属于其他总控，不能跨对话派工。";
+			if (t.reviewer?.member === kind) return "执行成员不能同时担任本任务的独立复核成员。";
+			if (t.checksByMember?.some((check) => check.status === "running")) return "独立复核仍在进行，未启动重复派工。";
 			if (t.status === "doing" && !t.dispatches.includes(io.callId)) return "该任务已有派工占用，未重复开工。";
 			if (t.status === "dropped" || (t.status === "done" && !t.dispatches.includes(io.callId))) return "任务已完成或取消，未启动派工。";
 			if (t.deps.some((id) => b.tasks[id]?.status !== "done")) return "前置任务状态发生变化，未启动派工。";
@@ -487,6 +506,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 				prompt,
 				resumeId,
 				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label, agent, config.collaboration?.instructions),
+				scope: taskScope,
 				io,
 				timeoutMs: agent.timeoutMinutes * 60_000,
 				onSession: noteSession,
@@ -534,6 +554,13 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	const cost = parsed.costUsd ?? estimated;
 	const sessionId = parsed.sessionId ?? activeSession;
 	const finished = await finishChange(deps, change, kind, usedModel, args.task);
+	if (finished?.files.length && taskScope) {
+		const violations = checkFilesScope(finished.files, taskScope);
+		if (violations.length) {
+			parsed.isError = true;
+			parsed.text += `\n\n【路径契约越界】\n本任务改动了契约范围外的文件：\n${violations.map((v) => `- ${v}`).join("\n")}\n请回退越界文件，严格在授权路径范围内完成任务。`;
+		}
+	}
 	// 验收命令来自用户配置，模型不能临时改命令或仅凭自述把失败标成功。
 	if (finished?.files.length && !parsed.isError && config.autonomy.enabled && config.autonomy.checks.length) {
 		const reports: string[] = [];

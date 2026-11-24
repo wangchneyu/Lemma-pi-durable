@@ -2,12 +2,12 @@
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-export const AGENT_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", deepseek: "DeepSeek", lead: "子调度" };
+export const AGENT_LABEL = { claude: "Claude", codex: "Codex", gemini: "Gemini", deepseek: "DeepSeek", lead: "子调度", integration: "联合集成" };
 export const KINDS = ["claude", "codex", "gemini", "deepseek"];
 const BUILTIN_KINDS = [...KINDS];
 export function setAgentLabels(agents = []) {
-	KINDS.splice(0, KINDS.length, ...new Set([...BUILTIN_KINDS, ...agents.map((agent) => agent.kind).filter((id) => /^[a-z][a-z0-9_]{0,47}$/.test(id) && !["__proto__", "constructor", "prototype", "lead"].includes(id))]));
-	for (const id of Object.keys(AGENT_LABEL)) { if (id !== "lead" && !BUILTIN_KINDS.includes(id)) delete AGENT_LABEL[id]; }
+	KINDS.splice(0, KINDS.length, ...new Set([...BUILTIN_KINDS, ...agents.map((agent) => agent.kind).filter((id) => /^[a-z][a-z0-9_]{0,47}$/.test(id) && !["__proto__", "constructor", "prototype", "lead", "integration"].includes(id))]));
+	for (const id of Object.keys(AGENT_LABEL)) { if (id !== "lead" && id !== "integration" && !BUILTIN_KINDS.includes(id)) delete AGENT_LABEL[id]; }
 	for (const agent of agents) if (KINDS.includes(agent.kind)) AGENT_LABEL[agent.kind] = agent.label || agent.kind;
 }
 export const SLOT_LABEL = { pending: "排队", running: "执行中", sleeping: "等待中", waiting: "等待中", done: "完成" };
@@ -38,7 +38,7 @@ export function kindOf(toolName) {
 	return String(toolName ?? "").replace(/^ask_/, "");
 }
 export function agentColor(kind) {
-	if (kind === "lead") return "var(--lead)";
+	if (kind === "lead" || kind === "integration") return "var(--lead)";
 	if (BUILTIN_KINDS.includes(kind)) return `var(--${kind})`;
 	const hash = [...String(kind)].reduce((sum, character) => (sum * 31 + character.charCodeAt(0)) >>> 0, 0);
 	return `hsl(${hash % 360} 55% 48%)`;

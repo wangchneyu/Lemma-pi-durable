@@ -7,7 +7,22 @@ import type { FileStat } from "./git.ts";
 
 export type ChangeStatus = "running" | "pending" | "empty" | "applied" | "dropped" | "conflict";
 
-export interface ChangeRecord {
+export type ChangeRecord = {
+	/** Joint verification belongs to a frozen main-workspace snapshot and exact member heads. */
+	integration?: {
+		id: string;
+		controllerId: string;
+		taskId: string;
+		sources: { id: string; base: string; head: string }[];
+		baselineTree: string;
+		checks: { name: string; command: string; args: string[]; timeoutSeconds?: number }[];
+		status: "preparing" | "merging" | "repairing" | "testing" | "passed" | "failed" | "conflict" | "cancelled";
+		reports: { name: string; passed: boolean; exitCode: number | null; output: string; at: number }[];
+		conflicts?: string[];
+		replacesId?: string;
+		supersededBy?: string;
+		repair?: { fromId: string; member: string; model?: string; note?: string; callId: string; jobId?: string; changeId?: string; previousFailure?: string };
+	};
 	verification?: { head: string; passed: boolean; at: number; checks: string[] };
 	id: string;
 	agent: string;

@@ -18,10 +18,13 @@ import { readCredential } from "./credentials.ts";
 import { createBusinessTools } from "./business-tools.ts";
 import { Operations, unresolved } from "./operations.ts";
 import { createMcpTools, mcpToolName } from "./mcp-tools.ts";
+import { createCodeReadTools } from "./code-tools.ts";
+import type { ChangeStore } from "./changes.ts";
+import { scopeViolation, type TaskScope } from "./scope.ts";
 
 /** API 成员在模型目录里的 provider 名 */
 export const memberProvider = (kind: AgentKind) => `member-${kind}`;
-export const MemberIdentity = defineDoc<{ id: string; name: string }>({
+export const MemberIdentity = defineDoc<{ id: string; name: string; scope?: TaskScope }>({
 	kind: "lemma.member-identity", version: 1, scope: "conversation", history: "latest", fork: "current",
 	initial: () => ({ id: "", name: "" }), checkpointWhen: () => false,
 });
@@ -132,10 +135,13 @@ export function memberToolNames(api: ApiMemberConfig): string[] {
 }
 
 /** Tool grants are explicit for custom members; legacy coding members retain their existing default set. */
-export function createMemberTools(kind: AgentKind, api: ApiMemberConfig): Extension {
+export function createMemberTools(kind: AgentKind, api: ApiMemberConfig, options?: { workspace?: "code" | "none"; changes?: ChangeStore }): Extension {
 	const granted = new Set(memberToolNames(api));
 	const tools: any[] = [...createBusinessTools(kind, api.httpTools), ...createMcpTools(api.mcpServers)];
-	if (granted.has("read")) tools.push(createReadTool());
+	if (granted.has("read")) {
+		tools.push(createReadTool());
+		if (options?.workspace === "code") tools.push(...createCodeReadTools(pathRefusal, options?.changes));
+	}
 	if (granted.has("write")) tools.push(createWriteTool());
 	if (granted.has("edit")) tools.push(createEditTool());
 	if (granted.has("bash") && api.bash !== "off") {
@@ -158,8 +164,18 @@ export function createMemberTools(kind: AgentKind, api: ApiMemberConfig): Extens
 					if (!FILE_TOOLS.has(call.name)) return undefined;
 					const agent = (await hookApi.snapshot(AgentDoc, hookApi.conversationId, context)) as { cwd?: string } | undefined;
 					if (!agent?.cwd) return { block: "没有确定的工作目录，不能读写文件。" };
-					const refusal = pathRefusal((call.arguments as { path?: unknown }).path, agent.cwd);
-					return refusal ? { block: refusal } : undefined;
+					const rawPath = (call.arguments as { path?: unknown }).path;
+					const refusal = pathRefusal(rawPath, agent.cwd);
+					if (refusal) return { block: refusal };
+					if (call.name === "write" || call.name === "edit") {
+						const identity = await hookApi.snapshot(MemberIdentity, hookApi.conversationId, context);
+						if (identity?.scope && typeof rawPath === "string") {
+							const rel = relative(resolve(agent.cwd), resolve(agent.cwd, rawPath.trim()));
+							const violation = scopeViolation(rel, identity.scope);
+							if (violation) return { block: violation };
+						}
+					}
+					return undefined;
 				},
 			}),
 		],
@@ -178,10 +194,16 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 	].filter(Boolean).join("\n");
 	const rulesFile = join(workdir, ".pi-agent", "RULES.md");
 	const rules = existsSync(rulesFile) ? readFileSync(rulesFile, "utf8").trim().slice(0, 6000) : "";
+	const granted = new Set(memberToolNames(api));
+	const canWrite = granted.has("write") || granted.has("edit");
 	return [
 		domain ?? "", agent?.instructions ?? "",
 		`你是 Lemma 团队里的成员 ${label}（${kind}），由总调度派活。你在当前工作目录里完成交给你的任务。`,
-		"- 用 read 读文件，用 edit 精确修改，用 write 新建或整体重写文件。路径相对当前工作目录，只能读写工作目录里的文件（工作目录外的路径会被拒绝）；临时文件也放在工作目录里，用完删掉。",
+		canWrite
+			? "- 用 list_files 浏览目录、outline_file 查看文件结构大纲、find_symbol 定位符号定义与引用、search_code 搜索关键字、git_diff 查看当前改动差异、read 读取文件；用 edit 精确修改，用 write 新建或整体重写文件。路径相对当前工作目录，只能读写工作目录里的文件（若任务定义了 scope 路径契约，只允许修改授权路径内的文件）；临时文件也放在工作目录里，用完删掉。"
+			: granted.has("read")
+				? "- 当前为只读代码会话：可用 list_files 浏览目录、outline_file 查看结构大纲、find_symbol 定位符号定义与引用、search_code 搜索代码、git_diff 查看相对于基线的改动差异、read 读取文件。所有路径相对当前工作目录，不能修改任何文件。"
+				: "- 当前会话未开放文件工具，请仅基于提供的任务与交接证据分析。",
 		api.bash === "off"
 			? "- 你没有 bash，不能运行命令。"
 			: api.bash === "all"
@@ -250,6 +272,7 @@ export async function runApiMember(o: {
 	prompt: string;
 	resumeId?: string;
 	instructions: string;
+	scope?: TaskScope;
 	io: DispatchIO;
 	timeoutMs: number;
 	onSession: (id: string) => void;
@@ -269,6 +292,7 @@ export async function runApiMember(o: {
 				if (!record) throw new Error(`找不到会话 ${o.resumeId}`);
 				await configure(tx, record.id, { model: ref, cwd: o.cwd, instructions: o.instructions, extensions: [o.tools], maxTurns: o.api.maxTurns ?? 40 });
 				const identity = await tx.doc(MemberIdentity, record.id); identity.id = o.kind; identity.name = o.name ?? o.kind;
+				if (o.scope) identity.scope = o.scope; else delete identity.scope;
 				return String(record.id);
 			}
 			const existing = (await tx.scanConversations({ ownerTaskId: Number(io.taskId) as any }, 1)).items[0];
@@ -276,6 +300,7 @@ export async function runApiMember(o: {
 			const created = await tx.createConversation({ ownership: { kind: "task", taskId: Number(io.taskId) as any } });
 			await configure(tx, created.id, { model: ref, extensions: [o.tools], instructions: o.instructions, cwd: o.cwd, maxTurns: o.api.maxTurns ?? 40 });
 			const identity = await tx.doc(MemberIdentity, created.id); identity.id = o.kind; identity.name = o.name ?? o.kind;
+			if (o.scope) identity.scope = o.scope; else delete identity.scope;
 			return String(created.id);
 		});
 	} catch (error) {

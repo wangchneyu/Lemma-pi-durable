@@ -30,6 +30,8 @@ import { CostLedger, Resources, resourceSnapshot } from "./resources.ts";
 import { resultExcerpt } from "./deliverables.ts";
 import { taskCommand, TASK_HELP } from "./task-commands.ts";
 import { AgentTerminal } from "./terminal.ts";
+import { readyTasks, taskReadiness } from "./task-readiness.ts";
+import { Integrations, integrationSummary } from "./integrations.ts";
 import { listNativeConversations, watchTerminalState } from "./terminal-state.ts";
 import { SessionCatalog } from "./sessions.ts";
 import { liveDigest, storedDigest } from "./digest.ts";
@@ -421,11 +423,26 @@ function printChanges(all: boolean) {
 		log(
 			`  ${color(`#${ch.id}`)} ${color(STATUS_TEXT[ch.status] ?? ch.status)}  ${ch.agent}${ch.model ? c.dim(`/${ch.model}`) : ""}  ${ch.files.length} 个文件 ${c.green(`+${ch.add}`)} ${c.red(`−${ch.del}`)}  ${c.dim(ch.task.replace(/\s+/g, " ").slice(0, 50))}`,
 		);
+		if (ch.integration) log(c.dim(`    集成 ${ch.integration.status} · 来源 ${ch.integration.sources.map((source) => `#${source.id}`).join(" + ")} · 检查 ${ch.integration.reports.filter((report) => report.passed).length}/${ch.integration.checks.length} · /integrate show ${ch.id}`));
 	}
 	log(c.dim("  /diff <编号> 看改了哪些文件，/apply <编号> 合并到主目录，/drop <编号> 丢弃，/clean 清理已合并的 worktree"));
 }
 
 async function changeCommand(line: string): Promise<boolean> {
+	if (/^\/integrate(?:\s|$)/.test(line)) {
+		const [, action = "list", ...args] = line.trim().split(/\s+/);
+		if (action === "list" || action === "show") {
+			const records = Object.values((await harness.snapshot(Integrations, context))?.records ?? {}).filter((record) => record.integration?.controllerId === String((terminalConversation ?? root).id) && (action !== "show" || record.id === args[0]));
+			if (!records.length) log("当前没有集成记录；/integrate create <改动ID1> <改动ID2> 启动联合合并与检查。");
+			for (const record of records) log(JSON.stringify(integrationSummary(app.changes.get(record.id) ?? record), null, 2)); return true;
+		}
+		if (terminalConversation && String(terminalConversation.id) !== String(root.id)) throw new Error("请先 /main 返回总控操作集成。");
+		if (action === "cancel" && args.length === 1) { await app.cancelIntegration(root.id, args[0]!, context); log(`集成 ${args[0]} 已取消；现场与来源分支保留。`); return true; }
+		if (action === "rerun" && args.length === 1) { const record = await app.rerunIntegration(root.id, args[0]!, context); log(JSON.stringify(integrationSummary(record), null, 2)); return true; }
+		if (action === "repair" && args.length >= 2) { const [targetId, member, ...noteParts] = args; const record = await app.repairIntegration(root.id, targetId!, member!, noteParts.join(" ").trim() || undefined, context); log(JSON.stringify(integrationSummary(record), null, 2)); return true; }
+		if (action !== "create" || args.length < 2) throw new Error("/integrate create <改动ID1> <改动ID2> … · /integrate rerun <ID> · /integrate repair <ID> <成员ID> [说明] · /integrate list · /integrate show <ID> · /integrate cancel <ID>");
+		const record = await app.integrate(root.id, args, context); log(JSON.stringify(integrationSummary(record), null, 2)); return true;
+	}
 	const targetChanges = app.changes;
 	const [cmd, arg = ""] = line.split(/\s+/, 2);
 	switch (cmd) {
@@ -439,6 +456,7 @@ async function changeCommand(line: string): Promise<boolean> {
 				return true;
 			}
 			log(`#${ch.id}  ${ch.branch}  ${STATUS_TEXT[ch.status] ?? ch.status}${ch.basedOn ? c.dim(`  基于 #${ch.basedOn}`) : ""}`);
+			if (ch.integration) log(c.dim(`联合检查：${ch.integration.status}；/integrate show ${ch.id} 查看完整记录。`));
 			for (const f of ch.files) log(`  ${c.green(`+${f.add}`.padStart(6))} ${c.red(`−${f.del}`.padEnd(6))} ${f.path}`);
 			if (admin) log(c.dim(`  完整差异：${admin.url}/#/changes/${ch.id}`));
 			return true;
@@ -468,6 +486,22 @@ async function changeCommand(line: string): Promise<boolean> {
 }
 
 async function command(line: string): Promise<boolean> {
+	if (/^\/workflow(?:\s|$)/.test(line)) {
+		const [, action = "status", extra] = line.split(/\s+/);
+		if (extra || !["status", "pause", "resume"].includes(action)) throw new Error("/workflow status|pause|resume");
+		if (action !== "status" && terminalConversation && String(terminalConversation.id) !== String(root.id)) throw new Error("请先 /main 返回总控控制协作流程。");
+		const state = await app.workflow(action as "status" | "pause" | "resume", context);
+		log(state.paused ? "自动协作已暂停；现有派工继续收尾，不启动后续派工。/workflow resume 恢复。" : "自动协作已启用；仅推进显式授权的任务。/ready 查看，/workflow pause 暂停。"); return true;
+	}
+	if (line === "/ready") {
+		const board = await harness.snapshot(Board, context);
+		const queue = board ? readyTasks(board, String((terminalConversation ?? root).id)).filter((state) => board.tasks[state.id]!.status === "todo") : [];
+		if (!queue.length) log("当前没有待派发任务；/tasks 查看执行、复核和受阻记录。");
+		for (const state of queue) {
+			log(`${state.id} · ${state.ready ? "就绪" : state.reasons.join("；")} · ${board!.tasks[state.id]!.automation ? "已授权自动派发" : "等待总控派发"}`);
+		}
+		return true;
+	}
 	if (line === "/history") {
 		if (terminalUI) await terminalUI.loadEarlier();
 		else log("请通过 npm start 打开终端，使用滚轮或 PgUp 翻阅历史。");
@@ -498,7 +532,7 @@ async function command(line: string): Promise<boolean> {
 		await assertConfigIdle();
 		log(await harness.commit((tx) => resolveOperation(tx, id, outcome as "succeeded" | "not_applied", parts.join(" "), Date.now()), context)); return true;
 	}
-	if (line === "/help") { log(MEMBER_HELP); log(TASK_HELP); log("/sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); log("Enter 发送 · Ctrl+J 换行 · 滚轮/PgUp/PgDn 翻阅 · Ctrl+Home/End 到顶/最新 · Alt+End 最新 · Ctrl+K 会话 · Alt+C 关系树 · Ctrl+L 模型 · Ctrl+T 任务面板 · Ctrl+E 工具详情 · Alt+T 思考"); log("/history 补载更早记录 · /thinking 展开/收起思考 · Ctrl+Shift+F 搜索已加载记录；思考仅展示服务实际返回的内容。"); return true; }
+	if (line === "/help") { log(MEMBER_HELP); log(TASK_HELP); log("/sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); log("/ready 就绪队列 · /workflow status|pause|resume 协作控制 · Enter 发送 · Ctrl+J 换行 · 滚轮/PgUp/PgDn 翻阅 · Ctrl+Home/End 到顶/最新 · Alt+End 最新 · Ctrl+K 会话 · Alt+C 关系树 · Ctrl+L 模型 · Ctrl+T 任务面板 · Ctrl+E 工具详情 · Alt+T 思考"); log("/history 补载更早记录 · /thinking 展开/收起思考 · Ctrl+Shift+F 搜索已加载记录；思考仅展示服务实际返回的内容。"); return true; }
 	if (/^\/(?:agent|setup|tool|limits|mcp)(?:\s|$)/.test(line)) {
 		if (configuring) throw new Error("配置正在进行中。");
 		configuring = true;
@@ -589,6 +623,8 @@ async function command(line: string): Promise<boolean> {
 				`  ${tint(`${t.id} ${STATUS_LABEL[t.status]}`.padEnd(8))} ${t.title}${c.dim(`${t.role ? ` ·${t.role}` : ""}${t.owner ? ` ·${t.owner}` : ""}${t.deps.length ? ` ·依赖 ${t.deps.join(",")}` : ""}${t.changes.length ? ` ·改动 ${t.changes.map((x) => `#${x}`).join(",")}` : ""}`)}`,
 			);
 			if (t.latestResult) log(c.dim(`    结果：${t.latestResult} · /result ${t.latestResult}`));
+			const state = taskReadiness(board!, t); if (t.status === "todo") log(`    ${state.ready ? "就绪" : state.reasons.join("；")} · ${t.automation ? "自动派发已授权" : "等待派发"}`);
+			if (t.reviewer) { const check = t.checksByMember?.at(-1); log(`    独立复核：${t.reviewer.member} · ${check?.status ?? "等待交付"}${check?.evidence ? ` · ${check.evidence.slice(0, 200)}` : ""}`); }
 			if (t.verification) log(`    机器检查：${t.verification.passed ? "通过，仍需复核" : "未通过"} · ${t.verification.checks.map((check) => `${check.name}:${check.passed ? "通过" : "失败"}`).join("、")}`);
 			if (t.review) log(`    复核：${t.review.verdict} · ${t.review.evidence.slice(0, 250)}`);
 			const recovery = t.recoveries?.at(-1); if (recovery) log(`    恢复：${recovery.action} → ${recovery.member} · ${recovery.status} · ${recovery.note.slice(0, 180)}`);
@@ -868,7 +904,7 @@ async function startTui() {
 						if (closing || generation !== terminalGeneration) return;
 						if (switchingSession && text !== "/exit" && text !== "/quit") return log(c.dim("正在切换，命令未执行，请稍后重试。"));
 						// Task-owned 子对话由原派工管理，只允许查看或返回，不改变它的执行。
-						const readCommand = /^(?:\/help|\/history|\/thinking|\/main|\/conversations|\/tree|\/taskgraph|\/conversation|\/id|\/sessions?|\/members|\/tasks|\/goal|\/jobs|\/changes|\/diff|\/usage|\/agents|\/web|\/learn|\/repair|\/exit|\/quit)(?:\s|$)/.test(text) && !/^\/jobs\s+cancel/.test(text);
+						const readCommand = /^(?:\/help|\/history|\/thinking|\/ready|\/main|\/conversations|\/tree|\/taskgraph|\/conversation|\/id|\/sessions?|\/members|\/tasks|\/goal|\/jobs|\/changes|\/diff|\/usage|\/agents|\/web|\/learn|\/repair|\/exit|\/quit)(?:\s|$)/.test(text) && !/^\/jobs\s+cancel/.test(text);
 						if (readingChild && !readCommand) return log(c.yellow("子对话为只读查看；请先 /main 返回总控再执行控制命令。"));
 						const bindsView = /^\/(?:sessions?|conversations|tree|main)(?:\s|$)/.test(text);
 						if (!bindsView) activeTerminalCommands++;

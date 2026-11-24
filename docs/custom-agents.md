@@ -2,6 +2,8 @@
 
 Lemma 的 API 成员与 CLI 成员使用相同的任务、会话和结果管理流程。成员按职责配置，模型与服务地址决定执行方式；同一模型可以承担多个独立成员。
 
+当前版本以 coding 协作为主：API 成员同样可以承担编码、测试、仓库分析和代码审查。文中的通用配置说明描述已有接入能力；其他领域及面向其他开发者的单独适配属于后续工作，不作为当前版本的设计目标。
+
 ## 配置与启动
 
 运行 `npm start`，用 `/setup` 引导配置总控，用 `/agent add` 引导添加成员：依次输入成员 ID、名称、职责、专属指令、API 协议、服务地址、模型、工作区与工具权限，最后隐藏输入 API 密钥。已有配置会继续加载，也可用 `PI_AGENT_CONFIG` 指定其他配置文件。
@@ -122,6 +124,16 @@ MCP 使用固定版本官方 SDK 的 Streamable HTTP 客户端：`/mcp add <成�
 
 `test:business` 还覆盖收尾执行检查点后、事务内与事务提交后，以及返工结果提交后、完整返工回执保存后共五处强杀进程，验证恢复不重复执行、计费或累计会话轮次，保留最终返工交付；以及未知写操作跨成员/重启拦截、人工核对、确认成功防重与限流冷却。
 
-`npm run test:collaboration` 覆盖字段交接、同步/后台队列、预算预留、重启恢复、单独取消、同服务并发限制、MCP 分页发现与授权变更，以及完整任务对照的成功和失败计分。`npm run bench:collaboration` 生成本地固定响应基线；显式 `--real` 才调用真实模型，模拟模式不报告真实成本或 token 收益。
+`npm run test:collaboration` 覆盖依赖就绪推进、独立复核、有限返工、暂停与恢复、字段交接、同步/后台队列、预算预留、重启恢复、单独取消、同服务并发限制、MCP 分页发现与授权变更，以及完整任务对照的成功和失败计分。`npm run bench:collaboration` 生成本地固定响应基线；显式 `--real` 才调用真实模型，模拟模式不报告真实成本或 token 收益。
+
+### 依赖推进与独立复核
+
+`plan_tasks` 每项可选 `automation: { member: "researcher", model: "已配置模型ID", maxReworks: 1 }` 与 `reviewer: { member: "checker" }`。未声明 automation 时不会自动派工；声明 reviewer 后，当前交付必须通过该独立成员复核，不能用 `update_task done` 绕过。复核成员与执行者必须不同，复核会开启独立上下文，不继承执行者聊天。API 复核成员使用专用只读配置（`tools: []` 或 `["read"]`、`bash: "off"`，HTTP 仅 GET）；CLI 成员继续遵循现有隔离约束，指令要求只读，发现复核分支产生提交改动时拒绝通过，这不构成操作系统沙箱。
+
+复核结果格式为 `{"verdict":"accept|rework|block","result_id":"被复核结果ID","evidence":"逐项核对依据或具体缺口"}`。自动复核只接收最多 8000 字符的完整交付，超限会受阻交总控拆分；自动下游最多交接 8 项同总控依赖结果，每项 2000 字符并保留引用和偏移信息。系统不会把被截断的复核输入视为完整验收。代码复核沿用 based_on 创建独立工作副本，实际源码版本变化后旧复核失效。
+
+`/ready` 查看就绪任务与依赖等待；`/workflow status|pause|resume` 查看或暂停恢复自动推进。暂停不取消已有作业，取消作业继续使用 `/jobs cancel <ID>`；失败、取消和未知外部操作不会自动反复重跑。已完成前置任务不随返工重做，所有复核与恢复记录留在当前会话。
+
+单一代码依赖通过 `based_on` 带入已验收分支；多个前置分支由 Durable 创建集成副本，合并并运行 `autonomy.checks`，通过后下游基于该集成提交开工。未配置检查、冲突或检查失败时不会盲目启动下游。也可用 `/integrate create <ID1> <ID2>` 手动启动，`/integrate show <集成ID>` 看证据，`/integrate cancel <集成ID>` 取消；用户 `/apply <集成ID>` 才将整体改动应用到主目录，不自动提交。模型可调用 `integrate_changes` 和 `read_integration wait:true`，等待由 Durable 挂起而非循环询问模型。
 
 同组测试还包含 `test/task-recovery.ts` 与 `test/context-handoff.ts`：准备恢复跨重启、补资料原会话、换人交接、禁止验收旧结果、未知 POST 与总控隔离、终端直接派工和取消；上下文/字段复用、变更重发、强制 full、原生 reset。`test/repair.ts` 验证代码换人继承原分支后有限修复仍正常收尾。
