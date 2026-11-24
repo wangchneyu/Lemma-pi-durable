@@ -19,7 +19,7 @@ import { loadConfig, type AppConfig } from "./config.ts";
 import { memberSettingsCommand, MEMBER_HELP, type SettingQuestion } from "./member-settings.ts";
 import type { SettingsDraft } from "./settings.ts";
 import { clip, Jobs, type JobRecord, type JobsState } from "./jobs.ts";
-import { createOrchestratorModel, type OrchestratorModel } from "./models.ts";
+import { createOrchestratorModel, orchestratorKeyWarning, type OrchestratorModel } from "./models.ts";
 import { controllerModels, nativeModelCatalog, selectControllerModel, restoreControllerModel } from "./model-selection.ts";
 import { colors as c, follow, setOutputSink, writeLine as log } from "./printer.ts";
 import { AgentSessions, RunBudget } from "./dispatch.ts";
@@ -265,6 +265,8 @@ async function printBanner() {
 	for (const a of agents) {
 		log(`  ${a.available ? c.green("●") : c.red("○")} ${a.label ?? a.kind}${a.label && a.label !== a.kind ? ` (${a.kind})` : ""} · ${a.transport ?? (config.agents[a.kind].api ? "api" : "cli")}${a.available ? "" : c.dim(` — ${a.reason}`)}`);
 	}
+	const authWarn = orchestratorKeyWarning(config.orchestrator);
+	if (authWarn) log(c.yellow(`⚠ ${authWarn}`));
 }
 
 async function shutdown(code = 0): Promise<void> {
@@ -308,6 +310,9 @@ async function ask(text: string, whenBusy: "steer" | "followUp" = "followUp") {
 		if (reason === "model_error" && CONTEXT_BLOCKED.test(detail ?? "")) {
 			// 服务商的内容检查拦下的是整段上下文：之后每次请求都会带上它，续跑和重发都没用
 			log(c.yellow("（这是模型服务商的内容检查拦截，不是 Lemma 的故障。被拦的那条消息还在上下文里，之后每次请求都会被拦。输入 /new 重置上下文就能恢复；对话记录仍保存在存储里。）"));
+		} else if (reason === "model_error" && /Provider is not configured/i.test(detail ?? "")) {
+			const authWarn = orchestratorKeyWarning(config.orchestrator);
+			if (authWarn) log(c.yellow(`（${authWarn}）`));
 		} else if (reason === "model_error" || reason === "interrupted" || reason === "turn_limit") log(c.dim("（输入 /continue 可以在原来的上下文里续跑）"));
 	}
 	return settled;
@@ -975,6 +980,8 @@ async function startTui() {
 		conversationId: String(conversation.id), conversationLabel: String(conversation.id) === String(root.id) ? "总控 CID" : "子对话 CID · 只读",
 	}, drafts.get(terminalDraftKey()) ?? "");
 	if (creating) log(c.dim(`${orchestrator.info?.type ?? config.orchestrator.type} · 会话存储：${config.storage}`));
+	const authWarn = orchestratorKeyWarning(config.orchestrator);
+	if (authWarn) log(c.yellow(`⚠ ${authWarn}`));
 	if (pendingChanges(activeApp.changes).length) printChanges(false);
 	let busy = false;
 	let refreshing = false;

@@ -33,8 +33,21 @@ function keySource(config: OrchestratorConfig): string {
 	if (config.type === "builtin") return `${config.provider ?? "?"} 的标准环境变量`;
 	for (const name of config.apiKeyEnv ?? []) if (process.env[name]) return `环境变量 ${name}`;
 	if (readCredential(config.credential)) return "本机凭据文件";
-	if (config.apiKeyFromClaudeSettings && claudeSettingsEnv().token) return "~/.claude/settings.json（与 Claude CLI 共用）";
+	if (config.apiKeyFromClaudeSettings) {
+		const claude = claudeSettingsEnv();
+		if (claude.token) return "~/.claude/settings.json（与 Claude CLI 共用）";
+		if (claude.error) return `~/.claude/settings.json 解析失败：${claude.error}`;
+	}
 	return "未找到密钥";
+}
+
+export function orchestratorKeyWarning(config: OrchestratorConfig): string | undefined {
+	if (config.type === "builtin" || resolveOrchestratorKey(config)) return undefined;
+	if (config.apiKeyFromClaudeSettings) {
+		const claude = claudeSettingsEnv();
+		if (claude.error) return `总控无法从 ~/.claude/settings.json 读取密钥（JSON 语法错误：${claude.error}）；请修复该文件或运行 /setup 配置总控凭据。`;
+	}
+	return "总控模型尚未配置 API 密钥，发消息会报 Provider is not configured；请运行 /setup 或在网页「配置 → 编辑总控」填写。";
 }
 
 export function createOrchestratorModel(config: OrchestratorConfig, catalogPath?: string): OrchestratorModel {

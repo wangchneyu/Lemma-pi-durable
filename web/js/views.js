@@ -1369,7 +1369,7 @@ function config() {
 						["协议", code(o.type)],
 						["模型", code(o.modelId)],
 						["地址", o.host ? code(o.host) : "—"],
-						["密钥来源", esc(o.keySource)],
+						["密钥来源", /未找到|解析失败/.test(o.keySource ?? "") ? `<span class="err-t">${esc(o.keySource)}</span>` : esc(o.keySource)],
 						["最多轮数", o.maxTurns],
 					])}</div></section>
 				<section class="card"><header class="card-head"><h2 class="card-title">成员</h2><a class="ghost-btn tiny" href="#/agents">前往成员管理</a></header>

@@ -425,13 +425,13 @@ export function resolveCommand(kind: AgentKind, agent: AgentConfig): string[] | 
 }
 
 /** 读取 ~/.claude/settings.json 里 Claude CLI 用的中转站地址和 token（不打印） */
-export function claudeSettingsEnv(): { baseUrl?: string; token?: string } {
+export function claudeSettingsEnv(): { baseUrl?: string; token?: string; error?: string } {
 	const file = join(homedir(), ".claude", "settings.json");
 	if (!existsSync(file)) return {};
 	try {
 		const env = (JSON.parse(readFileSync(file, "utf8")) as { env?: Record<string, string> }).env ?? {};
 		return { baseUrl: env.ANTHROPIC_BASE_URL, token: env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY };
-	} catch {
-		return {};
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
 	}
 }
