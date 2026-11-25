@@ -69,6 +69,10 @@ function renderChrome() {
 			return tasks.length ? `${tasks.filter((t) => t.status === "done").length}/${tasks.length}` : "";
 		})(),
 		sessions: state?.sessions.length || "",
+		dag: (() => {
+			const tasks = (state?.project?.tasks ?? []).filter((t) => t.status === "doing" || t.status === "review");
+			return tasks.length ? `${tasks.length} 活跃` : "";
+		})(),
 		topology: runningJobs().length ? `后台 ${runningJobs().length}` : "",
 	};
 	for (const [k, v] of Object.entries(counts)) $(`[data-count="${k}"]`).textContent = v ? String(v) : "";

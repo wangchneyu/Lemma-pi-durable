@@ -1,6 +1,6 @@
 // 后台各页面。每个页面：mount(root, params) 渲染，update(kind, payload) 响应数据变化，unmount() 清理。
 import { openDispatch } from "./drawer.js";
-import { bindDagPanelEvents, renderReviewLoopPanel, renderScopeMatrix } from "./dag.js";
+import { bindDagPanelEvents, classifyTopology, renderReviewLoopPanel, renderScopeMatrix, renderTaskDag } from "./dag.js";
 import { openAutonomyEditor, openCreateIntegrationDialog, openLimitsEditor, openMemberEditor, openOrchestratorEditor, openRecoverDialog, openRepairIntegrationDialog, openResolveOperationDialog, runControlAction } from "./editors.js";
 import { createChangesView } from "./gitlens.js";
 import { METRICS, MODES, RANGES, Sankey } from "./sankey.js";
@@ -437,7 +437,7 @@ function project() {
 				<section class="card">
 					<header class="card-head"><div class="card-heading"><h2 class="card-title">分工表</h2>
 						<div class="card-sub">${tasks.length ? `<span><b>${done}</b>/${tasks.length} 完成</span><span><b>${count("doing")}</b> 进行中</span><span><b>${count("review")}</b> 待验收</span>${count("blocked") ? `<span class="err-t"><b>${count("blocked")}</b> 受阻</span>` : ""}` : "<span>还没有任务</span>"}</div></div>
-						<div class="row-actions"><span class="card-note mono">${esc(p.assignPath)}</span>${tasks.length ? `<a class="ghost-btn tiny" href="#/topology">在协作拓扑看 DAG →</a>` : ""}</div></header>
+						<div class="row-actions"><span class="card-note mono">${esc(p.assignPath)}</span>${tasks.length ? `<a class="ghost-btn tiny" href="#/dag">查看任务图谱 (DAG) →</a>` : ""}</div></header>
 					<div class="card-body">
 						${tasks.length ? `<div class="board-progress"><i style="width:${pct}%"></i></div>` : ""}
 						${
@@ -469,6 +469,123 @@ function project() {
 				</section>`;
 			const loopWrap = root.querySelector('[data-n="reviewLoopWrap"]');
 			if (loopWrap) bindDagPanelEvents(loopWrap);
+		},
+	};
+}
+
+// =====================================================================
+// 任务图谱（DAG）
+// =====================================================================
+function dag() {
+	let root;
+	let topoData = null;
+	let loadedOnce = false;
+	let loading = false;
+	let timer = null;
+	let lastSig = "";
+
+	async function load() {
+		if (!root || loading) return;
+		loading = true;
+		try {
+			topoData = await getJson("/api/topology?limit=200");
+		} catch {
+			/* 断线或未就绪时回退 store.state 渲染 */
+		} finally {
+			loadedOnce = true;
+			loading = false;
+			render();
+		}
+	}
+	const reload = (delay = 180) => {
+		clearTimeout(timer);
+		timer = setTimeout(load, delay);
+	};
+
+	function render() {
+		if (!root) return;
+		if (!topoData && !store.state && !loadedOnce) return;
+		const tasks = topoData?.tasks ?? store.state?.project?.tasks ?? [];
+		const integrations = (topoData?.integrations ?? store.state?.integrations ?? []).filter((it) => !it.supersededBy && it.changeStatus !== "dropped");
+		const readinessList = topoData?.readyTasks ?? store.state?.readyTasks ?? [];
+		const sig = JSON.stringify([tasks, integrations, readinessList]);
+		if (sig === lastSig) return;
+		lastSig = sig;
+
+		const readinessMap = new Map(readinessList.map((r) => [r.id, r]));
+		const active = tasks.filter((t) => t.status !== "dropped");
+		const done = active.filter((t) => t.status === "done").length;
+		const doing = active.filter((t) => t.status === "doing" || t.status === "review").length;
+		const reviewCount = active.filter((t) => !!t.reviewer).length;
+		const blindCount = active.filter((t) => t.reviewer?.blind).length;
+		const scopedCount = active.filter((t) => t.scope && (t.scope.allow?.length || t.scope.forbid?.length)).length;
+		const topoInfo = classifyTopology(tasks, integrations);
+
+		const statsEl = root.querySelector('[data-n="stats"]');
+		if (statsEl) {
+			statsEl.innerHTML = [
+				["协作层级", `<b>${esc(topoInfo.tier)}</b> · ${esc(topoInfo.title.replace(/^L[012]\s*·\s*/, ""))}`],
+				["任务进度", active.length ? `<b>${done}</b> / ${active.length}${doing ? `（<b>${doing}</b> 活跃）` : ""}` : "等待拆解"],
+				["独立复核 / 盲审", blindCount ? `<b>${reviewCount}</b> 项（含 <b>${blindCount}</b> 盲审）` : `<b>${reviewCount}</b> 项`],
+				["路径隔离 / 集成", `<b>${scopedCount}</b> 锁域 · <b>${integrations.length}</b> 集成`],
+			]
+				.map(([k, v]) => `<div class="topo-stat"><span>${k}</span><strong>${v}</strong></div>`)
+				.join("");
+		}
+		const subEl = root.querySelector('[data-n="sub"]');
+		if (subEl) subEl.textContent = topoInfo.detail;
+		const tierEl = root.querySelector('[data-n="tier"]');
+		if (tierEl) tierEl.textContent = topoInfo.title;
+
+		const stageEl = root.querySelector('[data-n="stage"]');
+		if (!stageEl) return;
+		renderTaskDag(stageEl, {
+			tasks,
+			integrations,
+			readinessMap,
+			onSelectTask: (t) => {
+				const bar = (topoData?.bars ?? []).filter((b) => b.taskId === t.id).at(-1);
+				const dispatch = bar ?? store.dispatches.find((d) => d.taskId === t.id);
+				if (dispatch?.key) openDispatch(dispatch.key);
+				else location.hash = "#/project";
+			},
+		});
+	}
+
+	return {
+		title: "任务图谱 (DAG)",
+		sub: "多 Agent 依赖拓扑、盲审关系与集成汇流一览",
+		mount(r) {
+			root = r;
+			lastSig = "";
+			loadedOnce = false;
+			root.innerHTML = `<div class="topo-stats" data-n="stats"></div>
+				<section class="card dag-card">
+					<header class="card-head">
+						<div class="card-heading">
+							<h2 class="card-title">多 Agent 任务依赖与自适应拓扑（DAG）</h2>
+							<div class="card-sub" data-n="sub">自动识别 L0/L1/L2 协作拓扑；悬停高亮上下游，点节点查看派工</div>
+						</div>
+						<div class="row-actions">
+							<span class="tier-badge" data-n="tier">L0 · 等待规划</span>
+							<a class="ghost-btn tiny" href="#/project">分工表 →</a>
+							<a class="ghost-btn tiny" href="#/topology">查看协作时间线 →</a>
+						</div>
+					</header>
+					<div class="card-body dag-stage" data-n="stage"><div class="empty-inline"><span class="dot"></span>加载中…</div></div>
+				</section>`;
+			render();
+			load();
+		},
+		unmount() {
+			clearTimeout(timer);
+			root = null;
+		},
+		update(kind) {
+			if (!root) return;
+			if (kind === "tick" || kind === "live" || kind === "items" || kind === "job-output" || kind === "usage") return;
+			render();
+			if (kind === "all" || kind === "state" || kind === "dispatches" || kind === "changes" || kind === "jobs") reload(180);
 		},
 	};
 }
@@ -1197,4 +1314,4 @@ function config() {
 	};
 }
 
-export const VIEWS = { overview, project, topology, runs, dispatches, changes, agents, conventions, sessions, usage, config };
+export const VIEWS = { overview, project, dag, topology, runs, dispatches, changes, agents, conventions, sessions, usage, config };
