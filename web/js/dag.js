@@ -404,7 +404,7 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 		const ownerLabel = t.owner ? AGENT_LABEL[t.owner] ?? t.owner : "未指派";
 		const revTag = t.reviewer ? ` · 🔎${t.reviewer.blind ? "盲审" : "复核"}${t.checksByMember?.length ? `×${t.checksByMember.length}` : ""}` : "";
 		const waitHint = t.status === "todo" && readiness && !readiness.ready ? " · 等待前置" : "";
-		content.append(svg("text", { x: x + 13, y: y + 81, class: "nmeta", "dominant-baseline": "central" }, clipDisplay(`${ownerLabel}${revTag}${scopeTag ? ` · ${scopeTag}` : ""}${waitHint}`, 32)));
+		content.append(svg("text", { x: x + 13, y: y + 81, class: "nmeta", "dominant-baseline": "central" }, clipDisplay(`${ownerLabel}${revTag}${scopeTag ? ` · ${scopeTag}` : ""}${waitHint}`, 29)));
 		g.append(content);
 		renderOriginPorts(g, t.id);
 		attachHover(g, t.id);

@@ -471,6 +471,7 @@ pre {
 	gap: 18px;
 }
 .content > * {
+	flex-shrink: 0;
 	min-width: 0;
 	animation: rise 0.35s ease-out both;
 }
