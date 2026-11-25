@@ -11,6 +11,19 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { agentAdapter } from "./agents.ts";
 import { memberKey, memberToolNames } from "./api-member.ts";
 import { applyChange, cleanChanges, dropChange } from "./change-ops.ts";
+import {
+	commitManagedRepo,
+	fetchManagedRepo,
+	GitWorkbench,
+	inspectRepoCommit,
+	inspectRepoGraph,
+	listManagedRepos,
+	pullManagedRepo,
+	pushManagedRepo,
+	resolvePushGate,
+	setGitPushPolicy,
+	type GitActionError,
+} from "./git-workbench.ts";
 import { Operations, operationList, resolveOperation } from "./operations.ts";
 import { CostLedger, Resources, resourceSnapshot } from "./resources.ts";
 import type { App } from "./app.ts";
@@ -720,6 +733,13 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 				.sort((a, b) => b.createdAt - a.createdAt)
 				.map((r) => integrationSummary(changes.get(r.id) ?? r)),
 			operations: operationList(await harness.snapshot(Operations, context)).map(({ id, member, tool, method, status, createdAt, updatedAt, result, resolution }) => ({ id, member, tool, method, status, createdAt, updatedAt, failure: result?.failure, resolution })),
+			gitWorkbench: await (async () => {
+				const wb = await harness.snapshot(GitWorkbench, context);
+				return {
+					requireHumanPush: wb?.requireHumanPush ?? false,
+					pendingGates: Object.values(wb?.gates ?? {}).filter((g) => g.status === "pending").sort((a, b) => b.createdAt - a.createdAt),
+				};
+			})(),
 			pid: process.pid,
 			startedAt,
 			configPath: options.configPath,
@@ -1022,6 +1042,103 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 				return sendJson(res, r === "not_found" ? 404 : 200, { ok: r === "cancelled", result: r });
 			}
 			if (url.pathname === "/api/changes" && req.method === "GET") return sendJson(res, 200, { changes: changes.list() });
+			if (url.pathname === "/api/git/repos" && req.method === "GET") {
+				const wb = await harness.snapshot(GitWorkbench, context);
+				return sendJson(res, 200, {
+					repos: await listManagedRepos(config, changes),
+					workbench: {
+						requireHumanPush: wb?.requireHumanPush ?? false,
+						gates: Object.values(wb?.gates ?? {}).sort((a, b) => b.createdAt - a.createdAt),
+					},
+				});
+			}
+			if (url.pathname === "/api/git/graph" && req.method === "GET") {
+				const repo = url.searchParams.get("repo") ?? undefined;
+				const limitParam = Number(url.searchParams.get("limit") ?? 60);
+				const data = await inspectRepoGraph(config, changes, repo, Number.isFinite(limitParam) ? limitParam : 60);
+				const wb = await harness.snapshot(GitWorkbench, context);
+				return sendJson(res, 200, {
+					...data,
+					workbench: {
+						requireHumanPush: wb?.requireHumanPush ?? false,
+						gates: Object.values(wb?.gates ?? {}).sort((a, b) => b.createdAt - a.createdAt),
+					},
+				});
+			}
+			if (url.pathname === "/api/git/commit" && req.method === "GET") {
+				const repo = url.searchParams.get("repo") ?? undefined;
+				const sha = url.searchParams.get("sha") ?? "";
+				const file = url.searchParams.get("file") ?? undefined;
+				if (!sha) return sendJson(res, 400, { error: "缺少 sha 参数" });
+				return sendJson(res, 200, await inspectRepoCommit(config, changes, repo, sha, file));
+			}
+			if (url.pathname === "/api/git/fetch" && req.method === "POST") {
+				const body = await readControlBody(req);
+				const out = await fetchManagedRepo(config, changes, typeof body.repo === "string" ? body.repo : undefined, typeof body.remote === "string" ? body.remote : undefined);
+				broadcast("changes", changes.list());
+				options.notify?.(`后台网页：已刷新远端状态（${out.repo.name}）`);
+				return sendJson(res, 200, { ok: true, ...out });
+			}
+			if (url.pathname === "/api/git/pull" && req.method === "POST") {
+				const body = await readControlBody(req);
+				const out = await pullManagedRepo({ config, changes, harness, context }, {
+					repo: typeof body.repo === "string" ? body.repo : undefined,
+					remote: typeof body.remote === "string" ? body.remote : undefined,
+					branch: typeof body.branch === "string" ? body.branch : undefined,
+					actor: "human",
+				});
+				broadcast("changes", changes.list());
+				options.notify?.(`后台网页：已拉取更新（${out.repo.name}）`);
+				return sendJson(res, 200, { ok: true, ...out });
+			}
+			if (url.pathname === "/api/git/commit" && req.method === "POST") {
+				const body = await readControlBody(req, 65536);
+				const files = Array.isArray(body.files) ? body.files.map(String) : undefined;
+				const out = await commitManagedRepo({ config, changes, harness, context }, {
+					repo: typeof body.repo === "string" ? body.repo : undefined,
+					message: typeof body.message === "string" ? body.message : "",
+					files,
+					actor: "human",
+				});
+				broadcast("changes", changes.list());
+				options.notify?.(`后台网页：已提交 ${out.repo.name}@${out.sha.slice(0, 7)}（${out.committedFiles} 个文件）`);
+				return sendJson(res, 200, { ok: true, ...out });
+			}
+			if (url.pathname === "/api/git/push" && req.method === "POST") {
+				const body = await readControlBody(req);
+				const out = await pushManagedRepo({ config, changes, harness, context }, {
+					repo: typeof body.repo === "string" ? body.repo : undefined,
+					branch: typeof body.branch === "string" ? body.branch : undefined,
+					remote: typeof body.remote === "string" ? body.remote : undefined,
+					forceWithLease: body.forceWithLease === true,
+					setUpstream: body.setUpstream === true,
+					actor: "human",
+				});
+				broadcast("changes", changes.list());
+				options.notify?.(`后台网页：已推送 ${out.repo.name} (${out.remote}/${out.branch})`);
+				return sendJson(res, 200, { ok: true, ...out });
+			}
+			if (url.pathname === "/api/git/policy" && req.method === "POST") {
+				const body = await readControlBody(req);
+				if (typeof body.requireHumanPush !== "boolean") throw new HttpError(400, "requireHumanPush 需要为布尔值");
+				const wb = await setGitPushPolicy(harness, context, body.requireHumanPush);
+				broadcast("state", await state());
+				options.notify?.(`后台网页：${wb.requireHumanPush ? "已切换为“推送前须人工确认”" : "已允许 Agent 执行无分叉快进推送"}`);
+				return sendJson(res, 200, { ok: true, requireHumanPush: wb.requireHumanPush });
+			}
+			const gitGateMatch = url.pathname.match(/^\/api\/git\/gates\/([^/]+)\/resolve$/);
+			if (gitGateMatch && req.method === "POST") {
+				const body = await readControlBody(req);
+				const id = decodeURIComponent(gitGateMatch[1]!);
+				const action = body.action;
+				if (action !== "approve" && action !== "reject") throw new HttpError(400, "action 需要为 approve 或 reject");
+				const note = typeof body.note === "string" ? body.note : undefined;
+				const out = await resolvePushGate({ config, changes, harness, context }, id, action, note);
+				broadcast("changes", changes.list());
+				broadcast("state", await state());
+				options.notify?.(`后台网页：${action === "approve" ? "已批准并执行" : "已驳回"} Git 确认单 #${id}`);
+				return sendJson(res, 200, { ok: true, ...out });
+			}
 			const changeDiff = url.pathname.match(/^\/api\/changes\/([^/]+)\/diff$/);
 			if (changeDiff && req.method === "GET") {
 				const ch = changes.get(decodeURIComponent(changeDiff[1]!));
@@ -1243,6 +1360,16 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			sendJson(res, 405, { error: "method not allowed" });
 		} catch (error) {
 			if (error instanceof HttpError) return sendJson(res, error.status, { error: error.message });
+			const ge = error as GitActionError;
+			if (ge && typeof ge.statusCode === "number") {
+				return sendJson(res, ge.statusCode, {
+					error: ge.message,
+					...(ge.code ? { code: ge.code } : {}),
+					...(ge.ahead !== undefined ? { ahead: ge.ahead } : {}),
+					...(ge.behind !== undefined ? { behind: ge.behind } : {}),
+					...(ge.gate ? { gate: ge.gate } : {}),
+				});
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			const status = /找不到|没有这个/.test(message) ? 404 : /仍在运行|已有恢复计划|已暂停|busy|冲突/i.test(message) ? 409 : /需要|无效|不能|不可用|不能为空/.test(message) ? 400 : 500;
 			sendJson(res, status, { error: message });

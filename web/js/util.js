@@ -132,7 +132,7 @@ export async function getJson(path) {
 export async function post(path, body = {}) {
 	const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...(conversationScope ? { expectedSession: conversationScope } : {}), ...body }) });
 	const data = await res.json().catch(() => ({}));
-	if (!res.ok) throw new Error(data.error || res.statusText);
+	if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { code: data.code, ahead: data.ahead, behind: data.behind, gate: data.gate });
 	return data;
 }
 

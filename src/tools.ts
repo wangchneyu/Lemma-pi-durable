@@ -33,6 +33,7 @@ import { createTaskReviewTool } from "./task-review.ts";
 import { admit, releaseClaim } from "./resources.ts";
 import { RunBudget } from "./dispatch.ts";
 import { createTaskRecoveryTool, pendingRecovery, prepareRecovery, type RecoveryRequest } from "./task-recovery.ts";
+import { createRepoGitTool } from "./git-workbench.ts";
 import { readyTasks } from "./task-readiness.ts";
 import { createTaskWorkflow } from "./task-workflow.ts";
 import { createIntegrations, type IntegrationHooks } from "./integrations.ts";
@@ -612,6 +613,7 @@ export function createLocalAgentsExtension(
 		createReadResultTool(),
 		createTaskReviewTool(project, config, changes),
 		createTaskRecoveryTool(project, config, changes),
+		createRepoGitTool({ config, changes, getHarness: () => hub.harness, onChanged: () => hub.changed() }),
 		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
 		...createJobTools(hub),
 		...createBoardTools(config, project, changes),
@@ -726,6 +728,7 @@ export function createLocalAgentsExtension(
 									"- 改动要由用户在终端确认后才合并（/apply 编号）。所以并行派给不同成员的改动互不可见；汇报时列出每个改动编号和改了什么，方便用户决定合并哪些。",
 									"- 要让另一个成员审查或接着修改某次改动，调用时传 based_on: 改动编号，它会在那次改动的基础上开工。",
 									"- 续接会话（session_id）会回到同一个副本继续改。",
+									"- 仓库与推送管理：通过 repo_git 可自主执行 status、fetch、pull --ff-only、干净的 commit 与无分叉快进 push；一旦遇到远端分叉（behind > 0）、强推、冲突、敏感文件（.env/sqlite/密钥）、未通过检查或开启了“推送前人工确认”，系统会自动拦截并生成待人工确认单，在后台网页「改动」GitLens 工作台由人工确认，严禁绕过。",
 									"",
 								]
 							: []),
