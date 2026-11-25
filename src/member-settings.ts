@@ -1,5 +1,4 @@
-import type { AgentConfig, AppConfig, OrchestratorConfig } from "./config.ts";
-import { normalizeConfig } from "./config.ts";
+import { normalizeAutonomy, normalizeConfig, type AgentConfig, type AppConfig, type AutonomyCheck, type OrchestratorConfig } from "./config.ts";
 import { editSettings, type SettingsDraft } from "./settings.ts";
 import { saveCredential } from "./credentials.ts";
 import { memberToolNames } from "./api-member.ts";
@@ -67,6 +66,13 @@ export interface OrchestratorInput {
 	secret?: string;
 }
 
+export interface AutonomyInput {
+	enabled?: boolean;
+	maxRepairAttempts?: number;
+	resultMaxChars?: number;
+	checks?: AutonomyCheck[];
+}
+
 const RESERVED_IDS = new Set(["constructor", "prototype", "lead", "all", "orchestrator"]);
 
 export function validateMemberId(id: string): string {
@@ -107,6 +113,18 @@ export function applyOrchestratorDraft(draft: SettingsDraft, current: AppConfig,
 	const local = secret ? saveCredential(secret) : current.orchestrator.credential;
 	return draft.apply((raw) => {
 		raw.orchestrator = { ...current.orchestrator, ...api, modelId, credential: local, ...(local ? { apiKeyFromClaudeSettings: false, apiKeyEnv: [] } : {}) };
+	});
+}
+
+export function applyAutonomyDraft(draft: SettingsDraft, current: AppConfig, input: AutonomyInput): AppConfig {
+	const autonomy = normalizeAutonomy({
+		enabled: input.enabled ?? current.autonomy.enabled,
+		maxRepairAttempts: input.maxRepairAttempts ?? current.autonomy.maxRepairAttempts,
+		resultMaxChars: input.resultMaxChars ?? current.autonomy.resultMaxChars,
+		checks: input.checks ?? current.autonomy.checks,
+	});
+	return draft.apply((raw) => {
+		raw.autonomy = autonomy;
 	});
 }
 

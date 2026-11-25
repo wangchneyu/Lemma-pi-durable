@@ -1,7 +1,7 @@
 import { verifyReport } from "./acceptance.ts";
 import type { BoardState, BoardTask, TaskStatus } from "./board.ts";
 import type { ChangeStore } from "./changes.ts";
-import type { AppConfig } from "./config.ts";
+import { autonomyChecksForRoot, type AppConfig } from "./config.ts";
 import type { MemberResult } from "./results.ts";
 import { checkFilesScope } from "./scope.ts";
 
@@ -18,7 +18,7 @@ export function completionRefusal(board: BoardState, task: BoardTask, report: Me
 	if (Object.values(board.tasks).some((child) => child.parent === task.id && !["done", "dropped"].includes(child.status))) return "还有未验收的子任务，不能完成上级任务。";
 	if (task.checks?.length && !verifyReport(report.id, report.text, task.acceptance, task.checks, report.createdAt).passed) return "机器验收检查尚未通过，不能完成任务。";
 	if (task.scope && task.changes.some((id) => { const change = changes.get(id); return change && change.status !== "dropped" && checkFilesScope(change.files, task.scope).length > 0; })) return "代码改动超出任务路径契约（scope），不能完成任务。";
-	if (config.autonomy.enabled && task.changes.some((id) => { const change = changes.get(id); return change && change.status !== "dropped" && change.files.length > 0 && config.autonomy.checks.length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed); })) return "代码验收检查尚未通过，不能完成任务。";
+	if (config.autonomy.enabled && task.changes.some((id) => { const change = changes.get(id); return change && change.status !== "dropped" && change.files.length > 0 && autonomyChecksForRoot(change.root, config).length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed); })) return "代码验收检查尚未通过，不能完成任务。";
 }
 
 export function recordReview(task: BoardTask, report: MemberResult, action: "accept" | "rework" | "block", evidence: string, at: number): void {

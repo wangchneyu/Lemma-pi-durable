@@ -48,7 +48,7 @@ let app = await openApp(config, orchestrator, BACKGROUND_CONTEXT);
 let busy = false;
 const notes: string[] = [];
 
-const admin = await startAdmin({
+const makeAdminOptions = () => ({
 	app,
 	config,
 	configPath,
@@ -56,39 +56,23 @@ const admin = await startAdmin({
 	port: 0,
 	context: BACKGROUND_CONTEXT,
 	session: { id: "s1", title: "测试会话", controllerId: String(app.root.id) },
-	notify: (line) => notes.push(line),
+	notify: (line: string) => notes.push(line),
 	settings: {
 		path: configPath,
 		config: () => config,
 		assertIdle: async () => { if (busy) throw new Error("有会话正在执行任务，请先等待完成或 /abort all，再修改团队配置。"); },
-		commit: async (draft, next, controller) => {
+		commit: async (draft: any, next: any, controller: boolean) => {
 			const apply = app.prepareMembers(next);
 			draft.save();
 			apply();
-			config = next;
+			Object.assign(config, next);
 			if (controller) assert(createOrchestratorModel(next.orchestrator).models.getModel("orchestrator", next.orchestrator.modelId));
-			await admin.rebind({
-				app,
-				config,
-				configPath,
-				orchestrator: { ...orchestrator, describe: "faux" },
-				port: Number(new URL(admin.url).port),
-				context: BACKGROUND_CONTEXT,
-				session: { id: "s1", title: "测试会话", controllerId: String(app.root.id) },
-				notify: (line) => notes.push(line),
-				settings: {
-					path: configPath,
-					config: () => config,
-					assertIdle: async () => { if (busy) throw new Error("有会话正在执行任务，请先等待完成或 /abort all，再修改团队配置。"); },
-					commit: async (d, n, c) => {
-						const fn = app.prepareMembers(n); d.save(); fn(); config = n;
-						if (c) assert(createOrchestratorModel(n.orchestrator).models.getModel("orchestrator", n.orchestrator.modelId));
-					},
-				},
-			});
+			await admin.rebind({ ...makeAdminOptions(), port: Number(new URL(admin.url).port) });
 		},
 	},
 });
+
+const admin = await startAdmin(makeAdminOptions());
 
 async function call(path: string, body?: unknown, headers: Record<string, string> = {}) {
 	return new Promise<{ status: number; data: any; raw: string }>((resolve, reject) => {
@@ -182,7 +166,29 @@ try {
 	assert.equal(config.orchestrator.modelId, "orch-two");
 	assert.equal(readCredential(config.orchestrator.credential), "ORCH_WEB_KEY_888");
 	assert(!JSON.stringify((await call("/api/state")).data).includes("ORCH_WEB_KEY_888"));
-	check(true, "网页端快捷启停、API 成员编辑、并发预算与总控修改生效且忙碌保护 (409) 正常");
+
+	busy = true;
+	assert.equal((await call("/api/autonomy", { expectedSession: "s1", enabled: false })).status, 409);
+	busy = false;
+	assert.equal((await call("/api/autonomy", { expectedSession: "s1", maxRepairAttempts: 9 })).status, 400);
+	const autoRes = await call("/api/autonomy", {
+		expectedSession: "s1",
+		enabled: true,
+		maxRepairAttempts: 1,
+		resultMaxChars: 6000,
+		checks: [{ name: "smoke", command: "node", args: ["-v"], timeoutSeconds: 15 }],
+	});
+	assert.equal(autoRes.status, 200);
+	assert.equal(config.autonomy.enabled, true);
+	assert.equal(config.autonomy.maxRepairAttempts, 1);
+	assert.equal(config.autonomy.resultMaxChars, 6000);
+	assert.deepEqual(config.autonomy.checks, [{ name: "smoke", command: "node", args: ["-v"], timeoutSeconds: 15 }]);
+	const stAuto = (await call("/api/state")).data.autonomy;
+	assert.equal(stAuto.enabled, true);
+	assert.deepEqual(stAuto.checks, [{ name: "smoke", command: "node", args: ["-v"], timeoutSeconds: 15 }]);
+	assert.equal((await call("/api/autonomy", { expectedSession: "s1", checks: [] })).status, 200);
+	assert.deepEqual(config.autonomy.checks, []);
+	check(true, "网页端快捷启停、API 成员编辑、并发预算、自动验收与总控修改生效且忙碌保护 (409) 正常");
 
 	// 3. workflow pause/resume + /api/topology 任务图字段
 	assert.equal((await call("/api/workflow", { expectedSession: "s1", action: "pause" })).data.paused, true);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -110,4 +111,46 @@ try {
 	assert(app.changes.list().some((change) => change.basedOn === originalChange && change.verification?.passed));
 	check(true, "代码恢复换成员基于原工作分支，原生返工续接仍可通过验收，恢复计划最终收尾");
 	assert.equal(readFileSync(join(repo, "app.txt"), "utf8"), "original\n");
+
+	// ---- 跨仓库派工：不误跑主仓库检查；目标仓库自配检查仍会生效 ----
+	const extPlain = mkdtempSync(join(tmpdir(), "lemma-ext-plain-"));
+	const extConfigured = mkdtempSync(join(tmpdir(), "lemma-ext-cfg-"));
+	try {
+		for (const dir of [extPlain, extConfigured]) {
+			writeFileSync(join(dir, "app.txt"), "ext\n");
+			writeFileSync(join(dir, ".gitignore"), ".pi-agent/\n");
+			execFileSync("git", ["-C", dir, "init", "-q"], { windowsHide: true });
+			execFileSync("git", ["-C", dir, "add", "-A"], { windowsHide: true });
+			execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"], { windowsHide: true });
+		}
+		writeFileSync(join(extConfigured, "pi-agent.config.json"), JSON.stringify({
+			autonomy: { checks: [{ name: "ext-fail-check", command: "node", args: ["-e", "console.error('EXT_CHECK_RAN');process.exit(1)"] }] },
+		}));
+		config.autonomy.checks = [{ name: "主仓库检查不应在外部仓库触发", command: "node", args: ["-e", "process.exit(1)"] }];
+		config.autonomy.maxRepairAttempts = 0;
+
+		await tools("plan_tasks", {
+			tasks: [
+				{ title: "外部纯 JS 仓库任务", acceptance: "external plain repo ok" },
+				{ title: "外部带配置仓库任务", acceptance: "external configured repo fails own check" },
+			],
+		});
+		const extPlainRes = await tools("ask_codex", { task: "修改外部无配置仓库", cwd: extPlain, task_id: "T3" });
+		assert(!extPlainRes.isError, extPlainRes.text);
+		assert(extPlainRes.text.includes("已跳过主工作区验收检查"), extPlainRes.text);
+		const t3Result = (await app.harness.snapshot(Board, context))!.tasks.T3!.latestResult;
+		assert(t3Result);
+		const acceptPlain = await tools("review_task", { id: "T3", action: "accept", result_id: t3Result, evidence: "external plain check skipped safely" });
+		assert(!acceptPlain.isError, acceptPlain.text);
+		assert.equal((await app.harness.snapshot(Board, context))!.tasks.T3!.status, "done");
+
+		const extCfgRes = await tools("ask_codex", { task: "修改外部带配置仓库", cwd: extConfigured, task_id: "T4" });
+		assert(extCfgRes.isError, "目标仓库自有检查失败时仍应报错");
+		assert(extCfgRes.text.includes("EXT_CHECK_RAN"), extCfgRes.text);
+		check(true, "跨仓库派工按目标仓库隔离 autonomy.checks：无配置跳过主仓库检查，有配置按目标仓库检查执行");
+	} finally {
+		for (const dir of [extPlain, extConfigured]) {
+			try { rmSync(dir, { recursive: true, force: true }); } catch {}
+		}
+	}
 } finally { await app.harness.close(context); }

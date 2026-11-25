@@ -4310,3 +4310,34 @@ pre {
 	gap: 10px;
 	flex-wrap: wrap;
 }
+.autonomy-checks-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	margin-top: 4px;
+	font-size: 12px;
+}
+.autonomy-checks {
+	display: grid;
+	gap: 10px;
+	max-height: 280px;
+	overflow: auto;
+}
+.autonomy-check-card {
+	display: grid;
+	gap: 8px;
+	padding: 10px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--panel) 72%, var(--panel-2));
+}
+.autonomy-check-foot {
+	display: flex;
+	align-items: flex-end;
+	gap: 10px;
+}
+.autonomy-check-args {
+	flex: 1 1 auto;
+	min-width: 0;
+}

@@ -15,7 +15,7 @@ import { Operations, operationList, resolveOperation } from "./operations.ts";
 import { CostLedger, Resources, resourceSnapshot } from "./resources.ts";
 import type { App } from "./app.ts";
 import type { AgentKind, AppConfig } from "./config.ts";
-import { applyApiMemberDraft, applyLimitsDraft, applyOrchestratorDraft, applyQuickMemberDraft } from "./member-settings.ts";
+import { applyApiMemberDraft, applyAutonomyDraft, applyLimitsDraft, applyOrchestratorDraft, applyQuickMemberDraft } from "./member-settings.ts";
 import type { OrchestratorModel } from "./models.ts";
 import { Board, boardTasks, type BoardState } from "./board.ts";
 import { readConvention, scanConventions } from "./conventions.ts";
@@ -1111,6 +1111,30 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 					}),
 					notify: `后台网页：已更新总控模型为 ${String(body.modelId ?? "").trim()}`,
 				}));
+				return sendJson(res, 200, out);
+			}
+			if (url.pathname === "/api/autonomy" && req.method === "POST") {
+				const out = await mutateSettings(req, false, (body, draft, current) => {
+					const checks = body.checks === undefined ? undefined : Array.isArray(body.checks) ? body.checks.map((item) => {
+						if (!item || typeof item !== "object") return item;
+						const row = item as Record<string, unknown>;
+						return {
+							name: row.name,
+							command: row.command,
+							args: row.args,
+							...(row.timeoutSeconds === undefined || row.timeoutSeconds === null || row.timeoutSeconds === "" ? {} : { timeoutSeconds: Number(row.timeoutSeconds) }),
+						};
+					}) : body.checks;
+					return {
+						next: applyAutonomyDraft(draft, current, {
+							enabled: body.enabled as boolean | undefined,
+							maxRepairAttempts: body.maxRepairAttempts === undefined ? undefined : Number(body.maxRepairAttempts),
+							resultMaxChars: body.resultMaxChars === undefined ? undefined : Number(body.resultMaxChars),
+							checks: checks as AppConfig["autonomy"]["checks"] | undefined,
+						}),
+						notify: "后台网页：已更新自动验收设置",
+					};
+				});
 				return sendJson(res, 200, out);
 			}
 			if (url.pathname === "/api/workflow" && req.method === "POST") {

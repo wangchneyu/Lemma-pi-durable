@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { openApp } from "../src/app.ts";
@@ -166,4 +167,35 @@ try {
 	assert(repairApplied.ok, repairApplied.message);
 	assert.equal(readFileSync(join(repo, "shared.ts"), "utf8").replace(/\r\n/g, "\n"), "export const val = 'R1_AND_R2';\n");
 	check(true, "冲突集成修复：拦截残留冲突标记，在独立副本解冲突并重过全量检查后应用，网页拓扑同步展示");
+
+	// ---- 跨仓库集成检查隔离 ----
+	const extRepo = mkdtempSync(join(tmpdir(), "lemma-int-ext-"));
+	try {
+		execFileSync("git", ["-C", extRepo, "init", "-q"], { windowsHide: true });
+		writeFileSync(join(extRepo, ".gitignore"), "worktrees/\n.pi-agent/\n");
+		writeFileSync(join(extRepo, "README.md"), "# ext\n");
+		execFileSync("git", ["-C", extRepo, "add", "."], { windowsHide: true });
+		execFileSync("git", ["-C", extRepo, "-c", "user.name=f", "-c", "user.email=f@l", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], { windowsHide: true });
+		const extBase = await snapshot(extRepo);
+		const mkExt = async (id: string, file: string, text: string) => {
+			const wt = join(extRepo, "worktrees", id), br = `codex/ext-${id}`;
+			await addWorktree(extRepo, wt, br, extBase);
+			writeFileSync(join(wt, file), text);
+			const head = (await commitAll(wt, id))!;
+			return app.changes.upsert({ id, agent: "claude", callId: id, task: id, root: extRepo, subdir: "", path: wt, branch: br, base: extBase, head, files: [{ path: file, add: 1, del: 0 }], add: 1, del: 0, status: "pending", createdAt: Date.now(), updatedAt: Date.now() });
+		};
+		const ea = await mkExt("ext-a", "a.js", "export const a = 1;\n");
+		const eb = await mkExt("ext-b", "b.js", "export const b = 2;\n");
+		config.autonomy.checks = [{ name: "main-only-fail", command: "node", args: ["-e", "process.exit(1)"] }];
+		await assert.rejects(() => app.integrate(app.root.id, [ea.id, eb.id], ctx), /外部仓库 .* 未配置 autonomy\.checks/);
+		writeFileSync(join(extRepo, "pi-agent.config.json"), JSON.stringify({
+			autonomy: { checks: [{ name: "ext-joint", command: "node", args: ["-e", "const f=require('fs');if(!f.existsSync('a.js')||!f.existsSync('b.js'))process.exit(1)"] }] },
+		}));
+		const extInt = await wait((await app.integrate(app.root.id, [ea.id, eb.id], ctx)).id);
+		assert.equal(extInt.integration!.status, "passed", JSON.stringify(extInt));
+		assert.deepEqual(extInt.integration!.checks.map((c) => c.name), ["ext-joint"]);
+		check(true, "外部仓库联合集成不误用主仓库检查，且遵循目标仓库自身 pi-agent.config.json 检查");
+	} finally {
+		try { rmSync(extRepo, { recursive: true, force: true }); } catch {}
+	}
 } finally { await app.harness.close(ctx); delete process.env.DEEPSEEK_API_KEY; }

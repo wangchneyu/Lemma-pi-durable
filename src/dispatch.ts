@@ -10,7 +10,7 @@ import { agentAdapter, type TokenUsage } from "./agents.ts";
 import { Board, taskBrief, type BoardState, type ProjectFiles } from "./board.ts";
 import type { ChangeRecord, ChangeStore } from "./changes.ts";
 import { cleanEnv, runCli } from "./cli-runner.ts";
-import type { AgentKind, AppConfig, ModelOption } from "./config.ts";
+import { autonomyChecksForRoot, type AgentKind, type AppConfig, type ModelOption } from "./config.ts";
 import { WORKTREE_CONVENTION_FILES } from "./conventions.ts";
 import { addWorktree, commitAll, git, linkIgnoredDirs, numstat, repoRoot, snapshot } from "./git.ts";
 import { Learning, relevantLessons } from "./learning.ts";
@@ -564,12 +564,13 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		}
 	}
 	// 验收命令来自用户配置，模型不能临时改命令或仅凭自述把失败标成功。
-	if (finished?.files.length && !parsed.isError && config.autonomy.enabled && config.autonomy.checks.length) {
+	const configuredChecks = finished ? autonomyChecksForRoot(finished.root, config) : [];
+	if (finished?.files.length && !parsed.isError && config.autonomy.enabled && configuredChecks.length) {
 		const reports: string[] = [];
 		let passed = true;
 		const headBefore = await git(cwd, ["rev-parse", "HEAD"]);
 		if (headBefore.code !== 0 || headBefore.stdout.trim() !== finished.head) passed = false;
-		for (const check of config.autonomy.checks) {
+		for (const check of configuredChecks) {
 			if (io.signal.aborted) { passed = false; break; }
 			io.output(`验收：${check.name}\n`);
 			try {
@@ -586,10 +587,12 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		if (dirty.code !== 0 || dirty.stdout.trim()) { passed = false; reports.push("验收后存在未提交改动，不能证明当前提交通过。"); }
 		parsed.isError = !passed;
 		parsed.text += `\n\n【配置验收】\n${reports.join("\n")}`;
-		changes.upsert({ ...finished, verification: { head: finished.head, passed, at: io.now(), checks: config.autonomy.checks.map((c) => c.name) } });
+		changes.upsert({ ...finished, verification: { head: finished.head, passed, at: io.now(), checks: configuredChecks.map((c) => c.name) } });
 		if (io.signal.aborted) {
 			result.aborted = true; parsed.isError = true; parsed.text += "\n验收已中止。";
 		}
+	} else if (finished?.files.length && !parsed.isError && config.autonomy.enabled && config.autonomy.checks.length && !configuredChecks.length) {
+		parsed.text += `\n\n【配置验收】已跳过主工作区验收检查（改动仓库 ${finished.root} 与当前配置工作目录 ${config.workdir} 不同，且目标仓库未配置 pi-agent.config.json 的 autonomy.checks）。`;
 	}
 	if (finished && sessionId) changes.upsert({ ...(changes.get(finished.id) ?? finished), sessionId });
 	let body = parsed.text.trim() || "（没有文字输出）";

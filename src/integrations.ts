@@ -7,6 +7,7 @@ import { arr, bool, obj, opt, str } from "@earendil-works/pi-schema";
 import { memberToolNames } from "./api-member.ts";
 import { Board } from "./board.ts";
 import type { ChangeRecord } from "./changes.ts";
+import { autonomyChecksForRoot, sameConfigRepoRoot } from "./config.ts";
 import type { DispatchArgs, DispatchDeps } from "./dispatch.ts";
 import { addWorktree, linkIgnoredDirs, numstat } from "./git.ts";
 import { cleanEnv, runCli } from "./cli-runner.ts";
@@ -249,8 +250,6 @@ export function createIntegrations(deps: DispatchDeps, hooks: IntegrationHooks =
 		const doc = await tx.doc(Integrations), previous = doc.byKey[key];
 		if (previous && doc.records[previous]) return clone(doc.records[previous]);
 		if (ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length) throw new Error("联合集成需要 2–8 个不同的完整改动编号。");
-		if (!config.autonomy.checks.length) throw new Error("请先配置 autonomy.checks 作为联合测试命令；没有检查不能标记集成通过。");
-		for (const check of config.autonomy.checks) if (!check.name || !check.command || !Array.isArray(check.args) || check.args.some((arg) => typeof arg !== "string") || check.timeoutSeconds !== undefined && (!Number.isFinite(check.timeoutSeconds) || check.timeoutSeconds <= 0)) throw new Error("联合检查需要有效的名称、命令、参数和正数超时。");
 		const signature = ids.map((id) => `${id}:${changes.get(id)?.head}`).sort().join("|");
 		if (!extra?.repair) {
 			const active = Object.values(doc.records).find((record) => record.integration?.controllerId === String(controller) && !ended(record) && !record.integration.repair && record.integration.sources.map((source) => `${source.id}:${source.head}`).sort().join("|") === signature);
@@ -267,6 +266,12 @@ export function createIntegrations(deps: DispatchDeps, hooks: IntegrationHooks =
 		});
 		const first = sources[0]!;
 		if (sources.some((source) => resolve(source.root).toLowerCase() !== resolve(first.root).toLowerCase() || source.subdir !== first.subdir)) throw new Error("联合集成的来源必须属于同一仓库和工作目录。");
+		const checks = autonomyChecksForRoot(first.root, config);
+		if (!checks.length) {
+			if (!sameConfigRepoRoot(first.root, config)) throw new Error(`外部仓库 ${first.root} 未配置 autonomy.checks（请在目标仓库添加 pi-agent.config.json 或按目标目录新建会话并配置检查），未误用主仓库检查。`);
+			throw new Error("请先配置 autonomy.checks 作为联合测试命令；没有检查不能标记集成通过。");
+		}
+		for (const check of checks) if (!check.name || !check.command || !Array.isArray(check.args) || check.args.some((arg) => typeof arg !== "string") || check.timeoutSeconds !== undefined && (!Number.isFinite(check.timeoutSeconds) || check.timeoutSeconds <= 0)) throw new Error("联合检查需要有效的名称、命令、参数和正数超时。");
 		const id = `I${createHash("sha256").update(`${controller}:${key}`).digest("hex").slice(0, 12)}`;
 		const path = join(dirname(config.storage), "worktrees", "integrations", id), branch = `codex/integration-${id}`;
 		const taskId = await tx.createTask(task, { id }, { ownership: { kind: "conversation" }, conversationId: controller, background: true });
@@ -276,7 +281,7 @@ export function createIntegrations(deps: DispatchDeps, hooks: IntegrationHooks =
 			integration: {
 				id, controllerId: String(controller), taskId: String(taskId),
 				sources: sources.map((source) => ({ id: source.id, base: changes.range(source)[0], head: source.head })),
-				baselineTree: "", checks: clone(config.autonomy.checks), status: "preparing", reports: [],
+				baselineTree: "", checks: clone(checks), status: "preparing", reports: [],
 				...(extra?.replacesId ? { replacesId: extra.replacesId } : {}),
 				...(extra?.repair ? { repair: clone(extra.repair) } : {}),
 			},

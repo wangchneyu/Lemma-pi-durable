@@ -5,7 +5,7 @@ import { Board, type BoardState, type ProjectFiles } from "./board.ts";
 import { commitBoard } from "./dispatch.ts";
 import { Results } from "./results.ts";
 import type { ChangeStore } from "./changes.ts";
-import type { AppConfig } from "./config.ts";
+import { autonomyChecksForRoot, type AppConfig } from "./config.ts";
 import { completionRefusal, recordReview } from "./task-lifecycle.ts";
 import { pendingRecovery } from "./task-recovery.ts";
 import { readyTasks } from "./task-readiness.ts";
@@ -30,7 +30,7 @@ export function createTaskReviewTool(project: ProjectFiles, config: AppConfig, c
 			if (args.action !== "check" && !args.evidence?.trim()) return fail("请提供验收依据或明确的返工/受阻原因。");
 			if (args.action === "accept" && config.autonomy.enabled && task.changes.some((id) => {
 				const change = changes.get(id);
-				return change && change.files.length > 0 && config.autonomy.checks.length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed);
+				return change && change.files.length > 0 && autonomyChecksForRoot(change.root, config).length > 0 && (!change.verification || change.verification.head !== change.head || !change.verification.passed);
 			})) return fail("代码验收尚未通过，不能通过业务验收绕过代码检查。");
 			const contract = acceptanceContract(task.acceptance, task.checks);
 			const verification = task.checks?.length ? verifyReport(report.id, report.text, task.acceptance, task.checks, api.now()) : undefined;

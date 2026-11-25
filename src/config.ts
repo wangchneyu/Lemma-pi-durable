@@ -136,6 +136,8 @@ export interface BudgetConfig {
 	perRunUsd: number | null;
 }
 
+export type AutonomyCheck = { name: string; command: string; args: string[]; timeoutSeconds?: number };
+
 export interface AppConfig {
 	execution?: { maxConcurrent?: number; perMember?: number; perService?: number };
 	/** Domain/controller guidance, shared by the terminal and web application. */
@@ -146,7 +148,7 @@ export interface AppConfig {
 		enabled: boolean;
 		maxRepairAttempts: number;
 		resultMaxChars: number;
-		checks: { name: string; command: string; args: string[]; timeoutSeconds?: number }[];
+		checks: AutonomyCheck[];
 	};
 	/** 子调度：总调度把较大的子目标整块交给子负责人（Pi Durable 子对话，同模型、同派工工具，只有一层） */
 	lead: { enabled: boolean };
@@ -363,13 +365,67 @@ export function normalizeConfig(raw: Partial<AppConfig>, path = "pi-agent.config
 	if (config.orchestrator.modelIds !== undefined && (!Array.isArray(config.orchestrator.modelIds) || config.orchestrator.modelIds.some((id) => typeof id !== "string" || !id.trim() || id.length > 200))) throw new Error("orchestrator.modelIds 需要是非空模型 ID 的数组。");
 	if (config.orchestrator.discoverModels !== undefined && typeof config.orchestrator.discoverModels !== "boolean") throw new Error("orchestrator.discoverModels 需要为布尔值。");
 	config.storage = isAbsolute(config.storage) ? config.storage : resolve(base, config.storage);
-	if (!Number.isInteger(config.autonomy.maxRepairAttempts) || config.autonomy.maxRepairAttempts < 0 || config.autonomy.maxRepairAttempts > 3) throw new Error("autonomy.maxRepairAttempts 需要是 0–3 的整数。");
-	if (!Number.isInteger(config.autonomy.resultMaxChars) || config.autonomy.resultMaxChars < 500 || config.autonomy.resultMaxChars > 20_000) throw new Error("autonomy.resultMaxChars 需要是 500–20000 的整数。");
-	for (const check of config.autonomy.checks) {
-		if (!check.name || !check.command || !Array.isArray(check.args) || check.args.some((a) => typeof a !== "string")) throw new Error("autonomy.checks 需要 name、command 和 args 字符串数组。");
-		if (check.timeoutSeconds !== undefined && (!Number.isFinite(check.timeoutSeconds) || check.timeoutSeconds <= 0 || check.timeoutSeconds > 1800)) throw new Error("验收超时需要大于 0 且不超过 1800 秒。");
-	}
+	config.autonomy = normalizeAutonomy(config.autonomy);
 	return config;
+}
+
+export function normalizeAutonomy(raw: unknown): AppConfig["autonomy"] {
+	if (raw !== undefined && (typeof raw !== "object" || raw === null || Array.isArray(raw))) throw new Error("autonomy 需要为对象。");
+	const input = (raw ?? {}) as Partial<AppConfig["autonomy"]>;
+	if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error("autonomy.enabled 需要为布尔值。");
+	if (input.checks !== undefined && !Array.isArray(input.checks)) throw new Error("autonomy.checks 需要为数组。");
+	const autonomy: AppConfig["autonomy"] = {
+		enabled: input.enabled ?? DEFAULTS.autonomy.enabled,
+		maxRepairAttempts: input.maxRepairAttempts ?? DEFAULTS.autonomy.maxRepairAttempts,
+		resultMaxChars: input.resultMaxChars ?? DEFAULTS.autonomy.resultMaxChars,
+		checks: (input.checks ?? DEFAULTS.autonomy.checks).map((check) => {
+			if (!check || typeof check !== "object" || typeof check.name !== "string" || !check.name.trim() || typeof check.command !== "string" || !check.command.trim() || !Array.isArray(check.args) || check.args.some((a) => typeof a !== "string")) {
+				throw new Error("autonomy.checks 需要 name、command 和 args 字符串数组。");
+			}
+			if (check.timeoutSeconds !== undefined && (!Number.isFinite(check.timeoutSeconds) || check.timeoutSeconds <= 0 || check.timeoutSeconds > 1800)) {
+				throw new Error("验收超时需要大于 0 且不超过 1800 秒。");
+			}
+			return { name: check.name.trim(), command: check.command.trim(), args: [...check.args], ...(check.timeoutSeconds !== undefined ? { timeoutSeconds: check.timeoutSeconds } : {}) };
+		}),
+	};
+	if (!Number.isInteger(autonomy.maxRepairAttempts) || autonomy.maxRepairAttempts < 0 || autonomy.maxRepairAttempts > 3) throw new Error("autonomy.maxRepairAttempts 需要是 0–3 的整数。");
+	if (!Number.isInteger(autonomy.resultMaxChars) || autonomy.resultMaxChars < 500 || autonomy.resultMaxChars > 20_000) throw new Error("autonomy.resultMaxChars 需要是 500–20000 的整数。");
+	return autonomy;
+}
+
+function sameRepoPath(a: string, b: string): boolean {
+	const left = resolve(a), right = resolve(b);
+	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function repoRootSync(dir: string): string {
+	let cur = resolve(dir);
+	while (true) {
+		if (existsSync(join(cur, ".git"))) return cur;
+		const parent = dirname(cur);
+		if (parent === cur) return resolve(dir);
+		cur = parent;
+	}
+}
+
+export function sameConfigRepoRoot(targetRoot: string, config: Pick<AppConfig, "workdir">): boolean {
+	return sameRepoPath(repoRootSync(targetRoot), repoRootSync(config.workdir));
+}
+
+export function autonomyChecksForRoot(targetRoot: string, config: Pick<AppConfig, "workdir" | "autonomy">): AutonomyCheck[] {
+	const resolvedTarget = repoRootSync(targetRoot);
+	if (sameRepoPath(resolvedTarget, repoRootSync(config.workdir))) return config.autonomy.checks;
+	const targetConfigPath = join(resolvedTarget, "pi-agent.config.json");
+	if (!existsSync(targetConfigPath)) return [];
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(readFileSync(targetConfigPath, "utf8")) as Record<string, unknown>;
+	} catch (error) {
+		throw new Error(`目标仓库 ${targetConfigPath} 解析失败：${error instanceof Error ? error.message : String(error)}`);
+	}
+	const rawAutonomy = parsed?.autonomy as Record<string, unknown> | undefined;
+	if (rawAutonomy && rawAutonomy.enabled === false) return [];
+	return normalizeAutonomy(rawAutonomy).checks;
 }
 
 let npmRootCache: string | undefined;

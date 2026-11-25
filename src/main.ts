@@ -15,7 +15,7 @@ import { Board, boardTasks, STATUS_LABEL, type BoardState } from "./board.ts";
 import { applyChange, cleanChanges, dropChange, pendingChanges } from "./change-ops.ts";
 import { initRules, scanConventions, syncRules } from "./conventions.ts";
 import { openApp } from "./app.ts";
-import { loadConfig, type AppConfig } from "./config.ts";
+import { loadConfig, sameConfigRepoRoot, type AppConfig } from "./config.ts";
 import { memberSettingsCommand, MEMBER_HELP, type SettingQuestion } from "./member-settings.ts";
 import type { SettingsDraft } from "./settings.ts";
 import { clip, Jobs, type JobRecord, type JobsState } from "./jobs.ts";
@@ -117,7 +117,16 @@ async function commitSettings(draft: SettingsDraft, next: AppConfig, controller:
 	await assertConfigIdle();
 	// Stage registry/model changes first; no Harness or session database is replaced.
 	const targets = [...sessions.values()].map((runtime) => {
-		const candidate = { ...runtime.config, agents: next.agents, roles: next.roles, collaboration: next.collaboration, execution: next.execution, budget: next.budget, ...(controller ? { orchestrator: next.orchestrator } : {}) };
+		const candidate = {
+			...runtime.config,
+			agents: next.agents,
+			roles: next.roles,
+			collaboration: next.collaboration,
+			execution: next.execution,
+			budget: next.budget,
+			autonomy: sameConfigRepoRoot(runtime.config.workdir, next) ? next.autonomy : { ...next.autonomy, checks: [] },
+			...(controller ? { orchestrator: next.orchestrator } : {}),
+		};
 		const model = controller ? createOrchestratorModel(next.orchestrator, `${runtime.config.storage}.models.json`) : undefined;
 		return { runtime, candidate, model, apply: runtime.app.prepareMembers(candidate) };
 	});

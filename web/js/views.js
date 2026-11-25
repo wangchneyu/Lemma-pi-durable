@@ -1,7 +1,7 @@
 // 后台各页面。每个页面：mount(root, params) 渲染，update(kind, payload) 响应数据变化，unmount() 清理。
 import { openDispatch } from "./drawer.js";
 import { bindDagPanelEvents, renderReviewLoopPanel, renderScopeMatrix } from "./dag.js";
-import { openCreateIntegrationDialog, openLimitsEditor, openMemberEditor, openOrchestratorEditor, openRecoverDialog, openRepairIntegrationDialog, openResolveOperationDialog, runControlAction } from "./editors.js";
+import { openAutonomyEditor, openCreateIntegrationDialog, openLimitsEditor, openMemberEditor, openOrchestratorEditor, openRecoverDialog, openRepairIntegrationDialog, openResolveOperationDialog, runControlAction } from "./editors.js";
 import { METRICS, MODES, RANGES, Sankey } from "./sankey.js";
 import { buildRuns, callInfo, dispatchRows, isDispatch, loadEarlier, pendingChanges, runningJobs, store } from "./store.js";
 import { topology } from "./topology.js";
@@ -1324,6 +1324,7 @@ function config() {
 				if (!target || !store.state) return;
 				if (target.closest("[data-edit-orch]")) openOrchestratorEditor(store.state.orchestrator);
 				else if (target.closest("[data-edit-limits]")) openLimitsEditor(store.state);
+				else if (target.closest("[data-edit-autonomy]")) openAutonomyEditor(store.state.autonomy);
 			});
 			this.update("all");
 		},
@@ -1376,7 +1377,7 @@ function config() {
 						["每次派工预留", s.budget?.reservePerDispatchUsd ? `${money(s.budget.reservePerDispatchUsd)}（估计）` : "关闭"],
 						["总调度单价", s.orchestrator.price ? `输入 $${s.orchestrator.price.input} · 输出 $${s.orchestrator.price.output} / 百万 tokens` : "未配置（总调度花费显示为 —）"],
 					])}</div></section>
-				<section class="card"><header class="card-head"><h2 class="card-title">子调度与自动验收</h2></header>
+				<section class="card"><header class="card-head"><h2 class="card-title">子调度与自动验收</h2>${canEdit ? `<button type="button" class="ghost-btn tiny" data-edit-autonomy="1">编辑自动验收</button>` : ""}</header>
 					<div class="card-body">${dl([
 						["子调度", s.lead?.enabled === false ? "关闭" : "开启：总调度可以用 delegate_to_lead 把较大的子目标整块交给子负责人（只有一层，花费算在同一轮里）"],
 						[

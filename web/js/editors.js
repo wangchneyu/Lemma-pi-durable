@@ -190,6 +190,113 @@ export function openLimitsEditor(state) {
 	});
 }
 
+function formatCheckArgs(args) {
+	return (args ?? []).map((arg) => (arg === "" || /[\s"']/.test(arg) ? JSON.stringify(arg) : arg)).join(" ");
+}
+
+function parseCheckArgs(raw) {
+	const tokens = [];
+	let cur = "";
+	let quote = "";
+	let hasToken = false;
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i];
+		if (quote) {
+			if (ch === "\\" && quote === '"' && i + 1 < raw.length) { cur += raw[++i]; continue; }
+			if (ch === quote) { quote = ""; continue; }
+			cur += ch;
+			continue;
+		}
+		if (ch === '"' || ch === "'") { quote = ch; hasToken = true; continue; }
+		if (/\s/.test(ch)) {
+			if (hasToken) { tokens.push(cur); cur = ""; hasToken = false; }
+			continue;
+		}
+		cur += ch;
+		hasToken = true;
+	}
+	if (quote) throw new Error("检查参数中的引号未闭合。");
+	if (hasToken) tokens.push(cur);
+	return tokens;
+}
+
+function checkRowHtml(check = {}) {
+	return `
+		<div class="autonomy-check-card" data-check-row="1">
+			<div class="field-grid">
+				<label class="field"><span>检查名称</span><input name="checkName" value="${esc(check.name ?? "")}" placeholder="如：TypeScript 类型检查" required /></label>
+				<label class="field"><span>命令</span><input name="checkCommand" value="${esc(check.command ?? "")}" placeholder="如：node / npm" required /></label>
+				<label class="field"><span>超时（秒，可选）</span><input name="checkTimeout" type="number" min="1" max="1800" step="1" value="${check.timeoutSeconds != null ? esc(check.timeoutSeconds) : ""}" placeholder="120" /></label>
+			</div>
+			<div class="autonomy-check-foot">
+				<label class="field autonomy-check-args"><span>参数（空格分隔；含空格请用引号）</span><input name="checkArgs" value="${esc(formatCheckArgs(check.args))}" placeholder="例如：test --silent" /></label>
+				<button type="button" class="ghost-btn tiny danger-btn" data-del-check="1">删除</button>
+			</div>
+		</div>
+	`;
+}
+
+export function openAutonomyEditor(autonomy) {
+	const a = autonomy ?? { enabled: false, maxRepairAttempts: 2, resultMaxChars: 4000, checks: [] };
+	const checks = Array.isArray(a.checks) ? a.checks : [];
+	openModal({
+		title: "配置自动验收与修复",
+		submitText: "保存验收设置",
+		bodyHtml: `
+			<div class="field-grid">
+				<label class="field"><span>自动验收</span><select name="enabled">
+					<option value="true" ${a.enabled ? "selected" : ""}>开启</option>
+					<option value="false" ${!a.enabled ? "selected" : ""}>关闭</option>
+				</select></label>
+				<label class="field"><span>自动修复上限 (0–3)</span><input name="maxRepairAttempts" type="number" min="0" max="3" step="1" value="${esc(a.maxRepairAttempts ?? 2)}" required /></label>
+				<label class="field"><span>回传结果上限 (500–20000)</span><input name="resultMaxChars" type="number" min="500" max="20000" step="100" value="${esc(a.resultMaxChars ?? 4000)}" required /></label>
+			</div>
+			<div class="autonomy-checks-head">
+				<span class="muted">验收检查命令（仅对主仓库改动生效；外部仓库按其自身 pi-agent.config.json 执行）</span>
+				<button type="button" class="ghost-btn tiny" data-add-check="1">+ 新增检查</button>
+			</div>
+			<div class="autonomy-checks" data-checks="1">${checks.map((c) => checkRowHtml(c)).join("")}</div>
+			<p class="muted" data-no-checks="1" ${checks.length ? "hidden" : ""}>当前未配置验收检查，成员改动不会卡在主仓库检查上。</p>
+		`,
+		onMount(body) {
+			const list = body.querySelector('[data-checks="1"]');
+			const emptyHint = body.querySelector('[data-no-checks="1"]');
+			const syncHint = () => { emptyHint.hidden = list.children.length > 0; };
+			body.addEventListener("click", (e) => {
+				const target = e.target instanceof Element ? e.target : null;
+				if (!target) return;
+				if (target.closest("[data-add-check]")) {
+					list.insertAdjacentHTML("beforeend", checkRowHtml({ name: "", command: "node", args: [] }));
+					syncHint();
+					list.lastElementChild?.querySelector('[name="checkName"]')?.focus();
+				} else if (target.closest("[data-del-check]")) {
+					target.closest('[data-check-row="1"]')?.remove();
+					syncHint();
+				}
+			});
+		},
+		async onSubmit(body) {
+			const val = (n) => body.querySelector(`[name="${n}"]`).value.trim();
+			const rows = [...body.querySelectorAll('[data-check-row="1"]')].map((row) => {
+				const timeoutRaw = row.querySelector('[name="checkTimeout"]').value.trim();
+				return {
+					name: row.querySelector('[name="checkName"]').value.trim(),
+					command: row.querySelector('[name="checkCommand"]').value.trim(),
+					args: parseCheckArgs(row.querySelector('[name="checkArgs"]').value),
+					...(timeoutRaw ? { timeoutSeconds: Number(timeoutRaw) } : {}),
+				};
+			});
+			await post("/api/autonomy", {
+				enabled: val("enabled") === "true",
+				maxRepairAttempts: Number(val("maxRepairAttempts")),
+				resultMaxChars: Number(val("resultMaxChars")),
+				checks: rows,
+			});
+			return "自动验收设置已保存";
+		},
+	});
+}
+
 export function openOrchestratorEditor(orch) {
 	openModal({
 		title: "配置总控模型与接口",
