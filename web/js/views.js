@@ -295,46 +295,116 @@ const COLUMNS = [
 	{ s: "done", label: "完成" },
 ];
 
-function taskCard(t, all, readinessMap) {
+function shortPath(p) {
+	const parts = String(p ?? "").split(/[\\/]/).filter(Boolean);
+	return parts.length >= 2 ? parts.slice(-2).join("/") : parts[0] ?? "";
+}
+
+function taskCard(t, all, readinessMap, dispatch, openMore = false) {
 	const deps = t.deps.map((d) => all.find((x) => x.id === d)).filter(Boolean);
 	const waiting = deps.filter((dependency) => dependency.status !== "done");
 	const readiness = readinessMap?.get(t.id);
 	const waitReasons = t.status === "todo" && readiness && !readiness.ready ? readiness.reasons : [];
 	const recoverable = ["todo", "blocked"].includes(t.status) && t.lastAttempt;
+	const chips = [];
+
+	if (waiting.length) chips.push(`<span class="tc-chip warn">⏳ 等 ${waiting.map((d) => esc(d.id)).join("、")}</span>`);
+	else if (waitReasons.length) chips.push(`<span class="tc-chip warn" title="${esc(waitReasons.join("；"))}">⏳ 等待前置</span>`);
+	else if (t.status === "todo") chips.push(`<span class="tc-chip ready">${t.automation ? "⚡ 就绪 · 自动" : "● 就绪"}</span>`);
+
+	if (t.scope && (t.scope.allow?.length || t.scope.forbid?.length)) {
+		const tip = `${t.scope.allow?.length ? `允许: ${t.scope.allow.join(", ")}` : "允许: 不限"}${t.scope.forbid?.length ? `\n禁止: ${t.scope.forbid.join(", ")}` : ""}`;
+		chips.push(`<span class="tc-chip mono" title="${esc(tip)}">🔒 ${esc(t.scope.allow?.[0] ?? t.scope.forbid?.[0])}</span>`);
+	}
+	if (t.verification) {
+		const vTip = t.verification.checks.map((c) => `${c.name}：${c.passed ? "通过" : "失败"}${c.evidence ? ` · ${c.evidence}` : ""}`).join("\n");
+		chips.push(`<span class="tc-chip ${t.verification.passed ? "ok" : "err"}" title="${esc(vTip)}">${t.verification.passed ? "✓ 机检通过" : "✗ 机检未通过"}</span>`);
+	}
+	const latestCheck = t.checksByMember?.at(-1);
+	if (t.review) {
+		const v = t.review.verdict;
+		const cls = v === "accepted" ? "ok" : ["rework", "blocked", "rejected"].includes(v) ? "err" : "warn";
+		const label = v === "accepted" ? (t.reviewer?.blind ? "✓ 盲审通过" : "✓ 复核通过") : `${t.reviewer?.blind ? "🕶 盲审" : "🔎 复核"} · ${esc(v)}`;
+		chips.push(`<span class="tc-chip ${cls}" title="${esc(t.review.evidence ?? "")}">${label}</span>`);
+	} else if (t.reviewer) {
+		const st = latestCheck?.status ?? "待交付";
+		const cls = st === "accepted" ? "ok" : ["rework", "blocked", "failed"].includes(st) ? "err" : "";
+		const prefix = t.reviewer.blind ? "🕶 盲审" : "🔎 复核";
+		const who = AGENT_LABEL[t.reviewer.member] ?? t.reviewer.member;
+		chips.push(`<span class="tc-chip ${cls}" title="${esc(latestCheck?.evidence ?? "")}">${prefix} · ${esc(who)}${latestCheck ? ` (${esc(st)})` : ""}</span>`);
+	}
+	if (t.automation && t.status !== "done") {
+		chips.push(`<span class="tc-chip">⚡ 自动 · 返工≤${esc(String(t.automation.maxReworks))}</span>`);
+	}
+	if (t.recoveries?.length) {
+		const lastRec = t.recoveries.at(-1);
+		chips.push(`<span class="tc-chip" title="${esc(`${lastRec.action} → ${lastRec.member} · ${lastRec.status}`)}">↻ 已交接${t.recoveries.length > 1 ? ` ×${t.recoveries.length}` : ""}</span>`);
+	}
+	if (t.integrationId) {
+		chips.push(`<span class="tc-chip">⇄ 集成 ${changeLink(t.integrationId)}</span>`);
+	}
+
+	const detailLines = [];
+	if (t.review?.evidence) detailLines.push(`<p><strong>复核意见</strong><span>${esc(t.review.evidence)}</span></p>`);
+	else if (latestCheck?.evidence) detailLines.push(`<p><strong>独立复核</strong><span>${esc(latestCheck.evidence)}</span></p>`);
+	if (t.verification?.checks?.length) {
+		detailLines.push(`<p><strong>机器检查</strong><span>${t.verification.checks.map((c) => `${c.passed ? "✓" : "✗"} ${esc(c.name)}`).join(" · ")}</span></p>`);
+	}
+	if (t.recoveries?.length) {
+		const rec = t.recoveries.at(-1);
+		detailLines.push(`<p><strong>交接记录</strong><span class="mono">${esc(rec.action)} → ${esc(rec.member)} (${esc(rec.status)})</span></p>`);
+	}
+	if (t.latestResult) detailLines.push(`<p><strong>关联派工</strong><span class="mono">${esc(t.latestResult)}</span></p>`);
+	if (t.notes?.length) {
+		const cleanNote = t.notes.at(-1).replace(/^\S+ \S+ /, "");
+		if (cleanNote && cleanNote !== t.review?.evidence) detailLines.push(`<p><strong>备注</strong><span>${esc(cleanNote)}</span></p>`);
+	}
+
+	const hasFoot = deps.length || t.changes.length || dispatch?.key;
 	return `<article class="task-card" data-task-id="${esc(t.id)}" data-s="${t.status}">
-		${waiting.length ? `<p class="task-note">等待前置验收：${waiting.map((dependency) => esc(dependency.id)).join("、")}</p>` : waitReasons.length ? `<p class="task-note">${esc(waitReasons.join("；"))}</p>` : ""}
-		<header><span class="mono task-id">${esc(t.id)}</span>${t.role ? `<span class="role-chip">${esc(t.role)}</span>` : ""}${t.owner ? agentTag(t.owner) : ""}</header>
-		<h3>${esc(t.title)}</h3>
-		${t.acceptance ? `<p class="task-accept" title="${esc(t.acceptance)}"><span>验收</span>${esc(short(t.acceptance, 90))}</p>` : ""}
-		${t.scope && (t.scope.allow?.length || t.scope.forbid?.length) ? `<p class="task-note mono" title="${esc(JSON.stringify(t.scope))}">路径契约${t.scope.allow?.length ? ` 允许:${esc(t.scope.allow.join(","))}` : ""}${t.scope.forbid?.length ? ` 禁止:${esc(t.scope.forbid.join(","))}` : ""}</p>` : ""}
-		${t.verification ? `<p class="task-accept" title="${esc(t.verification.checks.map((c) => `${c.name}：${c.passed ? "通过" : "失败"} · ${c.evidence}`).join("\n"))}"><span>机器检查</span>${t.verification.passed ? "通过，仍需复核" : "未通过，需要返工"}</p>` : ""}
-		${t.review ? `<p class="task-note" title="${esc(t.review.evidence)}">复核 ${esc(t.review.verdict)} · ${esc(short(t.review.evidence, 90))}</p>` : ""}
-		${t.status === "todo" && (!readiness ? !waiting.length : readiness.ready) ? `<p class="task-note">就绪 · ${t.automation ? "已授权自动派发" : "等待总控派发"}</p>` : ""}
-		${t.automation ? `<p class="task-note">自动执行 ${esc(t.automation.member)} · 返工上限 ${esc(String(t.automation.maxReworks))}</p>` : ""}
-		${t.reviewer ? `<p class="task-note" title="${esc(t.checksByMember?.at(-1)?.evidence ?? "")}">独立${t.reviewer.blind ? "盲审" : "复核"} ${esc(t.reviewer.member)} · ${esc(t.checksByMember?.at(-1)?.status ?? "等待交付")}${t.checksByMember?.at(-1)?.sourceResultId ? ` · ${esc(t.checksByMember.at(-1).sourceResultId)}` : ""}</p>` : ""}
-		${t.integrationId ? `<p class="task-note">前置联合集成 ${changeLink(t.integrationId)}</p>` : ""}
-		${t.latestResult ? `<p class="task-note mono" title="${esc(t.latestResult)}">结果 ${esc(t.latestResult)}</p>` : ""}
-		${t.recoveries?.length ? `<p class="task-note">恢复 ${esc(t.recoveries.at(-1).action)} → ${esc(t.recoveries.at(-1).member)} · ${esc(t.recoveries.at(-1).status)}</p>` : ""}
+		<header class="tc-head">
+			<div class="tc-head-l"><span class="tc-id mono">${esc(t.id)}</span>${t.role ? `<span class="role-chip">${esc(t.role)}</span>` : ""}</div>
+			${t.owner ? `<div class="tc-owner">${agentTag(t.owner)}</div>` : ""}
+		</header>
+		<h3 class="tc-title" title="${esc(t.title)}">${esc(t.title)}</h3>
+		${t.acceptance ? `<div class="tc-accept" title="${esc(t.acceptance)}"><p><span>验收</span>${esc(t.acceptance)}</p></div>` : ""}
+		${chips.length ? `<div class="tc-badges">${chips.join("")}</div>` : ""}
+		${detailLines.length ? `<details class="tc-more" data-task-id="${esc(t.id)}"${openMore ? " open" : ""}><summary>回执与记录</summary><div class="tc-more-body">${detailLines.join("")}</div></details>` : ""}
 		${recoverable ? `<div class="task-actions"><button type="button" class="ghost-btn tiny" data-recover-task="${esc(t.id)}">恢复 / 交接</button><button type="button" class="copy-cmd mono" data-copy="/task inspect ${esc(t.id)}" title="复制终端诊断命令">/task inspect ${esc(t.id)}</button></div>` : ""}
 		${
-			deps.length || t.changes.length
-				? `<footer>${deps.map((d) => `<span class="dep" data-s="${d.status}" title="${esc(d.title)}">← ${esc(d.id)}</span>`).join("")}${t.changes.map((c) => changeLink(c)).join("")}</footer>`
+			hasFoot
+				? `<footer class="tc-foot">
+					<div class="tc-foot-l">${deps.map((d) => `<span class="dep" data-s="${d.status}" title="${esc(d.title)}">← ${esc(d.id)}</span>`).join("")}${t.changes.map((c) => changeLink(c)).join("")}</div>
+					${dispatch?.key ? `<button type="button" class="tc-open-btn" data-open-task-dispatch="${esc(dispatch.key)}">派工详情 →</button>` : ""}
+				</footer>`
 				: ""
 		}
-		${t.notes.length ? `<p class="task-note" title="${esc(t.notes.join("\n"))}">${esc(short(t.notes.at(-1).replace(/^\S+ \S+ /, ""), 70))}</p>` : ""}
 	</article>`;
 }
 
 function project() {
 	let root;
+	let statusFilter = "all";
 	return {
 		title: "项目",
 		sub: "",
 		mount(r) {
 			root = r;
+			statusFilter = "all";
 			root.addEventListener("click", async (e) => {
 				const target = e.target instanceof Element ? e.target : null;
 				if (!target) return;
+				const filterBtn = target.closest("[data-task-filter]");
+				if (filterBtn && !filterBtn.disabled) {
+					statusFilter = filterBtn.dataset.taskFilter;
+					this.update("filter");
+					return;
+				}
+				const dispBtn = target.closest("[data-open-task-dispatch]");
+				if (dispBtn) {
+					openDispatch(dispBtn.dataset.openTaskDispatch);
+					return;
+				}
 				const wfBtn = target.closest("[data-wf-action]");
 				if (wfBtn) {
 					wfBtn.disabled = true;
@@ -394,16 +464,21 @@ function project() {
 			this.update("all");
 		},
 		update(kind) {
-			if (kind === "tick" || kind === "live" || kind === "items") return;
+			if (kind === "tick" || kind === "live" || kind === "items" || kind === "job-output" || kind === "usage") return;
 			const p = store.state?.project;
 			if (!p) {
 				root.innerHTML = empty("加载中…");
 				return;
 			}
+			const openMoreIds = new Set([...root.querySelectorAll(".tc-more[open]")].map((el) => el.dataset.taskId));
 			const tasks = p.tasks.filter((t) => t.status !== "dropped");
 			const count = (s) => tasks.filter((t) => t.status === s).length;
 			const done = count("done");
+			const doing = count("doing");
+			const review = count("review");
+			const blocked = count("blocked");
 			const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
+			const segW = (n) => (tasks.length ? ((n / tasks.length) * 100).toFixed(2) : 0);
 			const available = new Set((store.state.agents ?? []).filter((a) => a.available).map((a) => a.kind));
 			const uncertain = (store.state.operations ?? []).filter((operation) => operation.method === "POST" && ["pending", "unknown"].includes(operation.status));
 			const resources = store.state.resources ?? { running: [], queued: [], reservedUsd: 0 };
@@ -412,48 +487,54 @@ function project() {
 			const readinessMap = new Map(readinessList.map((r) => [r.id, r]));
 			const readyList = readinessList.filter((r) => r.ready);
 			const activeIntegrations = (store.state.integrations ?? []).filter((it) => !it.supersededBy && it.changeStatus !== "dropped");
-			const canCreateInt = store.changes.filter((c) => !c.integration && ["pending", "conflict"].includes(c.status)).length >= 2;
-			root.innerHTML = `
-				<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">执行与协作推进</h2><div class="card-sub">${wfPaused ? "自动推进已暂停" : "自动推进运行中"} · 就绪 ${readyList.length} 项 · ${resources.running.length} 运行 · ${resources.queued.length} 排队 · 预留 $${Number(resources.reservedUsd).toFixed(4)}（估计）</div></div><button type="button" class="${wfPaused ? "primary-btn" : "ghost-btn"} tiny" data-wf-action="${wfPaused ? "resume" : "pause"}">${wfPaused ? "恢复自动协作" : "暂停自动协作"}</button></header><div class="card-body">${resources.queued.map((claim) => `<p>${esc(claim.member)} · ${esc(claim.reason ?? "等待资源")}</p>`).join("") || (readyList.length ? `<p class="muted">当前就绪任务：${readyList.map((r) => `<span class="mono">${esc(r.id)}</span>`).join("、")}</p>` : "当前没有排队任务")}</div></section>
-				${activeIntegrations.length || canCreateInt ? `<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">多分支联合集成与联调</h2><div class="card-sub">合并多个隔离分支并运行全套检查 · 冲突时可直接派成员修现场</div></div>${canCreateInt ? `<button type="button" class="ghost-btn tiny" data-create-int="1">+ 发起联合集成</button>` : ""}</header><div class="card-body">${activeIntegrations.length ? activeIntegrations.slice(0, 6).map((it) => {
-					const st = it.status ?? it.changeStatus;
-					const pillState = st === "passed" || it.changeStatus === "applied" ? "done" : ["preparing", "merging", "repairing", "testing"].includes(st) ? "running" : st === "cancelled" ? "aborted" : "error";
-					const srcs = (it.sources ?? []).map((s) => `<a href="#/changes/${esc(s.id)}">#${esc(s.id)}</a>`).join(" + ");
-					const runningInt = ["preparing", "merging", "repairing", "testing"].includes(st);
-					const canApply = st === "passed" && it.changeStatus !== "applied";
-					const canRepair = ["conflict", "failed"].includes(st);
-					return `<div class="job-row int-row"><a class="mono" href="#/changes/${esc(it.id)}">#${esc(it.id)}</a><span class="pill" data-s="${pillState}">${esc(it.changeStatus === "applied" ? "已合并" : st)}</span><span class="job-task">来源 ${srcs}${it.repair ? ` · 修复自 #${esc(it.repair.fromId)}（${esc(it.repair.member)}）` : ""}${it.conflicts?.length ? ` · 冲突：${esc(it.conflicts.join("、"))}` : ""}${it.message ? ` · <span class="muted">${esc(short(it.message, 80))}</span>` : ""}</span><div class="row-actions">${canApply ? `<button type="button" class="primary-btn tiny" data-int-apply="${esc(it.id)}">应用到主目录</button>` : ""}${canRepair ? `<button type="button" class="ghost-btn tiny" data-int-repair="${esc(it.id)}">派人修复</button>` : ""}${!runningInt && it.changeStatus !== "applied" ? `<button type="button" class="ghost-btn tiny" data-int-rerun="${esc(it.id)}">重跑检查</button>` : ""}${runningInt ? `<button type="button" class="ghost-btn tiny" data-int-cancel="${esc(it.id)}">取消</button>` : ""}</div></div>`;
-				}).join("") : `<p class="muted">当前有多个待处理分支改动，可点击右上角「+ 发起联合集成」进行联合验证。</p>`}</div></section>` : ""}
-				${uncertain.length ? `<section class="card"><header class="card-head"><h2 class="card-title err-t">外部操作待核对</h2></header><div class="card-body">${uncertain.map((operation) => `<div class="job-row"><span class="mono">${esc(operation.id)}</span><span>${esc(operation.member)}/${esc(operation.tool)}</span><span class="job-task">${esc(operation.failure?.message ?? "请求已发出但尚无确定回执")}</span><button type="button" class="ghost-btn tiny" data-resolve-op="${esc(operation.id)}">人工核对</button></div>`).join("")}<p class="muted">核对远端状态前禁止重复提交同一接口。</p></div></section>` : ""}
-				<section class="card goal-card">
-					<header class="card-head"><div class="card-heading"><h2 class="card-title">最终目标</h2><div class="card-sub"><span class="mono">${esc(p.goalPath)}</span></div></div>
-						${p.goal && /待你确认/.test(p.goal) ? `<span class="pill" data-s="pending">总调度起草 · 待你确认</span>` : ""}</header>
-					<div class="card-body">${
-						p.goal
-							? `<div class="md goal-md">${markdown(p.goal.replace(/^<!--[\s\S]*?-->\s*/, ""))}</div>`
-							: `<div class="empty-inline"><span class="dot"></span>还没有 GOAL.md。可以自己写，或者把项目目标告诉总调度，让它起草（会标明待你确认）。成员每次派工都会拿到这份目标。</div>`
-					}</div>
-				</section>
+			const pendingBranchCount = store.changes.filter((c) => !c.integration && ["pending", "conflict"].includes(c.status)).length;
+			const canCreateInt = pendingBranchCount >= 2;
+			const dispatchByTask = new Map();
+			for (const d of store.dispatches ?? []) {
+				if (d.taskId && !dispatchByTask.has(d.taskId)) dispatchByTask.set(d.taskId, d);
+			}
+			const cardHtml = (t) => taskCard(t, p.tasks, readinessMap, dispatchByTask.get(t.id), openMoreIds.has(t.id));
+
+			if (statusFilter !== "all" && !count(statusFilter)) statusFilter = "all";
+
+			const activeCols = COLUMNS.filter((c) => c.s !== "done")
+				.map((c) => ({ ...c, list: tasks.filter((t) => t.status === c.s) }))
+				.filter((c) => c.list.length > 0);
+			const doneList = tasks.filter((t) => t.status === "done");
+
+			let boardBody = "";
+			if (!tasks.length) {
+				boardBody = `<div class="empty-inline"><span class="dot"></span>项目级、多步骤的任务，总调度会先拆成任务写进分工表（每项有角色、负责人、依赖和验收标准），再按依赖顺序派工。</div>`;
+			} else if (statusFilter !== "all") {
+				const col = COLUMNS.find((c) => c.s === statusFilter);
+				const list = tasks.filter((t) => t.status === statusFilter);
+				boardBody = `<div class="board-band-head" data-s="${col.s}"><span class="band-title"><i></i>${col.label}</span><em>${list.length} 项</em></div>
+					<div class="task-grid">${list.map(cardHtml).join("")}</div>`;
+			} else {
+				const parts = [];
+				if (activeCols.length === 1) {
+					const only = activeCols[0];
+					parts.push(`<div class="board-band-head" data-s="${only.s}"><span class="band-title"><i></i>${only.label}</span><em>${only.list.length} 项</em></div>
+						<div class="task-grid">${only.list.map(cardHtml).join("")}</div>`);
+				} else if (activeCols.length > 1) {
+					parts.push(`<div class="kanban" style="--cols:${activeCols.length}">${activeCols
+						.map((col) => `<div class="kanban-col" data-s="${col.s}"><div class="kanban-head"><span>${col.label}</span><em>${col.list.length}</em></div><div class="kanban-list">${col.list.map(cardHtml).join("")}</div></div>`)
+						.join("")}</div>`);
+				}
+				if (doneList.length) {
+					parts.push(`<div class="${activeCols.length ? "board-done-band" : ""}">
+						<div class="board-band-head" data-s="done"><span class="band-title"><i></i>已完成</span><em>${doneList.length} 项</em></div>
+						<div class="task-grid">${doneList.map(cardHtml).join("")}</div>
+					</div>`);
+				}
+				boardBody = parts.join("");
+			}
+
+			const scopeHtml = renderScopeMatrix(p.tasks);
+			const reviewLoopHtml = renderReviewLoopPanel(p.tasks, store.dispatches);
+			const rolesHtml = `
 				<section class="card">
-					<header class="card-head"><div class="card-heading"><h2 class="card-title">分工表</h2>
-						<div class="card-sub">${tasks.length ? `<span><b>${done}</b>/${tasks.length} 完成</span><span><b>${count("doing")}</b> 进行中</span><span><b>${count("review")}</b> 待验收</span>${count("blocked") ? `<span class="err-t"><b>${count("blocked")}</b> 受阻</span>` : ""}` : "<span>还没有任务</span>"}</div></div>
-						<div class="row-actions"><span class="card-note mono">${esc(p.assignPath)}</span>${tasks.length ? `<a class="ghost-btn tiny" href="#/dag">查看任务图谱 (DAG) →</a>` : ""}</div></header>
-					<div class="card-body">
-						${tasks.length ? `<div class="board-progress"><i style="width:${pct}%"></i></div>` : ""}
-						${
-							tasks.length
-								? `<div class="kanban">${COLUMNS.map((col) => {
-										const list = tasks.filter((t) => t.status === col.s);
-										return `<div class="kanban-col" data-s="${col.s}"><div class="kanban-head"><span>${col.label}</span><em>${list.length}</em></div>${list.map((t) => taskCard(t, p.tasks, readinessMap)).join("") || `<div class="kanban-empty">—</div>`}</div>`;
-									}).join("")}</div>`
-								: `<div class="empty-inline"><span class="dot"></span>项目级、多步骤的任务，总调度会先拆成任务写进分工表（每项有角色、负责人、依赖和验收标准），再按依赖顺序派工。</div>`
-						}
-					</div>
-				</section>
-				${renderScopeMatrix(p.tasks)}
-				<div data-n="reviewLoopWrap">${renderReviewLoopPanel(p.tasks, store.dispatches)}</div>
-				<section class="card">
-					<header class="card-head"><div class="card-heading"><h2 class="card-title">角色分工</h2><div class="card-sub">规划任务时给每项定角色，派工时按角色找成员；首选不可用时依次用后面的（在 pi-agent.config.json 的 roles 里改）</div></div></header>
+					<header class="card-head"><div class="card-heading"><h2 class="card-title">角色分工</h2><div class="card-sub">按角色选成员与回退顺序（配置于 pi-agent.config.json）</div></div></header>
 					<div class="table-wrap"><table class="table"><thead><tr><th>角色</th><th>成员（首选 → 备选）</th><th class="hide-sm">模型</th><th>负责</th><th class="num">任务</th></tr></thead>
 					<tbody>${(p.roles ?? [])
 						.map((r) => {
@@ -467,6 +548,64 @@ function project() {
 						})
 						.join("")}</tbody></table></div>
 				</section>`;
+
+			root.innerHTML = `
+				<section class="proj-stats">
+					<div class="proj-stat">
+						<div class="proj-stat-top"><span>任务进度</span><em class="proj-pct ${pct === 100 && tasks.length ? "done" : ""}">${tasks.length ? `${pct}%` : "0%"}</em></div>
+						<strong><b>${done}</b> / ${tasks.length} ${tasks.length ? (doing ? `· ${doing} 进行中` : review ? `· ${review} 待验收` : blocked ? `· ${blocked} 受阻` : "全部完成") : "等待拆解"}</strong>
+						<div class="proj-bar" title="完成 ${done} · 待验收 ${review} · 进行中 ${doing} · 受阻 ${blocked}">
+							<i class="s-done" style="width:${segW(done)}%"></i><i class="s-review" style="width:${segW(review)}%"></i><i class="s-doing" style="width:${segW(doing)}%"></i><i class="s-blocked" style="width:${segW(blocked)}%"></i>
+						</div>
+					</div>
+					<div class="proj-stat">
+						<div class="proj-stat-top"><span>自动推进</span><button type="button" class="${wfPaused ? "primary-btn" : "ghost-btn"} tiny" data-wf-action="${wfPaused ? "resume" : "pause"}">${wfPaused ? "恢复推进" : "暂停"}</button></div>
+						<strong><b class="${wfPaused ? "" : "live"}">${wfPaused ? "已暂停" : "运行中"}</b> · 就绪 ${readyList.length}</strong>
+						<p class="proj-stat-sub">运行 ${resources.running.length} · 排队 ${resources.queued.length} · 预留 $${Number(resources.reservedUsd).toFixed(4)}</p>
+					</div>
+					<div class="proj-stat">
+						<div class="proj-stat-top"><span>多分支集成</span>${canCreateInt ? `<button type="button" class="ghost-btn tiny" data-create-int="1">+ 发起联合集成</button>` : `<span class="proj-chip">${pendingBranchCount} 待合分支</span>`}</div>
+						<strong>${activeIntegrations.length ? `<b>${activeIntegrations.length}</b> 项集成任务` : `<b>${pendingBranchCount}</b> 个待处理分支`}</strong>
+						<p class="proj-stat-sub">${activeIntegrations.length ? "可在下方查看集成检查状态与修复冲突" : canCreateInt ? "支持合流多个隔离分支并运行全套验收" : "存在 2 个及以上未合并分支后可发起"}</p>
+					</div>
+					<div class="proj-stat">
+						<div class="proj-stat-top"><span>最终目标</span><code class="path-pill" title="${esc(p.goalPath)}">${esc(shortPath(p.goalPath))}</code></div>
+						<strong>${p.goal ? (/待你确认/.test(p.goal) ? `<span class="pill" data-s="pending">总调度起草 · 待确认</span>` : `<b>已设定</b> 目标文档`) : `<span class="muted">尚未设定</span>`}</strong>
+						<p class="proj-stat-sub">${p.goal ? "成员每次派工都会自动携带 GOAL.md" : "告知总调度项目目标即可起草并同步成员"}</p>
+					</div>
+				</section>
+				${uncertain.length ? `<section class="card"><header class="card-head"><h2 class="card-title err-t">外部操作待核对</h2></header><div class="card-body">${uncertain.map((operation) => `<div class="job-row"><span class="mono">${esc(operation.id)}</span><span>${esc(operation.member)}/${esc(operation.tool)}</span><span class="job-task">${esc(operation.failure?.message ?? "请求已发出但尚无确定回执")}</span><button type="button" class="ghost-btn tiny" data-resolve-op="${esc(operation.id)}">人工核对</button></div>`).join("")}<p class="muted">核对远端状态前禁止重复提交同一接口。</p></div></section>` : ""}
+				${resources.queued.length ? `<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">资源排队与就绪队列</h2></div></header><div class="card-body">${resources.queued.map((claim) => `<div class="job-row"><span class="pill" data-s="running">排队中</span><span>${esc(claim.member)}</span><span class="job-task">${esc(claim.reason ?? "等待可用名额")}</span></div>`).join("")}</div></section>` : ""}
+				${activeIntegrations.length ? `<section class="card"><header class="card-head"><div class="card-heading"><h2 class="card-title">多分支联合集成与联调</h2><div class="card-sub">合并多个隔离分支并运行全套检查 · 冲突时可直接派成员修现场</div></div>${canCreateInt ? `<button type="button" class="ghost-btn tiny" data-create-int="1">+ 发起联合集成</button>` : ""}</header><div class="card-body">${activeIntegrations.slice(0, 6).map((it) => {
+					const st = it.status ?? it.changeStatus;
+					const pillState = st === "passed" || it.changeStatus === "applied" ? "done" : ["preparing", "merging", "repairing", "testing"].includes(st) ? "running" : st === "cancelled" ? "aborted" : "error";
+					const srcs = (it.sources ?? []).map((s) => `<a href="#/changes/${esc(s.id)}">#${esc(s.id)}</a>`).join(" + ");
+					const runningInt = ["preparing", "merging", "repairing", "testing"].includes(st);
+					const canApply = st === "passed" && it.changeStatus !== "applied";
+					const canRepair = ["conflict", "failed"].includes(st);
+					return `<div class="job-row int-row"><a class="mono" href="#/changes/${esc(it.id)}">#${esc(it.id)}</a><span class="pill" data-s="${pillState}">${esc(it.changeStatus === "applied" ? "已合并" : st)}</span><span class="job-task">来源 ${srcs}${it.repair ? ` · 修复自 #${esc(it.repair.fromId)}（${esc(it.repair.member)}）` : ""}${it.conflicts?.length ? ` · 冲突：${esc(it.conflicts.join("、"))}` : ""}${it.message ? ` · <span class="muted">${esc(short(it.message, 80))}</span>` : ""}</span><div class="row-actions">${canApply ? `<button type="button" class="primary-btn tiny" data-int-apply="${esc(it.id)}">应用到主目录</button>` : ""}${canRepair ? `<button type="button" class="ghost-btn tiny" data-int-repair="${esc(it.id)}">派人修复</button>` : ""}${!runningInt && it.changeStatus !== "applied" ? `<button type="button" class="ghost-btn tiny" data-int-rerun="${esc(it.id)}">重跑检查</button>` : ""}${runningInt ? `<button type="button" class="ghost-btn tiny" data-int-cancel="${esc(it.id)}">取消</button>` : ""}</div></div>`;
+				}).join("")}</div></section>` : ""}
+				${p.goal ? `<section class="card goal-card"><header class="card-head"><div class="card-heading"><h2 class="card-title">最终目标（GOAL.md）</h2><div class="card-sub"><span class="mono" title="${esc(p.goalPath)}">${esc(shortPath(p.goalPath))}</span></div></div>${/待你确认/.test(p.goal) ? `<span class="pill" data-s="pending">总调度起草 · 待你确认</span>` : ""}</header><div class="card-body"><div class="md goal-md">${markdown(p.goal.replace(/^<!--[\s\S]*?-->\s*/, ""))}</div></div></section>` : ""}
+				<section class="card board-card">
+					<header class="card-head">
+						<div class="card-heading">
+							<h2 class="card-title">分工表</h2>
+							<div class="board-filters">${[
+								{ k: "all", label: "全部", n: tasks.length },
+								...COLUMNS.map((c) => ({ k: c.s, label: c.label, n: count(c.s) })),
+							]
+								.map((f) => `<button type="button" class="board-filter${statusFilter === f.k ? " on" : ""}" data-task-filter="${f.k}" data-s="${f.k}" ${f.k !== "all" && !f.n ? "disabled" : ""}><span>${f.label}</span><em>${f.n}</em></button>`)
+								.join("")}</div>
+						</div>
+						<div class="row-actions">
+							<code class="path-pill" title="${esc(p.assignPath)}">${esc(shortPath(p.assignPath))}</code>
+							${tasks.length ? `<a class="ghost-btn tiny" href="#/dag">查看任务图谱 (DAG) →</a>` : ""}
+						</div>
+					</header>
+					<div class="card-body">${boardBody}</div>
+				</section>
+				${reviewLoopHtml ? `<div data-n="reviewLoopWrap">${reviewLoopHtml}</div>` : ""}
+				<div class="proj-bottom-grid">${scopeHtml}${rolesHtml}</div>`;
 			const loopWrap = root.querySelector('[data-n="reviewLoopWrap"]');
 			if (loopWrap) bindDagPanelEvents(loopWrap);
 		},
@@ -557,7 +696,7 @@ function dag() {
 			root = r;
 			lastSig = "";
 			loadedOnce = false;
-			root.innerHTML = `<div class="topo-stats" data-n="stats"></div>
+			root.innerHTML = `<div class="topo-stats cols-4" data-n="stats"></div>
 				<section class="card dag-card">
 					<header class="card-head">
 						<div class="card-heading">
