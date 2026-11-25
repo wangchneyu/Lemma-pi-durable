@@ -2768,12 +2768,6 @@ pre {
 .dim-agent {
 	opacity: 0.45;
 }
-.proj-bottom-grid {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
-	gap: 18px;
-	align-items: start;
-}
 @media (max-width: 1180px) {
 	.proj-stats {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2784,9 +2778,6 @@ pre {
 }
 @media (max-width: 760px) {
 	.proj-stats {
-		grid-template-columns: minmax(0, 1fr);
-	}
-	.proj-bottom-grid {
 		grid-template-columns: minmax(0, 1fr);
 	}
 	.kanban {

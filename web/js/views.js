@@ -605,7 +605,7 @@ function project() {
 					<div class="card-body">${boardBody}</div>
 				</section>
 				${reviewLoopHtml ? `<div data-n="reviewLoopWrap">${reviewLoopHtml}</div>` : ""}
-				<div class="proj-bottom-grid">${scopeHtml}${rolesHtml}</div>`;
+				${scopeHtml}${rolesHtml}`;
 			const loopWrap = root.querySelector('[data-n="reviewLoopWrap"]');
 			if (loopWrap) bindDagPanelEvents(loopWrap);
 		},
