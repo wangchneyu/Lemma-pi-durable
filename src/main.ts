@@ -29,7 +29,7 @@ import { Operations, operationList, resolveOperation } from "./operations.ts";
 import { CostLedger, Resources, resourceSnapshot } from "./resources.ts";
 import { resultExcerpt } from "./deliverables.ts";
 import { taskCommand, TASK_HELP } from "./task-commands.ts";
-import { AgentTerminal } from "./terminal.ts";
+import { AgentTerminal, type ApplyPromptDecision, type ApplyPromptRequest } from "./terminal.ts";
 import { readyTasks, taskReadiness } from "./task-readiness.ts";
 import { Integrations, integrationSummary } from "./integrations.ts";
 import { listNativeConversations, watchTerminalState } from "./terminal-state.ts";
@@ -79,7 +79,36 @@ function attachJobOutput(id: string, target: typeof app) { target.jobs.on("outpu
 	log(c.dim(`  [${id === sessionId ? job : `${id}/${job}`}] ${line}`));
 	if (replIdle()) rl?.prompt(true);
 }); }
-attachJobOutput(sessionId, app);
+let applyConfirmQueue: Promise<unknown> = Promise.resolve();
+function attachSessionHandlers(id: string, target: typeof app) {
+	attachJobOutput(id, target);
+	target.confirmApply = (req: ApplyPromptRequest): Promise<ApplyPromptDecision> => {
+		const run = async (): Promise<ApplyPromptDecision> => {
+			if (id !== sessionId || closing) return { approvedIds: [], deferred: true, reason: "当前不在该交互会话中。" };
+			if (terminalUI) {
+				const decision = await terminalUI.confirmApply(req);
+				if (decision.approvedIds.length) log(c.cyan(`已确认合并：${decision.approvedIds.map((x) => `#${x}`).join("、")}`));
+				return decision;
+			}
+			if (rl && process.stdin.isTTY) {
+				log(c.cyan("\n⚑ 请求确认合并改动到工作区："));
+				if (req.summary) log(c.yellow(`  ${req.summary}`));
+				for (const item of req.items) log(`  • #${item.id} (${item.isIntegration ? "联合集成" : item.agent}) ${item.filesCount} 文件 +${item.add} −${item.del} — ${item.task}`);
+				try {
+					const answer = (await settingQuestion({ title: "同意全部合并请输入 y（留空或 n 暂不合并）" })).trim().toLowerCase();
+					return { approvedIds: answer === "y" || answer === "yes" ? req.items.map((x) => x.id) : [] };
+				} catch {
+					return { approvedIds: [] };
+				}
+			}
+			return { approvedIds: [], deferred: true, reason: "当前没有交互终端可弹窗确认。" };
+		};
+		const queued = applyConfirmQueue.then(run, run);
+		applyConfirmQueue = queued.catch(() => {});
+		return queued;
+	};
+}
+attachSessionHandlers(sessionId, app);
 
 let rl: Interface | undefined;
 /** 先光标回行首再清整行：草稿在行尾时，先 clearLine 只会清掉光标右侧的空内容，所以要回行首再清 */
@@ -227,7 +256,7 @@ async function sessionCommand(line: string) {
 			overrides?.onOrchestrator?.(nextModel);
 			runtime = { app: nextApp, config: nextConfig, orchestrator: nextModel };
 			sessions.set(id, runtime);
-			attachJobOutput(id, nextApp);
+			attachSessionHandlers(id, nextApp);
 		}
 		const wasTui = !!terminalUI;
 		if (terminalUI) drafts.set(terminalDraftKey(), terminalUI.editor.getExpandedText());
@@ -483,11 +512,25 @@ async function changeCommand(line: string): Promise<boolean> {
 		}
 		case "/apply":
 		case "/drop": {
-			if (!arg) {
-				log(c.red(`用法：${cmd} <编号>（或 ${cmd} all 处理全部待合并的改动）`));
-				return true;
+			let pick = arg;
+			if (!pick) {
+				const pending = pendingChanges(targetChanges);
+				if (!pending.length) {
+					log(c.dim("没有待合并的改动。"));
+					return true;
+				}
+				if (terminalUI) {
+					pick = (await terminalUI.selectPendingChange(cmd, pending.map((ch) => ({
+						id: ch.id, agent: ch.agent, branch: ch.branch, root: ch.root,
+						filesCount: ch.files.length, add: ch.add, del: ch.del, task: ch.task, isIntegration: !!ch.integration,
+					})))) ?? "";
+					if (!pick) { log(c.dim("已取消。")); return true; }
+				} else {
+					log(c.red(`用法：${cmd} <编号>（或 ${cmd} all 处理全部待合并的改动）`));
+					return true;
+				}
 			}
-			const ids = arg === "all" ? pendingChanges(targetChanges).map((ch) => ch.id) : [arg];
+			const ids = pick === "all" ? pendingChanges(targetChanges).map((ch) => ch.id) : [pick];
 			if (!ids.length) log(c.dim("没有待合并的改动。"));
 			for (const id of ids) {
 				const r = cmd === "/apply" ? await applyChange(targetChanges, id) : await dropChange(targetChanges, id);

@@ -37,7 +37,8 @@ config.agents.codex.defaultModel = "codex-model";
 config.budget.perRunUsd = 0.02;
 
 const orch = fauxOrchestrator();
-const { harness, root, changes } = await openApp(config, orch, context);
+const app = await openApp(config, orch, context);
+const { harness, root, changes } = app;
 
 let results: ReturnType<typeof toolResults> = [];
 const capture = (ctx: any) => {
@@ -110,6 +111,36 @@ const again = await applyChange(changes, first.id);
 check(!again.ok, "已合并的改动不会重复合并");
 const dropped = await dropChange(changes, second.id);
 check(dropped.ok && !existsSync(second.path) && !git("branch", "--list", second.branch), "/drop 删除了 worktree 和分支");
+
+// ---- 5. request_apply：交互确认合并（先校验验收，再由用户弹窗同意或拒批）----
+const third = changes.list().find((c) => c.status === "pending")!;
+check(!!third, "存在第三轮生成的待合并改动");
+config.autonomy = { enabled: true, maxRepairAttempts: 0, resultMaxChars: 4000, checks: [{ name: "未验不可弹合并", command: "node", args: ["-v"] }] };
+let promptCalled = false;
+app.confirmApply = async () => { promptCalled = true; return { approvedIds: [third.id] }; };
+orch.faux.setResponses([fauxAssistantMessage([fauxToolCall("request_apply", { changes: [third.id] }, { id: "ra1" })], { stopReason: "toolUse" }), capture]);
+await ask("第四轮");
+check(results.find((r) => r.name === "request_apply")?.isError && !promptCalled, "验收未通过时 request_apply 提前拒绝，不会弹出确认");
+
+config.autonomy.enabled = false;
+app.confirmApply = undefined;
+orch.faux.setResponses([fauxAssistantMessage([fauxToolCall("request_apply", { changes: [third.id] }, { id: "ra2" })], { stopReason: "toolUse" }), capture]);
+await ask("第五轮");
+check(JSON.parse(results.findLast((r) => r.name === "request_apply")!.text).status === "deferred" && changes.get(third.id)!.status === "pending", "无交互终端时 request_apply 返回 deferred，不私自合并");
+
+app.confirmApply = async () => ({ approvedIds: [] });
+orch.faux.setResponses([fauxAssistantMessage([fauxToolCall("request_apply", { changes: [third.id] }, { id: "ra3" })], { stopReason: "toolUse" }), capture]);
+await ask("第六轮");
+check(JSON.parse(results.findLast((r) => r.name === "request_apply")!.text).status === "rejected" && changes.get(third.id)!.status === "pending", "用户在确认框暂不合并时保留改动");
+
+app.confirmApply = async (req) => {
+	check(req.summary === "仅保留有效实现" && req.items.length === 1 && req.items[0]!.id === third.id, "确认框收到精确的改动摘要与清单");
+	return { approvedIds: [third.id] };
+};
+orch.faux.setResponses([fauxAssistantMessage([fauxToolCall("request_apply", { changes: [third.id], summary: "仅保留有效实现" }, { id: "ra4" })], { stopReason: "toolUse" }), capture]);
+await ask("第七轮");
+const raOk = JSON.parse(results.findLast((r) => r.name === "request_apply")!.text);
+check(raOk.status === "applied" && raOk.results[0].ok && changes.get(third.id)!.status === "applied", "用户同意合并后 request_apply 立即应用到工作区并标为已合并");
 
 await harness.close(context);
 console.log("\n工作区隔离测试通过 ✅");

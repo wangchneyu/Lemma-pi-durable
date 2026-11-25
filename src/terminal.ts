@@ -8,6 +8,7 @@ import {
 	matchesKey,
 	ProcessTerminal,
 	ScrollView,
+	SelectList,
 	Text,
 	truncateToWidth,
 	visibleWidth,
@@ -15,6 +16,7 @@ import {
 	VStack,
 	type Component,
 	type OverlayHandle,
+	type SelectItem,
 	type Terminal,
 } from "@earendil-works/pi-tui";
 import { colors as c } from "./printer.ts";
@@ -81,6 +83,29 @@ export const TERMINAL_COMMANDS = [
 export const terminalText = cleanText;
 const plain = (text: unknown, limit = 20_000) => terminalText(String(text ?? "")).slice(0, limit);
 const selectTheme = getSelectListTheme();
+
+export interface ApplyPromptItem {
+	id: string;
+	agent: string;
+	branch: string;
+	root: string;
+	filesCount: number;
+	add: number;
+	del: number;
+	task: string;
+	isIntegration?: boolean;
+}
+
+export interface ApplyPromptRequest {
+	summary?: string;
+	items: ApplyPromptItem[];
+}
+
+export interface ApplyPromptDecision {
+	approvedIds: string[];
+	deferred?: boolean;
+	reason?: string;
+}
 /** Reuse native editing/paste behavior; credentials never enter the rendered screen. */
 class SettingsInput extends Input {
 	secret = false;
@@ -705,6 +730,84 @@ export class AgentTerminal {
 			this.picker = this.tui.showOverlay(panel, { width: "88%", maxHeight: "85%", anchor: "center", margin: 1 });
 			this.disposePicker = () => { input.setValue(""); if (!settled) reject(new Error("配置已取消，未保存。")); };
 			this.tui.setFocus(input); this.tui.requestRender();
+		});
+	}
+	private pickSelectOverlay(options: {
+		title: string;
+		lines?: string[];
+		items: SelectItem[];
+		hint?: string;
+	}): Promise<string | undefined> {
+		if (this.stopped || !options.items.length) return Promise.resolve(undefined);
+		this.closePicker();
+		return new Promise((resolve) => {
+			const panel = new Container();
+			panel.addChild(new Text(c.cyan(plain(options.title, 200)), 1, 1));
+			for (const line of options.lines ?? []) panel.addChild(new Text(plain(line, 260), 1, 0));
+			const list = new SelectList(options.items, Math.min(8, options.items.length), selectTheme, { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 38 });
+			let settled = false;
+			const finish = (value: string | undefined) => {
+				if (settled) return;
+				settled = true;
+				resolve(value);
+			};
+			list.onSelect = (item) => {
+				settled = true;
+				this.closePicker();
+				resolve(item.value);
+			};
+			list.onCancel = () => this.closePicker();
+			list.onSelectionChange = () => this.tui.requestRender();
+			panel.addChild(list);
+			panel.addChild(new Text(c.dim(options.hint ?? "↑↓ 选择 · Enter 确认 · Esc / Ctrl+C 取消"), 1, 1));
+			this.picker = this.tui.showOverlay(panel, { width: "90%", maxHeight: "88%", anchor: "center", margin: 1 });
+			this.disposePicker = () => finish(undefined);
+			this.tui.setFocus(list);
+			this.tui.requestRender();
+		});
+	}
+	async confirmApply(req: ApplyPromptRequest): Promise<ApplyPromptDecision> {
+		if (this.stopped) return { approvedIds: [], deferred: true, reason: "终端已关闭。" };
+		const lines: string[] = [];
+		if (req.summary?.trim()) lines.push(c.yellow(plain(req.summary.trim(), 240)));
+		for (const item of req.items) {
+			const repoName = item.root.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || item.root;
+			lines.push(`• #${item.id} (${item.isIntegration ? "联合集成" : item.agent}) · ${repoName} · ${item.filesCount} 文件 +${item.add} −${item.del} · ${plain(item.task, 64)}`);
+		}
+		const choices: SelectItem[] = [
+			...(req.items.length > 1
+				? [{ value: "all", label: `同意全部合并 (${req.items.length} 项)`, description: "依次应用到对应工作区（不自动 commit）" }]
+				: [{ value: `one:${req.items[0]!.id}`, label: `同意合并 #${req.items[0]!.id}`, description: `${req.items[0]!.filesCount} 文件 +${req.items[0]!.add} −${req.items[0]!.del}` }]),
+			...(req.items.length > 1
+				? req.items.map((item) => ({ value: `one:${item.id}`, label: `仅合并 #${item.id}`, description: `${item.filesCount} 文件 +${item.add} −${item.del} · ${plain(item.task, 50)}` }))
+				: []),
+			{ value: "reject", label: "暂不合并", description: "保留在待合并队列，稍后用 /apply 或网页处理" },
+		];
+		const picked = await this.pickSelectOverlay({
+			title: "⚑ 请求确认合并改动到工作区",
+			lines,
+			items: choices,
+			hint: "Enter 按所选执行 · Esc / Ctrl+C 暂不合并",
+		});
+		if (!picked || picked === "reject") return { approvedIds: [] };
+		if (picked === "all") return { approvedIds: req.items.map((x) => x.id) };
+		if (picked.startsWith("one:")) return { approvedIds: [picked.slice(4)] };
+		return { approvedIds: [] };
+	}
+	async selectPendingChange(mode: "/apply" | "/drop", items: ApplyPromptItem[]): Promise<string | undefined> {
+		if (!items.length) return undefined;
+		const verb = mode === "/apply" ? "合并到工作区" : "丢弃改动并删除 worktree";
+		const choices: SelectItem[] = [
+			...(items.length > 1 ? [{ value: "all", label: `全部 (${items.length} 项)`, description: verb }] : []),
+			...items.map((item) => ({
+				value: item.id,
+				label: `#${item.id} (${item.agent})`,
+				description: `${item.filesCount} 文件 +${item.add} −${item.del} · ${plain(item.task, 55)}`,
+			})),
+		];
+		return this.pickSelectOverlay({
+			title: mode === "/apply" ? "选择要合并的改动 (/apply)" : "选择要丢弃的改动 (/drop)",
+			items: choices,
 		});
 	}
 	private closePicker(): void {

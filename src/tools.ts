@@ -9,7 +9,9 @@ import { agentAdapter } from "./agents.ts";
 import { createMemberTools, memberAvailability } from "./api-member.ts";
 import { Board, boardSummary, STATUS_LABEL, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeStore } from "./changes.ts";
-import { resolveCommand, type AgentKind, type AppConfig } from "./config.ts";
+import { resolveCommand, autonomyChecksForRoot, type AgentKind, type AppConfig } from "./config.ts";
+import { applyChange } from "./change-ops.ts";
+import type { ApplyPromptDecision, ApplyPromptItem, ApplyPromptRequest } from "./terminal.ts";
 import {
 	checkBudget,
 	commitBoard,
@@ -580,11 +582,84 @@ function createBoardTools(config: AppConfig, project: ProjectFiles, changes: Cha
 	return [planTasks, updateTask, setGoal, ready];
 }
 
+export type ConfirmApplyFn = (req: ApplyPromptRequest) => Promise<ApplyPromptDecision>;
+
+function createRequestApplyTool(config: AppConfig, changes: ChangeStore, getConfirmApply?: () => ConfirmApplyFn | undefined) {
+	return defineTool({
+		name: "request_apply",
+		description:
+			"向用户在交互终端弹出合并确认弹窗（请求同意合并已筛选的有效改动或通过检查的联合集成到工作区，不自动 commit）。调用前必须先排除被替代、作废或未通过检查的改动。若当前处于无交互终端环境，会温和返回 deferred 提示。",
+		parameters: obj({
+			changes: arr(str(), { description: "确认请求合并的改动或集成编号列表（1–8 项）" }),
+			summary: opt(str({ description: "向用户简要说明这些改动包含什么、为何建议保留这几项" })),
+		}),
+		replay: "safe",
+		execute: async (args) => {
+			const ids = [...new Set(args.changes.map((x) => x.trim()).filter(Boolean))];
+			const fail = (message: string) => ({ output: [{ type: "text" as const, text: message }], isError: true });
+			if (!ids.length || ids.length > 8) return fail("request_apply 需要提供 1–8 个不重复的改动编号。");
+			const items: ApplyPromptItem[] = [];
+			const all = changes.list();
+			for (const id of ids) {
+				const ch = changes.get(id);
+				if (!ch) return fail(`找不到改动 #${id}。`);
+				if (!["pending", "conflict"].includes(ch.status)) return fail(`改动 #${id} 当前状态为 ${ch.status}，不能发起合并。`);
+				const parent = all.find((b) => b.integration && !b.integration.supersededBy && !["applied", "dropped"].includes(b.status) && (b.integration.sources.some((s) => s.id === ch.id) || b.integration.repair?.changeId === ch.id));
+				if (parent) return fail(`改动 #${id} 已包含在联合集成 #${parent.id} 中，请改为申请集成编号 #${parent.id}。`);
+				if (ch.integration) {
+					if (ch.integration.supersededBy) return fail(`集成 #${id} 已被 #${ch.integration.supersededBy} 替代。`);
+					if (ch.integration.status !== "passed" || !ch.verification?.passed || ch.verification.head !== ch.head) return fail(`联合集成 #${id} 尚未通过完整检查，不能发起合并。`);
+				} else if (config.autonomy.enabled && autonomyChecksForRoot(ch.root, config).length > 0 && (!ch.verification?.passed || ch.verification.head !== ch.head)) {
+					return fail(`改动 #${id} 尚未通过配置的代码验收检查，不能发起合并。`);
+				}
+				items.push({
+					id: ch.id,
+					agent: ch.agent,
+					branch: ch.branch,
+					root: ch.root,
+					filesCount: ch.files.length,
+					add: ch.add,
+					del: ch.del,
+					task: ch.task,
+					isIntegration: !!ch.integration,
+				});
+			}
+			const confirm = getConfirmApply?.();
+			if (!confirm) {
+				return {
+					output: [{ type: "text" as const, text: JSON.stringify({ status: "deferred", approved: [], pending: ids, message: `当前没有交互终端弹窗入口，请提示用户在终端执行 ${ids.map((id) => `/apply ${id}`).join("、")} 或在后台网页「改动」页确认合并。` }) }],
+				};
+			}
+			const decision = await confirm({ summary: args.summary?.trim() || undefined, items });
+			if (decision.deferred) {
+				return { output: [{ type: "text" as const, text: JSON.stringify({ status: "deferred", approved: [], pending: ids, reason: decision.reason ?? "当前不可弹窗确认" }) }] };
+			}
+			const allowed = new Set(ids);
+			const chosen = decision.approvedIds.filter((id) => allowed.has(id));
+			if (!chosen.length) {
+				return { output: [{ type: "text" as const, text: JSON.stringify({ status: "rejected", approved: [], rejected: ids, message: "用户在终端选择了暂不合并，已保留为待合并改动。" }) }] };
+			}
+			const results: { id: string; ok: boolean; message: string }[] = [];
+			for (const id of chosen) {
+				const r = await applyChange(changes, id);
+				results.push({ id, ok: r.ok, message: r.message });
+			}
+			const unchosen = ids.filter((id) => !chosen.includes(id));
+			const anyFailed = results.some((r) => !r.ok);
+			return {
+				output: [{ type: "text" as const, text: JSON.stringify({ status: anyFailed ? "partial" : "applied", results, unchosen }) }],
+				isError: anyFailed && results.every((r) => !r.ok),
+			};
+		},
+	});
+}
+
 export function createLocalAgentsExtension(
 	config: AppConfig,
 	changes: ChangeStore,
 	project: ProjectFiles,
 	hub: JobHub,
+	getConfirmApply?: () => ConfirmApplyFn | undefined,
 ): { extension: Extension; agents: AgentAvailability[]; memberExtensions: Extension[]; integrations: ReturnType<typeof createIntegrations>; ensureWorkflow(tx: Tx, controller: ConversationId): Promise<void>; recover(controller: ConversationId, args: RecoveryRequest, key: string, context: Context): Promise<JobRecord> } {
 	const agents = detectAgents(config);
 	// API 成员的工具扩展：只装给它们自己的子对话，总调度看不到
@@ -614,6 +689,7 @@ export function createLocalAgentsExtension(
 		createTaskReviewTool(project, config, changes),
 		createTaskRecoveryTool(project, config, changes),
 		createRepoGitTool({ config, changes, getHarness: () => hub.harness, onChanged: () => hub.changed() }),
+		createRequestApplyTool(config, changes, getConfirmApply),
 		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
 		...createJobTools(hub),
 		...createBoardTools(config, project, changes),
@@ -725,7 +801,7 @@ export function createLocalAgentsExtension(
 							? [
 									"工作区隔离：",
 									"- 仅代码工作区成员在 Git 仓库中创建独立 worktree，改动提交到独立分支，不自动进入主目录；workspace=none 的领域成员不创建代码分支。",
-									"- 改动要由用户在终端确认后才合并（/apply 编号）。所以并行派给不同成员的改动互不可见；汇报时列出每个改动编号和改了什么，方便用户决定合并哪些。",
+									"- 改动仍须由用户确认才合并进工作区：当你已筛选出要保留的有效改动（或已通过检查的联合集成）时，主动调用 request_apply(changes:[...], summary:...) 在终端弹出可视化确认窗让用户一键同意，不要只口头叫用户自己敲 /apply；无交互终端时再列出建议编号。",
 									"- 要让另一个成员审查或接着修改某次改动，调用时传 based_on: 改动编号，它会在那次改动的基础上开工。",
 									"- 续接会话（session_id）会回到同一个副本继续改。",
 									"- 仓库与推送管理：通过 repo_git 可自主执行 status、fetch、pull --ff-only、干净的 commit 与无分叉快进 push；一旦遇到远端分叉（behind > 0）、强推、冲突、敏感文件（.env/sqlite/密钥）、未通过检查或开启了“推送前人工确认”，系统会自动拦截并生成待人工确认单，在后台网页「改动」GitLens 工作台由人工确认，严禁绕过。",
