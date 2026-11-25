@@ -1024,19 +1024,50 @@ pre {
 .sk-svg.focus .sk-link:not(.on) {
 	opacity: 0.35;
 }
+.sk-flow-wrap {
+	pointer-events: none;
+	transition: opacity 0.2s;
+}
+.sk-flow-track {
+	fill: none;
+	stroke: color-mix(in srgb, var(--c) 55%, #fff);
+	stroke-width: 1.25px;
+	stroke-linecap: round;
+	opacity: 0.34;
+	transition: d 0.5s cubic-bezier(0.2, 0.7, 0.2, 1), opacity 0.2s;
+}
 .sk-flow {
 	fill: none;
-	stroke: color-mix(in srgb, var(--c) 35%, #fff);
+	stroke: color-mix(in srgb, var(--c) 28%, #fff);
 	stroke-linecap: round;
-	stroke-dasharray: 24 66;
-	opacity: 0.9;
-	animation: sk-flow 1s linear infinite;
+	stroke-dasharray: 26 46;
+	opacity: 0.92;
+	animation: sk-flow 1.05s linear infinite;
 	pointer-events: none;
-	transition: d 0.5s cubic-bezier(0.2, 0.7, 0.2, 1), stroke-width 0.5s;
+	transition: d 0.5s cubic-bezier(0.2, 0.7, 0.2, 1), stroke-width 0.5s, opacity 0.2s;
+}
+:root[data-theme="light"] .sk-flow-track {
+	stroke: var(--c);
+	opacity: 0.28;
+}
+:root[data-theme="light"] .sk-flow {
+	stroke: color-mix(in srgb, var(--c) 82%, #111);
+}
+@media (prefers-color-scheme: light) {
+	:root:not([data-theme="dark"]) .sk-flow-track {
+		stroke: var(--c);
+		opacity: 0.28;
+	}
+	:root:not([data-theme="dark"]) .sk-flow {
+		stroke: color-mix(in srgb, var(--c) 82%, #111);
+	}
+}
+.sk-svg.focus .sk-flow-wrap:not(.on) {
+	opacity: 0.22;
 }
 @keyframes sk-flow {
 	to {
-		stroke-dashoffset: -90;
+		stroke-dashoffset: -72;
 	}
 }
 .sk-node {
@@ -1052,7 +1083,8 @@ pre {
 .sk-node.hot .sk-bar {
 	animation: blink 1s steps(2, start) infinite;
 }
-.sk-svg.focus .sk-node:not(.on) {
+.sk-svg.focus .sk-node:not(.on),
+.sk-svg.focus .sk-label:not(.on) {
 	opacity: 0.45;
 }
 .sk-label {
@@ -1063,7 +1095,7 @@ pre {
 	stroke: var(--panel);
 	stroke-width: 4px;
 	stroke-linejoin: round;
-	transition: transform 0.5s cubic-bezier(0.2, 0.7, 0.2, 1);
+	transition: transform 0.5s cubic-bezier(0.2, 0.7, 0.2, 1), opacity 0.2s;
 }
 .sk-label .sk-val {
 	font-size: 12px;

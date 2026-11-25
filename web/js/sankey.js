@@ -112,10 +112,13 @@ export class Sankey {
 		const link = (from, to, color, d, v) => {
 			const id = `${from}>${to}`;
 			let l = links.get(id);
-			if (!l) links.set(id, (l = { id, from, to, color, value: 0, hot: false, stats: blank() }));
+			if (!l) links.set(id, (l = { id, from, to, color, value: 0, hotValue: 0, hot: false, stats: blank() }));
 			l.value += v;
 			tally(l.stats, d);
-			if (d.status === "running") l.hot = true;
+			if (d.status === "running") {
+				l.hot = true;
+				l.hotValue += v;
+			}
 		};
 		for (const d of rows) {
 			const v = value(d);
@@ -208,14 +211,54 @@ export class Sankey {
 			const cx = (x0 + x1) / 2;
 			const { sy, ty, h } = l;
 			l.band = `M${x0} ${sy}C${cx} ${sy} ${cx} ${ty} ${x1} ${ty}L${x1} ${ty + h}C${cx} ${ty + h} ${cx} ${sy + h} ${x0} ${sy + h}Z`;
-			l.center = `M${x0} ${sy + h / 2}C${cx} ${sy + h / 2} ${cx} ${ty + h / 2} ${x1} ${ty + h / 2}`;
+		}
+		const flows = [];
+		const oRun = byId.get("o:running");
+		if (oRun) {
+			for (const mid of byCol.get(2) ?? []) {
+				const outRun = model.links.find((l) => l.from === mid.id && l.to === "o:running");
+				if (!outRun) continue;
+				const hotIns = model.links
+					.filter((l) => l.to === mid.id && l.hotValue > 0)
+					.sort((a, b) => byId.get(a.from).y - byId.get(b.from).y);
+				if (!hotIns.length) continue;
+				const totalHot = hotIns.reduce((s, l) => s + l.hotValue, 0);
+				let syOff = 0;
+				let tyOff = 0;
+				for (const inL of hotIns) {
+					const share = totalHot > 0 ? inL.hotValue / totalHot : 1 / hotIns.length;
+					const sliceH = outRun.h * share;
+					const yMidOut = outRun.sy + syOff + sliceH / 2;
+					const yEnd = outRun.ty + tyOff + sliceH / 2;
+					syOff += sliceH;
+					tyOff += sliceH;
+					const src = byId.get(inL.from);
+					const padIn = Math.min(inL.h * 0.25, 2);
+					const yMidIn = Math.max(inL.ty + padIn, Math.min(inL.ty + inL.h - padIn, yMidOut));
+					const ratio = inL.h > 0 ? (yMidIn - inL.ty) / inL.h : 0.5;
+					const yStart = inL.sy + ratio * inL.h;
+					const x0 = src.x + src.w;
+					const x1 = mid.x;
+					const x2 = mid.x + mid.w;
+					const x3 = oRun.x;
+					const cx01 = (x0 + x1) / 2;
+					const cx23 = (x2 + x3) / 2;
+					const bridge =
+						Math.abs(yMidIn - yMidOut) < 0.25
+							? `L${x2} ${yMidOut}`
+							: `C${(x1 + x2) / 2} ${yMidIn} ${(x1 + x2) / 2} ${yMidOut} ${x2} ${yMidOut}`;
+					const path = `M${x0} ${yStart}C${cx01} ${yStart} ${cx01} ${yMidIn} ${x1} ${yMidIn}${bridge}C${cx23} ${yMidOut} ${cx23} ${yEnd} ${x3} ${yEnd}`;
+					const w = Math.max(1.5, Math.min(sliceH * 0.32, inL.h * 0.32, 3.5));
+					flows.push({ id: `${inL.from}>${mid.id}>o:running`, from: inL.from, mid: mid.id, to: "o:running", color: inL.color, path, w });
+				}
+			}
 		}
 		const axis = [
 			{ label: COLUMNS[0].label, x: 0, anchor: "start" },
 			{ label: COLUMNS[1].label, x: colX.get(2) + barW / 2, anchor: "middle" },
 			{ label: COLUMNS[2].label, x: width, anchor: "end" },
 		];
-		return { nodes: model.nodes, links: model.links, H, narrow, axis };
+		return { nodes: model.nodes, links: model.links, flows, H, narrow, axis };
 	}
 
 	// ---------------- 绘制 ----------------
@@ -239,10 +282,9 @@ export class Sankey {
 		}
 		const g = this.layout(model, width);
 		const fmt = METRICS[this.metric].fmt;
-		// 执行中的线路才有流光，所以"哪些线路在执行"也是结构的一部分
-		const signature = `${width}x${g.H}|${g.nodes.map((n) => n.id).join(",")}|${g.links.map((l) => `${l.id}${l.hot ? "*" : ""}`).join(",")}`;
+		// 执行中的连续流线跨越中间列，因此活动链路集合也是结构的一部分
+		const signature = `${width}x${g.H}|${g.nodes.map((n) => n.id).join(",")}|${g.links.map((l) => `${l.id}${l.hot ? "*" : ""}`).join(",")}|${g.flows.map((f) => f.id).join(",")}`;
 		this.svg.setAttribute("aria-label", `派工流向：${g.nodes.map((n) => `${n.label} ${fmt(n.value)}`).join("，")}`);
-		const streakW = (l) => Math.max(1.2, Math.min(l.h * 0.3, 3.5));
 
 		if (force || signature !== this.signature) {
 			this.signature = signature;
@@ -252,7 +294,6 @@ export class Sankey {
 				.map(
 					(l) => `<g class="sk-link${l.hot ? " hot" : ""}" data-link="${esc(l.id)}" style="--c:${l.color}">
 						<path class="sk-band" style="d:path('${l.band}')"/>
-						${l.hot && !reduceMotion ? `<path class="sk-flow" style="d:path('${l.center}');stroke-width:${streakW(l)}px"/>` : ""}
 					</g>`,
 				)
 				.join("");
@@ -260,22 +301,40 @@ export class Sankey {
 				.map(
 					(n) => `<g class="sk-node${n.href ? " link" : ""}${n.stats.running ? " hot" : ""}" data-node="${esc(n.id)}" style="--c:${n.color}">
 						<rect class="sk-bar" x="${n.x}" width="${n.w}" rx="1.5" style="y:${n.y}px;height:${n.h}px"/>
-						<text class="sk-label" x="${n.lx}" y="0" text-anchor="${n.anchor}" dominant-baseline="central" style="transform:translateY(${n.ly}px)"><tspan class="sk-name">${esc(n.label)}</tspan><tspan class="sk-val" dx="6">${esc(fmt(n.value))}</tspan></text>
 					</g>`,
 				)
 				.join("");
+			const flows = g.flows
+				.map(
+					(f) => `<g class="sk-flow-wrap" data-flow="${esc(f.id)}" data-from="${esc(f.from)}" data-mid="${esc(f.mid)}" data-to="${esc(f.to)}" style="--c:${f.color}">
+						<path class="sk-flow-track" style="d:path('${f.path}')"/>
+						${!reduceMotion ? `<path class="sk-flow" style="d:path('${f.path}');stroke-width:${f.w}px"/>` : ""}
+					</g>`,
+				)
+				.join("");
+			const labels = g.nodes
+				.map(
+					(n) => `<text class="sk-label" data-label="${esc(n.id)}" x="${n.lx}" y="0" text-anchor="${n.anchor}" dominant-baseline="central" style="transform:translateY(${n.ly}px)"><tspan class="sk-name">${esc(n.label)}</tspan><tspan class="sk-val" dx="6">${esc(fmt(n.value))}</tspan></text>`,
+				)
+				.join("");
 			const axis = g.axis.map((a) => `<text class="sk-axis" x="${a.x}" y="${g.H - 6}" text-anchor="${a.anchor}">${a.label}</text>`).join("");
-			this.svg.innerHTML = `<g class="sk-links">${links}</g><g class="sk-nodes">${nodes}</g>${axis}`;
+			this.svg.innerHTML = `<g class="sk-links">${links}</g><g class="sk-nodes">${nodes}</g><g class="sk-flows">${flows}</g><g class="sk-labels">${labels}</g>${axis}`;
 		} else {
 			// 结构没变：只更新几何和数值（CSS transition 让变化平滑，流光动画不中断）
 			for (const l of g.links) {
 				const node = this.svg.querySelector(`[data-link="${CSS.escape(l.id)}"]`);
 				if (!node) continue;
 				node.querySelector(".sk-band").style.d = `path('${l.band}')`;
-				const flow = node.querySelector(".sk-flow");
+			}
+			for (const f of g.flows) {
+				const wrap = this.svg.querySelector(`[data-flow="${CSS.escape(f.id)}"]`);
+				if (!wrap) continue;
+				const track = wrap.querySelector(".sk-flow-track");
+				if (track) track.style.d = `path('${f.path}')`;
+				const flow = wrap.querySelector(".sk-flow");
 				if (flow) {
-					flow.style.d = `path('${l.center}')`;
-					flow.style.strokeWidth = `${streakW(l)}px`;
+					flow.style.d = `path('${f.path}')`;
+					flow.style.strokeWidth = `${f.w}px`;
 				}
 			}
 			for (const n of g.nodes) {
@@ -285,9 +344,11 @@ export class Sankey {
 				const bar = node.querySelector(".sk-bar");
 				bar.style.y = `${n.y}px`;
 				bar.style.height = `${n.h}px`;
-				const label = node.querySelector(".sk-label");
-				label.style.transform = `translateY(${n.ly}px)`;
-				label.querySelector(".sk-val").textContent = fmt(n.value);
+				const label = this.svg.querySelector(`[data-label="${CSS.escape(n.id)}"]`);
+				if (label) {
+					label.style.transform = `translateY(${n.ly}px)`;
+					label.querySelector(".sk-val").textContent = fmt(n.value);
+				}
 			}
 		}
 		if (this.hovered) this.showTip(this.hovered.kind, this.hovered.id, this.hovered.x, this.hovered.y);
@@ -335,7 +396,16 @@ export class Sankey {
 		for (const node of this.svg.querySelectorAll("[data-node]")) {
 			const nid = node.getAttribute("data-node");
 			const linked = kind === "node" && this.model.links.some((l) => (l.from === id && l.to === nid) || (l.to === id && l.from === nid));
-			node.classList.toggle("on", ends.includes(nid) || linked);
+			const on = ends.includes(nid) || linked;
+			node.classList.toggle("on", on);
+			this.svg.querySelector(`[data-label="${CSS.escape(nid)}"]`)?.classList.toggle("on", on);
+		}
+		for (const flow of this.svg.querySelectorAll("[data-flow]")) {
+			const from = flow.getAttribute("data-from");
+			const mid = flow.getAttribute("data-mid");
+			const to = flow.getAttribute("data-to");
+			const on = kind === "link" ? `${from}>${mid}` === id || `${mid}>${to}` === id : from === id || mid === id || to === id;
+			flow.classList.toggle("on", on);
 		}
 	}
 
