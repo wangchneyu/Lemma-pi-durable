@@ -25,7 +25,7 @@ export function classifyTopology(tasks = [], integrations = []) {
 	if (hasDeps || hasScope || hasInt) {
 		return {
 			tier: "L2",
-			title: "L2 · 契约并行与联合集成",
+			title: "L2 · 契约并行集成",
 			detail: [
 				hasDeps ? "DAG 依赖编排" : "",
 				hasScope ? "Path Scope 路径隔离" : "",
@@ -122,100 +122,174 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 	}
 
 	const NODE_W = 248;
-	const NODE_H = 92;
-	const COL_GAP = 72;
-	const ROW_GAP = 18;
-	const PAD_X = 16;
-	const PAD_Y = 34;
+	const NODE_H = 88;
+	const COL_GAP = 86;
+	const ROW_GAP = 22;
+	const PAD_X = 20;
+	const PAD_TOP = 54;
+	const PAD_BOTTOM = 42;
 	const maxRows = Math.max(1, ...cols.map((c) => c.length));
-	const width = Math.max(580, PAD_X * 2 + totalCols * NODE_W + Math.max(0, totalCols - 1) * COL_GAP);
-	const height = Math.max(180, PAD_Y * 2 + maxRows * NODE_H + Math.max(0, maxRows - 1) * ROW_GAP);
+	const width = Math.max(600, PAD_X * 2 + totalCols * NODE_W + Math.max(0, totalCols - 1) * COL_GAP);
+	const height = Math.max(210, PAD_TOP + PAD_BOTTOM + maxRows * NODE_H + Math.max(0, maxRows - 1) * ROW_GAP);
 
 	const pos = new Map();
-	const s = svg("svg", { class: "dag-svg", viewBox: `0 0 ${width} ${height}`, width, height, role: "img", "aria-label": "任务依赖 DAG 图" });
-	const defs = svg("defs");
-	const mkMarker = (id, cls) => {
-		const m = svg("marker", { id, viewBox: "0 0 10 10", refX: 7.5, refY: 5, markerWidth: 5.5, markerHeight: 5.5, orient: "auto-start-reverse" });
-		m.append(svg("path", { d: "M1.5,1.8 L8.5,5 L1.5,8.2 L3.2,5 z", class: cls }));
-		return m;
-	};
-	defs.append(mkMarker("dagArrowDep", "dag-arrow-dep"), mkMarker("dagArrowInt", "dag-arrow-int"));
-	s.append(defs);
-
 	for (let c = 0; c < cols.length; c++) {
 		const list = cols[c];
 		const colH = list.length * NODE_H + Math.max(0, list.length - 1) * ROW_GAP;
-		const startY = PAD_Y + (height - PAD_Y * 2 - colH) / 2;
+		const startY = PAD_TOP + (height - PAD_TOP - PAD_BOTTOM - colH) / 2;
 		const x = PAD_X + c * (NODE_W + COL_GAP);
-		const label = intNodes.length && c === cols.length - 1 ? "联合集成汇流" : c === 0 ? "起点 / 契约层" : `阶段 ${c + 1}`;
-		s.append(svg("text", { x: x + NODE_W / 2, y: 18, class: "dag-col-label", "text-anchor": "middle" }, label));
 		list.forEach((node, r) => {
-			pos.set(node.id, { x, y: startY + r * (NODE_H + ROW_GAP), node });
+			pos.set(node.id, { x, y: startY + r * (NODE_H + ROW_GAP), col: c, row: r, node });
 		});
 	}
 
-	// 统计每节点入边数，交错落点避免多条线堆在同一像素上
-	const incomingCount = new Map();
-	const incomingSeen = new Map();
-	for (const t of active) for (const dep of t.deps ?? []) if (pos.has(dep) && pos.has(t.id)) incomingCount.set(t.id, (incomingCount.get(t.id) ?? 0) + 1);
-	for (const entry of intNodes) {
-		const iid = `int:${entry.it.id}`;
-		const sources = entry.upstreamIds.length ? entry.upstreamIds : cols[Math.max(0, totalCols - 2)]?.map((n) => n.id) ?? [];
-		for (const upId of sources) if (pos.has(upId) && pos.has(iid)) incomingCount.set(iid, (incomingCount.get(iid) ?? 0) + 1);
-	}
-	const targetY = (id, y) => {
-		const total = incomingCount.get(id) ?? 1;
-		const idx = incomingSeen.get(id) ?? 0;
-		incomingSeen.set(id, idx + 1);
-		if (total <= 1) return y + NODE_H / 2;
-		const span = Math.min(28, (total - 1) * 10);
-		return y + NODE_H / 2 - span / 2 + (span * idx) / (total - 1);
-	};
-
-	// 连线层（节点下方）
-	const edgesG = svg("g", { class: "dag-edges" });
+	// 汇总所有边，区分相邻列与跨列绕行，并为每个节点的出入端口按相对高低排序（杜绝线团与穿卡）
+	const rawEdges = [];
 	for (const t of active) {
-		const to = pos.get(t.id);
-		if (!to) continue;
+		if (!pos.has(t.id)) continue;
 		for (const dep of t.deps ?? []) {
-			const from = pos.get(dep);
-			if (!from) continue;
-			const x1 = from.x + NODE_W + 1;
-			const y1 = from.y + NODE_H / 2;
-			const x2 = to.x - 4;
-			const y2 = targetY(t.id, to.y);
-			const dx = Math.max(24, (x2 - x1) * 0.5);
-			const blocking = byId.get(dep)?.status !== "done";
-			edgesG.append(svg("path", {
-				d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
-				class: `dag-edge dep${blocking ? " blocking" : " done"}`,
-				"marker-end": "url(#dagArrowDep)",
-			}));
+			if (!pos.has(dep)) continue;
+			rawEdges.push({ fromId: dep, toId: t.id, kind: byId.get(dep)?.status === "done" ? "done" : "wait" });
 		}
 	}
 	for (const entry of intNodes) {
 		const iid = `int:${entry.it.id}`;
-		const to = pos.get(iid);
-		if (!to) continue;
+		if (!pos.has(iid)) continue;
 		const sources = entry.upstreamIds.length ? entry.upstreamIds : cols[Math.max(0, totalCols - 2)]?.map((n) => n.id) ?? [];
-		for (const upId of sources) {
-			const from = pos.get(upId);
-			if (!from) continue;
-			const x1 = from.x + NODE_W + 1;
-			const y1 = from.y + NODE_H / 2;
-			const x2 = to.x - 4;
-			const y2 = targetY(iid, to.y);
-			const dx = Math.max(24, (x2 - x1) * 0.5);
-			edgesG.append(svg("path", {
-				d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
-				class: "dag-edge int",
-				"marker-end": "url(#dagArrowInt)",
-			}));
+		for (const upId of sources) if (pos.has(upId)) rawEdges.push({ fromId: upId, toId: iid, kind: "int" });
+	}
+
+	// 为跨列边（col2 - col1 > 1）分配避开中间列节点的顶部/底部平滑走廊
+	let topDetours = 0;
+	let botDetours = 0;
+	const colBounds = cols.map((list) => {
+		const boxes = list.map((n) => pos.get(n.id)).filter(Boolean);
+		return boxes.length
+			? { minY: Math.min(...boxes.map((b) => b.y)), maxY: Math.max(...boxes.map((b) => b.y + NODE_H)) }
+			: { minY: PAD_TOP + NODE_H, maxY: height - PAD_BOTTOM };
+	});
+	for (const e of rawEdges) {
+		const f = pos.get(e.fromId);
+		const t = pos.get(e.toId);
+		if (t.col - f.col > 1) {
+			let obsTop = Infinity;
+			let obsBot = -Infinity;
+			for (let c = f.col + 1; c < t.col; c++) {
+				obsTop = Math.min(obsTop, colBounds[c].minY);
+				obsBot = Math.max(obsBot, colBounds[c].maxY);
+			}
+			const midY = (f.y + t.y + NODE_H) / 2;
+			const topCandidate = obsTop - 22 - topDetours * 10;
+			const botCandidate = obsBot + 22 + botDetours * 10;
+			const goTop = Math.abs(midY - topCandidate) <= Math.abs(midY - botCandidate);
+			if (goTop) {
+				topDetours++;
+				e.corridorY = topCandidate;
+			} else {
+				botDetours++;
+				e.corridorY = botCandidate;
+			}
 		}
+	}
+
+	// 若走廊超出画布上下沿，整体微调画布扩展留白
+	const minNeededY = Math.min(PAD_TOP, ...rawEdges.map((e) => (e.corridorY !== undefined ? e.corridorY - 14 : Infinity)));
+	const extraTop = minNeededY < 32 ? 32 - minNeededY : 0;
+	const maxNeededY = Math.max(height, ...rawEdges.map((e) => (e.corridorY !== undefined ? e.corridorY + 18 : 0)));
+	const finalH = maxNeededY + extraTop;
+	if (extraTop > 0) {
+		for (const p of pos.values()) p.y += extraTop;
+		for (const e of rawEdges) if (e.corridorY !== undefined) e.corridorY += extraTop;
+	}
+
+	// 双端端口排序错位：按对方/走廊的 Y 顺序均匀排在节点右缘和左缘中段
+	const outMap = new Map();
+	const inMap = new Map();
+	for (const e of rawEdges) {
+		(outMap.get(e.fromId) ?? outMap.set(e.fromId, []).get(e.fromId)).push(e);
+		(inMap.get(e.toId) ?? inMap.set(e.toId, []).get(e.toId)).push(e);
+	}
+	const portOffset = (idx, total) => {
+		if (total <= 1) return 0;
+		const span = Math.min(34, (total - 1) * 12);
+		return -span / 2 + (span * idx) / (total - 1);
+	};
+	for (const [id, list] of outMap) {
+		list.sort((a, b) => (a.corridorY ?? pos.get(a.toId).y + NODE_H / 2) - (b.corridorY ?? pos.get(b.toId).y + NODE_H / 2));
+		list.forEach((e, i) => { e.y1 = pos.get(id).y + NODE_H / 2 + portOffset(i, list.length); });
+	}
+	for (const [id, list] of inMap) {
+		list.sort((a, b) => (a.corridorY ?? pos.get(a.fromId).y + NODE_H / 2) - (b.corridorY ?? pos.get(b.fromId).y + NODE_H / 2));
+		list.forEach((e, i) => { e.y2 = pos.get(id).y + NODE_H / 2 + portOffset(i, list.length); });
+	}
+
+	/** 跨列圆角正交路径：先优雅抬升到无遮挡水平走廊，平滑飞过中间列后垂直回落进左端口 */
+	function detourPath(x1, y1, laneY, x2, y2, exitGap, enterGap) {
+		const hx1 = x1 + exitGap;
+		const hx2 = x2 - enterGap;
+		const dy1 = laneY - y1;
+		const dy2 = y2 - laneY;
+		const r1 = Math.min(14, Math.abs(dy1) / 2, exitGap * 0.55);
+		const r2 = Math.min(14, Math.abs(dy2) / 2, enterGap * 0.55);
+		const s1 = dy1 >= 0 ? 1 : -1;
+		const s2 = dy2 >= 0 ? 1 : -1;
+		return [
+			`M${x1},${y1}`,
+			`L${hx1 - r1},${y1}`,
+			`Q${hx1},${y1} ${hx1},${y1 + s1 * r1}`,
+			`L${hx1},${laneY - s1 * r1}`,
+			`Q${hx1},${laneY} ${hx1 + r1},${laneY}`,
+			`L${hx2 - r2},${laneY}`,
+			`Q${hx2},${laneY} ${hx2},${laneY + s2 * r2}`,
+			`L${hx2},${y2 - s2 * r2}`,
+			`Q${hx2},${y2} ${hx2 + r2},${y2}`,
+			`L${x2},${y2}`,
+		].join(" ");
+	}
+
+	const s = svg("svg", { class: "dag-svg", viewBox: `0 0 ${width} ${finalH}`, width, height: finalH, role: "img", "aria-label": "任务依赖 DAG 图" });
+	const defs = svg("defs");
+	const mkMarker = (id, cls) => {
+		const m = svg("marker", { id, viewBox: "0 0 10 10", refX: 8.5, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto" });
+		m.append(svg("path", { d: "M1.5,2 L8.8,5 L1.5,8 L3.2,5 z", class: cls }));
+		return m;
+	};
+	defs.append(mkMarker("dagArrowDone", "dag-arrow-done"), mkMarker("dagArrowWait", "dag-arrow-wait"), mkMarker("dagArrowInt", "dag-arrow-int"));
+	s.append(defs);
+
+	for (let c = 0; c < cols.length; c++) {
+		const x = PAD_X + c * (NODE_W + COL_GAP);
+		const label = intNodes.length && c === cols.length - 1 ? "联合集成" : c === 0 ? "起点 / 契约" : `阶段 ${c + 1}`;
+		s.append(svg("text", { x: x + NODE_W / 2, y: 18, class: "dag-col-label", "text-anchor": "middle" }, label));
+	}
+
+	// 连线层（先画跨列绕行，再画相邻直连；与匹配颜色箭头、端口点联动）
+	const edgesG = svg("g", { class: "dag-edges" });
+	const sortedEdges = [...rawEdges].sort((a, b) => Number(a.corridorY === undefined) - Number(b.corridorY === undefined));
+	for (const e of sortedEdges) {
+		const from = pos.get(e.fromId);
+		const to = pos.get(e.toId);
+		const x1 = from.x + NODE_W + 3;
+		const x2 = to.x - 5;
+		let d;
+		if (e.corridorY !== undefined) {
+			d = detourPath(x1, e.y1, e.corridorY, x2, e.y2, 26, 28);
+		} else {
+			const dx = Math.max(26, (x2 - x1) * 0.48);
+			d = `M${x1},${e.y1} C${x1 + dx},${e.y1} ${x2 - dx},${e.y2} ${x2},${e.y2}`;
+		}
+		const marker = e.kind === "done" ? "url(#dagArrowDone)" : e.kind === "int" ? "url(#dagArrowInt)" : "url(#dagArrowWait)";
+		edgesG.append(svg("path", {
+			d,
+			class: `dag-edge ${e.kind}${e.corridorY !== undefined ? " detour" : ""}`,
+			"data-from": e.fromId,
+			"data-to": e.toId,
+			"marker-end": marker,
+		}));
 	}
 	s.append(edgesG);
 
-	// 节点层（每张节点卡片绑定独立 clipPath，彻底杜绝文字溢边框）
+	// 节点层（卡片 + 端口圆点 + clipPath 文字防溢出）
 	const nodesG = svg("g", { class: "dag-nodes" });
 	let clipIdx = 0;
 	for (const { x, y, node } of pos.values()) {
@@ -223,6 +297,21 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 		const cp = svg("clipPath", { id: clipId });
 		cp.append(svg("rect", { x: x + 8, y: y + 4, width: NODE_W - 16, height: NODE_H - 8, rx: 6 }));
 		defs.append(cp);
+
+		const attachHover = (g, nid) => {
+			g.addEventListener("pointerenter", () => {
+				s.classList.add("dag-hover");
+				for (const p of edgesG.children) p.classList.toggle("hi", p.getAttribute("data-from") === nid || p.getAttribute("data-to") === nid);
+			});
+			g.addEventListener("pointerleave", () => {
+				s.classList.remove("dag-hover");
+				for (const p of edgesG.children) p.classList.remove("hi");
+			});
+		};
+		const renderPorts = (g, nid) => {
+			for (const e of inMap.get(nid) ?? []) g.append(svg("circle", { cx: x, cy: e.y2, r: 2.8, class: `dag-port in ${e.kind}` }));
+			for (const e of outMap.get(nid) ?? []) g.append(svg("circle", { cx: x + NODE_W, cy: e.y1, r: 2.8, class: `dag-port out ${e.kind}` }));
+		};
 
 		if (node.kind === "integration") {
 			const it = node.data;
@@ -233,9 +322,11 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 			const content = svg("g", { "clip-path": `url(#${clipId})` });
 			content.append(svg("text", { x: x + 12, y: y + 23, class: "nid" }, clipDisplay(`集成 #${it.id}`, 18)));
 			content.append(svg("text", { x: x + NODE_W - 12, y: y + 23, class: "nstat", "text-anchor": "end" }, it.changeStatus === "applied" ? "已合并" : st));
-			content.append(svg("text", { x: x + 12, y: y + 48, class: "ntitle" }, clipDisplay((it.sources ?? []).map((src) => `#${src.id}`).join(" + ") || it.task, 28)));
-			content.append(svg("text", { x: x + 12, y: y + 71, class: "nmeta" }, clipDisplay(`检查 ${it.passed ?? 0}/${it.total ?? 0}${it.conflicts?.length ? ` · 冲突 ${it.conflicts.length}` : ""}`, 34)));
+			content.append(svg("text", { x: x + 12, y: y + 46, class: "ntitle" }, clipDisplay((it.sources ?? []).map((src) => `#${src.id}`).join(" + ") || it.task, 28)));
+			content.append(svg("text", { x: x + 12, y: y + 68, class: "nmeta" }, clipDisplay(`检查 ${it.passed ?? 0}/${it.total ?? 0}${it.conflicts?.length ? ` · 冲突 ${it.conflicts.length}` : ""}`, 34)));
 			g.append(content);
+			renderPorts(g, node.id);
+			attachHover(g, node.id);
 			g.addEventListener("click", () => { location.hash = `#/changes/${encodeURIComponent(it.id)}`; });
 			nodesG.append(g);
 			continue;
@@ -249,20 +340,24 @@ export function renderTaskDag(container, { tasks = [], integrations = [], readin
 		const content = svg("g", { "clip-path": `url(#${clipId})` });
 		content.append(svg("text", { x: x + 13, y: y + 23, class: "nid" }, clipDisplay(`${t.id}${t.automation ? " ⚡" : ""}`, 18)));
 		content.append(svg("text", { x: x + NODE_W - 12, y: y + 23, class: "nstat", "text-anchor": "end" }, STATUS_LABEL[t.status] ?? t.status));
-		content.append(svg("text", { x: x + 13, y: y + 48, class: "ntitle" }, clipDisplay(t.title, 30)));
+		content.append(svg("text", { x: x + 13, y: y + 46, class: "ntitle" }, clipDisplay(t.title, 30)));
 		const scopeTag = t.scope?.allow?.length ? `🔒 ${t.scope.allow[0]}` : "";
 		const ownerLabel = t.owner ? AGENT_LABEL[t.owner] ?? t.owner : "未指派";
 		const revTag = t.reviewer ? ` · 🔎${t.reviewer.blind ? "盲审" : "复核"}${t.checksByMember?.length ? `×${t.checksByMember.length}` : ""}` : "";
 		const waitHint = t.status === "todo" && readiness && !readiness.ready ? " · 等待" : "";
-		content.append(svg("text", { x: x + 13, y: y + 71, class: "nmeta" }, clipDisplay(`${ownerLabel}${revTag}${scopeTag ? ` · ${scopeTag}` : ""}${waitHint}`, 34)));
+		content.append(svg("text", { x: x + 13, y: y + 68, class: "nmeta" }, clipDisplay(`${ownerLabel}${revTag}${scopeTag ? ` · ${scopeTag}` : ""}${waitHint}`, 34)));
 		g.append(content);
+		renderPorts(g, t.id);
+		attachHover(g, t.id);
 		g.append(svg("title", {}, `${t.id}: ${t.title}\n状态: ${STATUS_LABEL[t.status] ?? t.status}${t.scope ? `\n路径契约: allow=${(t.scope.allow ?? []).join(",")} forbid=${(t.scope.forbid ?? []).join(",")}` : ""}`));
 		g.addEventListener("click", () => onSelectTask?.(t));
 		nodesG.append(g);
 	}
 	s.append(nodesG);
-	container.innerHTML = "";
-	container.append(s);
+	const legend = document.createElement("div");
+	legend.className = "dag-legend";
+	legend.innerHTML = `<span><i class="dl done"></i>已完成传递</span><span><i class="dl wait"></i>待前置完成</span><span><i class="dl int"></i>联合集成汇流</span><span class="muted">悬停节点高亮上下游连线</span>`;
+	container.replaceChildren(s, legend);
 }
 
 /** 渲染 Path Scope 路径契约隔离矩阵 */

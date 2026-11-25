@@ -4068,29 +4068,79 @@ pre {
 }
 .dag-edge {
 	fill: none;
-	stroke-width: 1.5;
+	stroke-width: 1.6;
 	stroke-linecap: round;
-	transition: opacity 0.15s ease, stroke-width 0.15s ease;
+	stroke-linejoin: round;
+	transition: opacity 0.18s ease, stroke-width 0.18s ease;
 }
 .dag-edge.done {
-	stroke: var(--ok);
-	opacity: 0.72;
+	stroke: color-mix(in srgb, var(--ok) 78%, var(--ink-2));
 }
-.dag-edge.blocking {
-	stroke: var(--signal);
-	stroke-dasharray: 5 3.5;
-	opacity: 0.85;
+.dag-edge.wait {
+	stroke: color-mix(in srgb, var(--signal) 78%, var(--muted));
 }
 .dag-edge.int {
 	stroke: var(--lead);
-	stroke-dasharray: 5 3.5;
-	opacity: 0.88;
+	stroke-dasharray: 5 4;
 }
-.dag-arrow-dep {
-	fill: var(--muted);
+.dag-svg.dag-hover .dag-edge:not(.hi) {
+	opacity: 0.22;
+}
+.dag-svg.dag-hover .dag-edge.hi {
+	opacity: 1;
+	stroke-width: 2.3;
+}
+.dag-arrow-done {
+	fill: color-mix(in srgb, var(--ok) 85%, var(--ink-2));
+}
+.dag-arrow-wait {
+	fill: color-mix(in srgb, var(--signal) 85%, var(--muted));
 }
 .dag-arrow-int {
 	fill: var(--lead);
+}
+.dag-port {
+	fill: var(--panel);
+	stroke-width: 1.6;
+}
+.dag-port.done {
+	stroke: var(--ok);
+}
+.dag-port.wait {
+	stroke: color-mix(in srgb, var(--signal) 85%, var(--muted));
+}
+.dag-port.int {
+	stroke: var(--lead);
+}
+.dag-legend {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 16px;
+	margin-top: 10px;
+	padding-top: 10px;
+	border-top: 1px solid var(--line);
+	font-size: 12px;
+	color: var(--muted);
+}
+.dag-legend span {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+}
+.dl {
+	display: inline-block;
+	width: 20px;
+	height: 0;
+}
+.dl.done {
+	border-top: 2px solid var(--ok);
+}
+.dl.wait {
+	border-top: 2px solid var(--signal);
+}
+.dl.int {
+	border-top: 2px dashed var(--lead);
 }
 .dag-node {
 	cursor: pointer;
