@@ -1,4 +1,4 @@
-// 多 Agent 协作结构可视化：L0/L1/L2 自适应拓扑 DAG、Path Scope 隔离矩阵、Maker-Checker 盲审返工环。
+// 多 Agent 协作结构可视化：任务依赖图谱（DAG）、Path Scope 隔离矩阵、Maker-Checker 盲审返工环。
 import { openDispatch } from "./drawer.js";
 import { AGENT_LABEL, agentColor, clipDisplay, esc, short } from "./util.js";
 
@@ -25,10 +25,10 @@ function svg(tag, attrs = {}, text) {
 	return el;
 }
 
-/** 识别当前分工表所属自适应协作拓扑层级（L0 / L1 / L2） */
+/** 识别当前分工表的协作模式 */
 export function classifyTopology(tasks = [], integrations = []) {
 	const active = tasks.filter((t) => t.status !== "dropped");
-	if (!active.length) return { tier: "L0", title: "等待规划", detail: "总调度拆解分工表后自动识别 L0/L1/L2 协作拓扑" };
+	if (!active.length) return { mode: "empty", title: "等待规划", detail: "总调度拆解分工表后自动生成多 Agent 依赖图谱" };
 	const hasDeps = active.some((t) => t.deps?.length > 0);
 	const hasScope = active.some((t) => t.scope && (t.scope.allow?.length || t.scope.forbid?.length));
 	const hasInt = active.some((t) => t.integrationId) || integrations.length > 0;
@@ -38,8 +38,8 @@ export function classifyTopology(tasks = [], integrations = []) {
 
 	if (hasDeps || hasScope || hasInt) {
 		return {
-			tier: "L2",
-			title: "L2 · 契约并行集成",
+			mode: "contract",
+			title: "契约并行集成",
 			detail: [
 				hasDeps ? "DAG 依赖编排" : "",
 				hasScope ? "Path Scope 路径隔离" : "",
@@ -50,14 +50,14 @@ export function classifyTopology(tasks = [], integrations = []) {
 	}
 	if (hasReview) {
 		return {
-			tier: "L1",
-			title: hasBlind ? "L1 · 异构盲审 (Blind Maker-Checker)" : "L1 · 独立复核 (Maker-Checker)",
+			mode: "review",
+			title: hasBlind ? "异构盲审" : "独立复核",
 			detail: `任务 ${active.length} 项 · ${hasBlind ? "剥离执行者自述，仅审需求与 git_diff" : "独立只读复核"}${parallelCount > 1 ? ` · ${parallelCount} 路并行` : ""}`,
 		};
 	}
 	return {
-		tier: "L0",
-		title: "L0 · 单成员直派",
+		mode: "direct",
+		title: "单成员直派",
 		detail: `任务 ${active.length} 项 · 轻量任务快速直连${parallelCount > 1 ? ` · ${parallelCount} 路并行` : ""}`,
 	};
 }

@@ -4077,19 +4077,6 @@ pre {
 }
 
 /* ---------- 多 Agent 协作 DAG、Scope 隔离与盲审环 ---------- */
-.tier-badge {
-	display: inline-flex;
-	align-items: center;
-	flex-shrink: 0;
-	max-width: 100%;
-	padding: 4px 11px;
-	border-radius: 999px;
-	border: 1px solid color-mix(in srgb, var(--signal) 45%, var(--line));
-	background: color-mix(in srgb, var(--signal) 12%, transparent);
-	color: var(--signal);
-	font: 600 12px var(--font-mono);
-	white-space: nowrap;
-}
 .dag-card {
 	overflow: hidden;
 }

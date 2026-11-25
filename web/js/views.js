@@ -524,7 +524,7 @@ function dag() {
 		const statsEl = root.querySelector('[data-n="stats"]');
 		if (statsEl) {
 			statsEl.innerHTML = [
-				["协作层级", `<b>${esc(topoInfo.tier)}</b> · ${esc(topoInfo.title.replace(/^L[012]\s*·\s*/, ""))}`],
+				["协作模式", `<b>${esc(topoInfo.title)}</b>`],
 				["任务进度", active.length ? `<b>${done}</b> / ${active.length}${doing ? `（<b>${doing}</b> 活跃）` : ""}` : "等待拆解"],
 				["独立复核 / 盲审", blindCount ? `<b>${reviewCount}</b> 项（含 <b>${blindCount}</b> 盲审）` : `<b>${reviewCount}</b> 项`],
 				["路径隔离 / 集成", `<b>${scopedCount}</b> 锁域 · <b>${integrations.length}</b> 集成`],
@@ -534,8 +534,6 @@ function dag() {
 		}
 		const subEl = root.querySelector('[data-n="sub"]');
 		if (subEl) subEl.textContent = topoInfo.detail;
-		const tierEl = root.querySelector('[data-n="tier"]');
-		if (tierEl) tierEl.textContent = topoInfo.title;
 
 		const stageEl = root.querySelector('[data-n="stage"]');
 		if (!stageEl) return;
@@ -563,11 +561,10 @@ function dag() {
 				<section class="card dag-card">
 					<header class="card-head">
 						<div class="card-heading">
-							<h2 class="card-title">多 Agent 任务依赖与自适应拓扑（DAG）</h2>
-							<div class="card-sub" data-n="sub">自动识别 L0/L1/L2 协作拓扑；悬停高亮上下游，点节点查看派工</div>
+							<h2 class="card-title">多 Agent 任务依赖与协作图谱（DAG）</h2>
+							<div class="card-sub" data-n="sub">悬停高亮上下游，点节点查看派工详情</div>
 						</div>
 						<div class="row-actions">
-							<span class="tier-badge" data-n="tier">L0 · 等待规划</span>
 							<a class="ghost-btn tiny" href="#/project">分工表 →</a>
 							<a class="ghost-btn tiny" href="#/topology">查看协作时间线 →</a>
 						</div>
