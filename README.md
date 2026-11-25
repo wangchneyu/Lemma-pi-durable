@@ -2,102 +2,23 @@
 
 > 把复杂目标，化为可验证的每一步。
 
-**Lemma 是一个基于 Pi Durable、以 coding 为主要场景的多智能体协作系统。** 它将不同能力的 Agent 组织成有分工、有独立上下文、有任务交接和验收过程的团队，共同完成仓库分析、并行开发、代码审查、测试与问题修复。
+**Lemma（引理）是一个基于 [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable)、面向 coding 场景的多 Agent 协同系统。**
+它将不同能力的模型与 CLI 组织成有明确职责、独立上下文、结构化交接与独立复核机制的工程团队，完成仓库分析、并行开发、盲审返工、多分支联合集成、自动验收与人工确认合并。
 
-Lemma 的核心是任务如何分配、上下文如何隔离、结果如何交接、执行如何恢复，以及人如何观察和控制整个过程。成员按职责定义，可通过模型 API 或 CLI 执行；同一模型可承担多个独立角色，不同成员也可连接不同服务。终端与本地网页提供一套可直接使用的操作入口。
+执行与会话状态由 Pi Durable + SQLite 持久化；终端负责下发任务与人工决策，本地后台网页（默认 `http://127.0.0.1:8787`）同步提供实时进度、图谱、代码改动与用量观测。
 
-当前版本围绕 coding 协作打磨，优先解决代码工作区隔离、分支交接与集成、独立审查、联合测试和可靠恢复。后续开源后面向其他开发者或其他领域的单独适配，不属于本版本的功能目标；现有 API 成员与通用工具能力继续保留。
+## 核心特性
 
-项目基于 [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable)（`@earendil-works/pi-durable`，实验性）构建，用 SQLite 保存对话与执行状态；终端负责下发任务，本地网页展示进度、会话、改动和用量。
-
-克隆仓库、`npm install`、`npm start`，进入终端后通过 `/setup` 与 `/agent` 配置模型和成员；本地管理网页同时启动。成员的配置、权限及运行方式见 [成员使用说明](docs/custom-agents.md)。
-
-## 设计亮点
-
-- **信息隐藏与结构化交接**（借鉴 *MetaGPT / MAST*）：严格隔离成员会话上下文，不让多个 Agent 在同一聊天室自由群聊；下游仅接收经验证的 `lemma.delivery.v1` 结构化字段与 `inputs` 原文片段，避免上下文污染与级联幻觉。
-- **ACI 专用代码工具与执行扎根**（借鉴 *SWE-agent*）：API 编码与只读审查成员内置 `list_files`、`outline_file`、`find_symbol`、`search_code` 与 `git_diff` 只读代码感知工具，结合 `autonomy.checks`、多分支联合集成 `integrate_changes` 与冲突修复 `repair_integration`，以真实编译器与测试退出码为准绳。
-- **路径契约防篡改与代码盲审**（借鉴 *MAST / Maker-Checker*）：任务支持 `scope: { allow, forbid }` 路径契约（API 写入前实时拦截 + CLI/API 收尾硬校验，支撑“契约先行 + 实现与测试分流”）；`reviewer.blind: true` 在复核时剥离执行者的主观自述话术，仅依据需求契约与客观 `git_diff` 盲审，消除迎合偏见（Sycophancy）。
-- **复杂度自适应拓扑**（借鉴 *Adaptive Topologies*）：按任务耦合度与风险自适应选择 **L0（单兵快路）**、**L1（独立盲审双人闭环）** 或 **L2（契约先行 → 实现/测试并行隔离 → 联合集成撞击测试 → 人工 `/apply`）**，避免简单任务产生额外协调税。
-
-## 为什么叫 Lemma
-
-在数学中，**引理是帮助证明后续命题的辅助命题**。一个复杂结论往往需要先建立若干引理，再把它们组合起来。
-
-Lemma 把这个思路用于 Agent 协作：把目标拆成有范围、有依赖、有验收标准的子任务，让不同成员分别完成；运行配置中的检查，保留结果与失败证据，再继续推进后续任务。名字表达的是“分解、验证、组合”的工作方式；实际验收能力取决于你配置的检查和人工审查。
-
-## 核心能力
-
-| 能力 | 在 Lemma 中如何工作 |
-|---|---|
-| 按职责组织团队 | 成员 ID、名称、职责、指令与执行方式分开配置；按任务需要选择 API 或 CLI 成员 |
-| 独立上下文与续接 | 成员持有自己的会话，只收到明确交付的资料；相关追问沿用 `session_id`，其他工作可新开上下文 |
-| 有依赖的任务协作 | 分工表记录范围、负责人、前置任务和验收标准，总控据此协调顺序与结果交接 |
-| 并行与子调度 | 独立任务并行执行；显式授权的依赖任务由 Durable 推进，也可交给一层子负责人组织 |
-| 独立对话 | 每个顶层会话单独保存消息、任务、成员上下文、派工、用量和修复记录；新建不清空旧数据 |
-| 持久化与恢复 | 切换后，已打开会话继续工作；进程重启后，打开对应会话可恢复历史并续接未完成任务 |
-| 代码改动隔离 | 代码工作区成员在 Git 项目中新派工默认使用独立 worktree，改动供你检查并通过 `/apply` 应用 |
-| 多分支集成与联调 | 已验收成员改动在独立集成 worktree 联合合并并运行检查；通过后等待人工整体应用 |
-| 验收与有限修复 | 代码工作区按配置检查并有限修复；通用任务按业务标准核对证据，业务自动验收器尚待扩展 |
-| 上下文与花费管理 | 增量续接、必要资料交接和限长结果预览减少重复传递；模型清单、用量与预算帮助管理消耗 |
-| 全文按需读取 | 成员报告先保存全文，再返回限长预览；总控需要省略的证据时可用 `read_result` 按 `result_id` 分页读取 |
-| 本地管理网页 | 查看任务看板、协作拓扑、运行记录、改动、成员与用量，并管理对话、中止或取消任务 |
-
-## 协作流程
-
-```text
-你提出目标
-    │
-    ▼
-总调度 ── 明确范围、任务依赖、所需资料与验收标准
-    ├─ 成员 A ── 独立会话，完成任务 A ──┐
-    ├─ 成员 B ── 独立会话，完成任务 B ──┤ 可并行 / 后台
-    └─ 子负责人 ── 组织一个子目标 ──────┘ 当前最多一层
-    │
-    ▼
-结果预览 + 完整结果引用 ── 按需读取证据
-    │
-    ▼
-总控核对验收标准 ── 交付 / 补充资料 / 继续派工 / 交给人判断
-    └─ 有依赖的后续任务，接收必要结果后继续执行
-
-对话、任务和执行状态持久化；网页同步展示进度与历史。
-```
-
-简单请求由总控直接处理，需要分工时再派给成员。`plan_tasks` 记录分工与依赖，`ready_tasks` 计算就绪队列与等待原因。默认由总控通过 `ask_<成员ID>` 派发；任务显式声明 `automation` 后，Durable 在前置验收完成时自动交接结果并派发，沿用并发、预算、取消与持久化机制。未授权任务仅显示为就绪，不会自行启动。
-
-任务可声明 `scope: { allow, forbid }` 路径契约（在 API 成员写入前实时拦截、并在 CLI/API 提交与验收时硬性校验改动文件边界，支撑“契约先行 + 实现与测试分流”），以及 `reviewer: { member, model?, blind? }` 独立复核（代码任务可设 `blind: true` 开启盲审模式，隐去执行者自述文本，仅针对需求契约与客观代码差异独立审查）。代码工作区的 API 成员（含只读审查成员）内置 `list_files`、`outline_file`、`find_symbol`、`search_code` 与 `git_diff` 只读 ACI 代码感知工具，可直接提取文件结构大纲、定位符号定义与引用、浏览目录及查看相对于改动基线（或上游改动）的补丁差异；长交付报告在 64,000 字符上限内自动分片交接并附上改动文件摘要。复核结论必须绑定当前 `result_id`；代码任务另绑定改动提交版本，旧结论不能验收新交付。通过后完成并解锁下游；要求返工时按 `automation.maxReworks`（默认 0，最多 3）续接原成员，重新交付后重新复核。无效结论、未知外部写状态、预算不足或次数耗尽时保留证据并受阻。
-
-终端 `/ready` 查看队列，`/tasks` 查看独立复核和失败依据；`/workflow pause` 暂停后续自动派发（现有派工继续收尾），`/workflow resume` 恢复，暂停状态跨重启保留。协作中间结果由 Durable 处理，不为每个就绪判断或复核结果反复调用总控；收尾时提交一次状态汇总。
-
-### 多成员代码集成
-
-`/integrate create <改动ID1> <改动ID2> …` 在独立工作副本中合并 2–8 项成员改动，运行配置中的 `autonomy.checks`（不要求打开自动修复）。`/integrate list` 查看记录，`/integrate show <集成ID>` 查看来源提交、状态、退出码和检查输出，`/integrate cancel <集成ID>` 取消。主目录或来源更新后可用 `/integrate rerun <集成ID>`（或 `integrate_changes` 传 `rerun_id`）基于最新基线重建验证；出现三方合并冲突（`conflict`）或联合检查失败（`failed`）时，可用 `/integrate repair <集成ID> <成员ID> [说明]`（或 `repair_integration` 工具）在独立修复副本解决冲突或跨模块问题并自动重跑全部联合检查，原始成员来源分支保持不变。总控可用 `integrate_changes`、`repair_integration` 与 `read_integration wait:true` 完成同样流程；自动依赖任务涉及多个已验收分支时，也先联合验证再启动下游。本地管理网页同步展示自动推进状态、就绪队列、独立复核链路与多分支合流拓扑。
-
-通过后 `/diff <集成ID>` 查看合并差异，用户执行 `/apply <集成ID>` 才将整包改动应用到主目录；不会自动 commit。来源提交、来源工作副本、集成副本或主目录快照变化后拒绝使用旧检查结果。冲突、失败、超时、取消均保留记录与现场，不能应用；`/apply all` 不会绕过集成单独应用被包含的来源。集成步骤可从 Durable 检查点恢复；外部测试命令中途被打断时不会自动重复执行或视为通过，需要检查现场后重建集成。
-
-成员之间通过显式任务与结果交接协作，不自动共享整段聊天。相关工作可以续接原成员上下文，独立工作可以开新会话。Pi Durable 保存对话与任务状态；关闭进程后，重新打开对应会话可继续恢复。通用任务的验收由总控、复核成员与人工完成；代码工作区另有 Git 隔离、配置检查与有限修复。
-
-## 适合的场景
-
-- 工作需要多个职责配合，且必须明确输入、输出、依赖与验收过程。
-- 需要同时运行多个独立任务，并分别保留上下文、执行状态和结果。
-- 需要在终端与网页中看清任务负责人、执行进度、交付结果和运行用量。
-- 需要中断后续接长任务，或在执行过程中人工检查、调整与取消。
-
-**当前边界**：执行进程随终端运行，关闭窗口后需要重新启动才能恢复；工作区与会话隔离不等于操作系统安全隔离；自动修复和记录复用也不等于模型训练。
+- **职责分工与依赖编排**：通过 `.pi-agent/GOAL.md`（目标）与 `.pi-agent/ASSIGN.md`（任务看板）组织工作，支持 `plan_tasks` 依赖图、异步后台派工（`background: true` / `wait_jobs`）及单层子调度（`delegate_to_lead`）。
+- **上下文隔离与结构化交接**：成员各自持有独立会话与上下文窗口，不混用全局聊天记录；长结果自动截断预览并持久化全文（`read_result` 按需分页提取，`lemma.delivery.v1` 按字段交接）。
+- **路径契约与独立盲审**：支持任务级 `scope: { allow, forbid }` 路径边界（API 写前拦截 + 收尾硬校验），以及 `reviewer: { member, blind }` 独立复核 / 代码盲审（盲审仅审契约与 `git_diff`，剥离执行者自述）。
+- **Worktree 隔离与联合集成**：代码任务默认在独立 Git worktree 中执行，支持多分支三方合流集成（`/integrate` / `integrate_changes` + 冲突修复 `repair_integration`）及按目标仓库匹配的 `autonomy.checks` 自动验收与有限修复。
+- **人工闸门与可恢复性**：总调度可通过 `request_apply` 在终端弹窗请求合并确认，敏感/分歧仓库推送受人工审批保护；中断、重启或受阻后可在终端直接 `/task inspect|resume|supply|reassign` 续接。
 
 ## 快速开始
 
-### 1. 准备环境
-
-- Node.js ≥ 22.19；使用 Git worktree 隔离时需要 Git 和一个 Git 仓库。
-- 启动后用 `/setup` 配置总控模型与 API 凭据，用 `/agent add` 添加 API 成员；已有配置继续使用。
-- 准备至少一个可用成员：配置自定义 API Agent，或安装并登录相应 CLI；纯 API 团队不需要成员 CLI。
-- Windows 建议使用 Windows Terminal + PowerShell 7。
-
-项目里的 `.npmrc` 让 `@earendil-works` 这组包走官方源，其他包仍走你的全局镜像。
-
-### 2. 安装与启动
+- **环境要求**：Node.js ≥ 22.19、Git（worktree 隔离需要）；Windows 建议使用 Windows Terminal + PowerShell 7。
+- **成员准备**：支持 Claude / Codex / Gemini 本机 CLI（需提前各自登录），也支持直接配置 OpenAI / Anthropic 兼容 API 成员（见 [成员使用说明](docs/custom-agents.md)）。
 
 ```bash
 git clone https://github.com/wangchneyu/Lemma-pi-durable.git pi-agent
@@ -106,450 +27,49 @@ npm install
 npm start
 ```
 
-`npm start` 默认开启**真实模式**，会按所用模型和服务的规则计费。终端负责下发任务，同一个进程会启动本地后台网页，默认地址为 `http://127.0.0.1:8787`；以终端打印的地址或 `/web` 返回的地址为准。
+> `npm start` 默认使用真实模式并同时启动本地网页（`--no-web` 可关闭，`--plain` 切换纯文本，`npm start -- "任务"` 单次运行后退出）。直接由 Node TypeScript 原生运行，无需额外构建步骤。
 
-成员管理直接在终端完成，输入 `/help` 或 `/agents` 查看操作：
+首次使用在终端执行 `/setup` 配置总调度模型与凭据，用 `/agent add` 管理 API 成员；可用 `npm run check`（会产生真实调用）验证各成员连通性。API 密钥经隐藏输入存入本机 `~/.lemma/credentials.json`，配置文件与网页响应仅保留引用。
 
-```text
-/setup                       引导配置总控接口、模型和凭据
-/agent add                   引导添加 API 成员
-/agent edit <ID>             修改成员角色、接口、模型和权限
-/agent enable <ID>           启用成员
-/agent disable <ID>          停用成员，保留历史
-/agent model <ID> [模型ID]   修改成员默认模型
-/agent key <ID>              隐藏输入 API 密钥
-/agent show <ID>             查看成员配置，不显示密钥
-/tool add <成员ID>           引导接入 HTTP 业务工具
-/tool list <成员ID>          查看该成员的业务工具
-/tool edit <成员ID> <工具ID>  修改工具接口与参数
-/tool remove <成员ID> <工具ID> 移除工具授权，保留历史
-/tasks                      查看任务、验收与结果引用
-/result <result_id>          分页查看完整成员结果
-/operations                 查看业务操作状态与失败分类
-/operations resolve <ID> succeeded|not_applied <依据>  记录人工核对的远端结果
-```
+## 终端速查
 
-配置保存到当前配置文件，空闲时对所有已打开工作会话生效，不重建终端或数据库。API 密钥经隐藏输入后存入本机 `~/.lemma/credentials.json`，配置文件仅保存引用；该文件是本机明文凭据文件，不是系统加密钥匙串，请保护其访问权限。密钥不进入模型聊天和网页响应。
-
-直接从 TypeScript 源码启动，无需额外构建、打包、全局安装或 SDK 接入。终端、网页、会话管理、并行派工、预算、验收和有限修复都属于同一套应用。
-
-换机器时需要重新准备该机器上的模型凭据和成员 CLI 登录，并确认配置中的模型 ID 实际可用；无需照搬开发机的绝对路径或登录文件。工作目录和数据库默认使用相对项目目录的路径。新的克隆不会包含原机器被 Git 忽略的 `data/` 历史；需要继续原会话时，应先关闭原进程，再另行迁移其数据文件。
-
-### 3. 开始协作
-
-在终端描述目标，也可以先用 `/session new <编号>` 创建独立对话，再输入任务。`/tasks` 查看分工，`/jobs` 查看后台派工，`/changes` 查看待合并改动；审查后用 `/apply <改动编号>` 应用到主工作区。
-
-API 成员可通过 `/tool add` 接入固定 HTTP 业务接口，工具权限按成员隔离。任务可预设全文/JSON 字段检查；总控使用 `review_task` 针对最新结果记录通过、返工或受阻的依据。有依赖的任务等待前置验收完成，交接通过结果引用提取原文片段。机器检查不替代业务事实核对；POST 失败后需先确认远端状态。详见[成员使用说明](docs/custom-agents.md)。
-
-`/tool add` 的参数步骤可填 `fields` 逐字段配置；`/tool test <成员ID> <工具ID>` 使用真实 GET 测试参数与连通性，不调用模型。`/mcp add <成员ID> <连接ID>` 通过官方 MCP SDK 发现 Streamable HTTP 工具，明确选择服务声明只读的工具后，只有该成员获得授权；调用时重新核对目录与参数定义。当前不支持 MCP 写操作、stdio 或 OAuth，服务的只读声明仍需开发者信任。
-
-任务完成必须关联成功交付和验收依据，旧 `update_task done` 入口同样检查；带机器规则的任务使用 `review_task`。派工结果、任务状态、会话轮次和已知费用在同一 Durable 事务中收尾，重放已提交回执不会再次调用成员。HTTP 写操作先记意图；同一工作会话内，接口存在未知写操作时会跨成员拦截后续 POST。用户查询远端后，在终端用 `/operations resolve` 记录成功或未执行的依据，再决定下一步。
-
-派工可指定 `structured: true`，交付包含结论、数据、证据来源、产物引用和未完成项；下个成员通过 `inputs: [{ result_id, field: "data.total" }]` 只接收所需字段。原文与来源持久保存，字段过长时仍明确提示后续偏移。结构化格式并不证明事实正确或产物真实存在。
-
-受阻后可以直接在终端恢复，系统保留原任务、失败与复核依据、已验收依赖和成员会话：
-
-```text
-/task inspect T2
-/task resume T2 已修正接口配置，继续处理原缺口
-/task supply T2 新增资料：记录 A 的金额为 42，来源为已核对流水
-/task reassign T2 reviewer 交给其他成员检查剩余问题
-```
-
-`inspect` 只读；其余恢复命令直接创建同一 Durable 宿主的后台派工，不先让模型转述命令。完成后仍交总控验收；`/jobs cancel Jn` 可取消运行或排队。模型也可用 `recover_task` 准备恢复计划，再按返回参数调用 `ask_*`；`/task cancel T2 原因` 仅撤销尚未执行的计划。不会重跑已验收前置任务、降低验收标准或绕过未知外部写操作；代码换人接手基于原工作分支。旧版任务没有派工元数据时仍可用原 `session_id` 显式续接。
-
-上下文按任务裁剪：默认仅交付当前任务、直接依赖、上级及直接后续任务。续接同一成员时，未变化的项目背景和相同结果字段片段只发送引用；背景或资料变化会重新交付，API 子对话出现原生 reset/压缩边界后也会重发。`ask_* context_mode: "full"` 可强制重发。总控规则优先直接完成简单任务、复用已验收成果，仅在需要独立能力、并行或复核时派工；此项是可检查的上下文优化与派工指导，不保证模型一定遵循，也不宣称已证明真实 token 收益。
-
-`/limits edit` 配置团队、成员及同一 API origin 的并发上限、每轮成员预算与每次派工预留。等待直接交给 Durable 原生挂起与恢复，不消耗额外模型轮次；取消会释放名额与预留。`/progress` 显示运行、队列和等待原因，`/usage` 区分成员派工、自动返工的已知费用及未知次数，网页同步展示执行与等待。限制作用于当前工作会话数据库；预留是用户估计，未知成本不当作零，不能保证服务账单硬上限，总控与子调度费用尚未完整按角色分摊。
-
-需要检查成员连接时，可选运行以下命令；它们会发送真实请求并可能产生费用：
-
-```bash
-npm run check
-npm run check -- --models
-```
-
-单次提问会在完成后退出，不启动后台网页：
-
-```bash
-npm start -- "让 Codex 实现 X，再让 Claude 审查"
-```
-
-详细说明：[终端操作](#新版终端默认真实模式) · [会话隔离](#多会话管理与隔离) · [自动修复](#验收自动修复与记录复用) · [配置](#配置) · [测试](#测试)
-
-### 从 pi-agent 继续使用
-
-项目现名为 **Lemma（引理）**，仓库地址与现有目录名仍保留 `pi-agent`。配置文件继续使用 `pi-agent.config.json`，环境变量继续使用 `PI_AGENT_*`，共同规则目录仍为 `.pi-agent/`。原有数据库、会话 ID、任务和后台记录沿用原路径，**无需迁移或清空数据**。
-
-## 使用指南
-
-### 自然对话与任务衔接
-
-Lemma 的产品身份会随每次模型请求提供，并与实际配置的模型标识、工作目录区分。问候、身份确认、使用咨询和方案讨论直接对话；只有明确的执行目标才进入规划与派工，不会因为还没有目标文件或分工表就反复要求创建项目。
-
-连续追问会承接当前会话可见的历史、约束和已确认选择。用户纠正名称或选择方案时直接衔接，不要求重开对话；重启或重置后仍有产品身份说明。新规则不清空历史，也不会读取其他独立会话的聊天。普通对话无需固定的成员、模型或任务编号汇报。
-
-这些规则改善模型请求中的身份与对话引导，不是替换模型输出的固定回复。实际表达仍由所配置的模型生成；没有足够上下文时会最少澄清。
-
-例如，问“lemma 不是你自己吗”时，应该直接确认 Lemma 身份；问“第二个方案怎么样”时，应该承接本会话的方案而非重新收集全部需求。讨论阶段不会仅因缺少 `GOAL.md` 而创建文件。更新后重启进程即可把新规则用于已有对话，不需要 `/new` 清空上下文。
-
-### 新版终端（默认真实模式）
-
-沿用 [Pi Durable 官方示例](https://earendil.com/posts/pi-durable/)的组合方式：Durable 负责执行与持久化，`@earendil-works/pi-coding-agent@1.6.0` 提供原生消息和工具组件，`pi-tui@1.6.0` 负责终端布局与输入。Windows 上建议在 Windows Terminal + PowerShell 7 中体验。
-
-具体复用边界：
-
-- 用户消息、助手消息、Markdown、代码高亮、思考块和工具执行展示直接使用官方 `UserMessageComponent`、`AssistantMessageComponent`、`ToolExecutionComponent`，不再维护自建消息或工具卡片。文件读写、编辑和 shell 工具沿用官方展示钩子；`ask_*` 等业务工具使用官方通用展示。
-- 终端通过 `conversation.watch()` 读取原始模型消息与流式参数，通过 `ConversationTranscript` 合并滑动窗口，通过 `watchTaskGraph()` 查看执行关系。网页继续使用自己的 JSON 投影，终端保留完整思考块和结构化工具结果。
-- Pi Durable 的 Harness、任务、SQLite、子对话和恢复机制继续负责运行。编码代理的 UI 组件不执行任务，也不会启动第二套 `AgentSession`。
-- 交互复用官方 `CustomEditor`、`SessionSelectorComponent`、`TreeSelectorComponent` 和 `ModelSelectorComponent`。编辑器额外处理各会话的历史、草稿、撤销与剪切隔离；选择器只映射已有会话元数据，不创建 Pi JSONL 会话，不删除数据库，也不复制成员完整聊天。
-- 保留薄的 Durable 控制适配层，不实例化完整 `InteractiveMode`：它要求 coding-agent 的 `AgentSessionRuntime`，会引入另一套会话和执行控制。模型目录适配器只提供原生选择器需要的四个读取/刷新方法，直接委托给 Harness 使用的同一个 pi-ai Models。选择结果写入 Durable 的 `pi.agent`；这项接入依赖固定的 `1.6.0` 组件契约，有专项回归测试。
-
-默认直接使用配置中的真实模型和本机 CLI，会按各服务的计费规则产生费用：
-
-```bash
-npm start
-```
-
-`npm run tui` 是同样的真实模式入口。
-
-- 顶部显示项目、模型和当前对话，中间用官方 coding-agent 组件显示用户输入、助手回答、流式内容和执行结果，底部固定显示多行输入区、运行状态、后台派工、本轮成员花费和待合并数量。业务工具默认预览前十行，Ctrl+E 展开完整输出；内置文件工具按官方规则折叠。Alt+T 展开或收起原生思考块。
-- 对话区区分「你 / Lemma」；只读成员页显示「收到的任务 / 成员」，输入框明确提示返回总控。空会话展示简短入口，启动不再把完整成员目录铺进聊天区，`/agents` 仍可查看完整配置。派工、验收、恢复和成果读取卡片优先显示任务摘要；Ctrl+E 展开原始参数与完整输出，不改变实际交给模型的内容。
-- 翻阅历史时，新日志与新回答不强制拉回底部，底部提示新增内容数；Alt+End 回到最新，PageUp/PageDown 继续使用原生滚动。状态栏按窗口宽度调整，显示当前运行、等待工具、待处理消息、后台任务及成员已知费用；中断和模型配置问题显示对应下一步。
-- Ctrl+K 打开可搜索的会话选择器：既可切换独立工作会话，也可只读查看当前会话内的子调度和 API 成员子对话。查看子对话不会触发模型、转发历史或把输入发给成员；输入 `/main` 返回总控。外部 CLI 的私有完整聊天仍由各 CLI 管理。
-- 会话列表的消息数和活动时间来自持久化记录，包含 reset 前的用户、助手和工具结果；首次扫描按页读取，后续按记录尾部 ID 缓存，追加后失效。搜索保留首条和最近输入摘要；网页与终端共用统计，读取不会触发模型。
-- Alt+C 或 `/tree` 打开官方树选择器，展示「工作会话 → 总控 → 子调度 / API 成员」的 Durable 所属关系，支持搜索和分支折叠；选择节点只切换视图，不回滚消息或改写执行分支。这里只展示当前存储的子对话，其他工作会话先切换再读取；它不是消息级时间旅行。
-- Ctrl+L 或 `/model` 打开官方模型选择器；`/model <模型ID>` 也可直接切换当前总控。选中模型保存在本会话的 Durable agent 文档，重启继续使用；运行中和只读子对话拒绝切换。其他会话和已经派出的成员保持原模型，网页与终端显示从 Durable 读取的当前选择。
-- Ctrl+T 或 `/taskgraph` 切换原生任务面板，直接订阅 Pi Durable `watchTaskGraph()`，显示排队、运行、等待、休眠、收尾状态以及任务父子关系。`/tasks` 继续显示项目分工表。
-- Enter 发送；Shift+Enter 或 Ctrl+J 换行；Tab 补全斜杠命令和路径；方向键可找回输入历史；PageUp/PageDown 翻看日志。
-- 多行粘贴保留为一个任务，实时日志和流式回答不会修改正在编辑的草稿。所有原有 `/jobs`、`/tasks`、`/apply` 等命令继续可用。
-- Ctrl+C：总调度忙时中止本轮，后台任务继续；空闲时退出。`/abort all` 一起取消后台任务，`/exit` 或空输入时 Ctrl+D 退出。
-- `npm start -- --plain` 使用普通文本界面，模型仍是真实模型。管道输入、输出重定向或 `TERM=dumb` 自动使用普通文本界面，不会切换为模拟模型。
-- 鼠标滚轮和 PageUp/PageDown 翻阅超出窗口的对话；Ctrl+Home/End 到达已加载记录开头或回到最新，Alt+End 也可回到最新。接近顶部时通过 Durable `ConversationTranscript.loadEarlier()` 自动补页，订阅遗漏用 `fillGap()` 补齐，也可 `/history` 手动重试。首次只加载近期窗口，已加载历史不再按 250 条或字符数静默裁掉，补页保留阅读位置；Ctrl+Shift+F 搜索已加载记录。
-- 模型实际返回的思考块默认展开，流式与历史消息均复用官方组件；Alt+T 或 `/thinking` 切换折叠，也支持原生点击思考块。接口未返回思考内容时不会生成虚假记录；展示开关不会启用推理模型或额外发起模型请求。
-- 重置上下文保留可翻阅的旧记录，并用“新的上下文”分隔；旧记录仅用于查看，不会重新加入模型上下文。命令提示单独保留最近 60 段。
-
-执行进程仍与终端共用生命周期；关闭后依靠已有持久化机制重启恢复，不提供关闭窗口后持续运行的常驻服务。使用配置中的工作目录和 `data/session.sqlite`。
-
-终端专项测试：`npm run test:terminal`。覆盖中文草稿、多行粘贴、并发日志、窗口缩放、补全、模式回退，以及模拟模型下的完整派工和正常退出；真实 Windows 输入法候选框与不同终端的快捷键仍需实机体验。
-
-### 多会话管理与隔离
-
-`npm start` 同时启动真实终端与本地后台网页，默认端口 `8787`；`/web` 查看实际地址。网页服务随进程运行，不会自动打开浏览器。单次提问和 `--no-web` 不启动网页。
-
-网页左侧增加**历史对话列表和搜索**，顶部的 **“新对话”** 创建独立对话，可填写中文名称；点击旧对话即可切回，并按原对话加载消息、项目任务、成员上下文、后台派工、协作拓扑、用量、修复记录与代码改动。新建不调用模型、不清空或覆盖旧数据库，也不中止旧任务。支持“重命名”，名称和最后选中的对话会保留到下次启动；启动时显式指定 `--session=` 可覆盖上次选择。
-
-**“新对话”与“重置上下文”分开**：新对话有独立记录和后台统计；重置上下文只让当前总控从新上下文继续，原始历史与后台数据仍属于当前对话。新建、切换均保留原始文件，页面刷新和进程重启后可重新打开旧对话。网页与终端共享当前选择，在网页切换也会同步切换终端；多个浏览器标签页跟随同一个当前对话。任务仍只从终端发送。
-
-```text
-/sessions                         查看会话、是否运行、后台任务数量和项目目录
-/session new frontend             新建并进入前端会话
-/session new backend              新建并进入后端会话
-/session use frontend             切回已有会话
-/session rename frontend 前端开发 修改显示名称
-/members                          当前会话中的成员上下文与轮次
-/conversation                     总控对话 ID、存储与上下文隔离说明（/id 同义）
-/conversations                    搜索独立会话与当前存储的原生子对话（Ctrl+K）
-/taskgraph                        显示或收起原生任务面板（Ctrl+T）
-/main                             从只读子对话返回当前工作会话的总控
-/repair                           当前自动修复配置和最近修复记录
-/learn                            查看已验证记录
-```
-
-新版终端里 **Ctrl+N 新建会话、Ctrl+O 循环切换会话**，切换保留各自未发送的草稿，不会把草稿送给模型。也可以启动时指定：`npm start -- --session=frontend`，不存在则创建。编号使用小写字母、数字、`-`、`_`。`/new` 只重置当前会话的模型上下文，不删除会话或任务数据。
-
-`default`、`frontend` 是可读的工作会话编号；终端顶栏的 **总控 CID** 是该会话内的 Pi Durable 总控对话 ID，需结合会话编号和存储路径识别（不同 SQLite 的本地 ID 可以相同）。`/members` 列出的 `session_id` 才是 Claude/Codex/Gemini CLI 或 DeepSeek 子对话各自的上下文 ID，并显示所属总控。总控收到用户对话和派工结果；成员收到显式派工说明、项目背景及自己的续接历史，不自动复制总控或其他成员完整聊天记录。`default` 和命名会话均拒绝未登记或不属于当前总控的成员 ID。
-
-未指定编号时，重新启动会恢复上次选中的会话；指定 `--session=default` 或其他已有编号时恢复对应会话，不会自动新开聊天，也不会把不同成员的完整历史合并。需要全新的独立任务聊天时使用网页“新对话”、Ctrl+N 或 `/session new`。项目源码和目标/规则仍可共享，Git worktree 用于区分代码改动，这些是上下文和工作状态隔离，不是阻止成员访问主机文件的安全沙箱。
-
-每个命名会话有独立的 SQLite、对话历史、成员会话登记、任务看板、预算计数、改动登记和学习记录，保存在 `data/session.sqlite.sessions/<编号>/`。命名会话的分工表也在该目录下，不覆盖项目的默认分工表。项目目标与共同规则仍从项目 `.pi-agent/` 读取，这是有意共享的项目规范。每次成员派工仍在独立 Git worktree 中修改代码；非 Git 项目只有上下文和状态隔离，不提供文件副本隔离。
-
-切到别的会话时，已打开会话继续运行，日志不混进当前会话；切回后从持久化状态显示最近历史。终端渲染器与网页 HTTP 监听器持续存在，只替换会话绑定；网页实时连接重新获取新会话快照，监听端口不重启。`/abort all` 取消当前会话的总调度和后台任务，其他会话不受影响；`/exit` 关闭整个进程中的所有会话。重启后只有打开的会话才恢复执行；多个终端可用不同 `--session=` 并行，同一会话只能由一个进程打开。
-
-### 验收、自动修复与记录复用
-
-参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的插件、会话和生命周期扩展思路，保留 Pi Durable 作为执行内核。这里实现的是**有边界的修复和记录复用**，不是模型训练、任意修改权限或自动把自身代码发布上线。
-
-当前 `pi-agent.config.json` 开启 `autonomy`：
-
-- 成员在隔离分支完成修改后，由执行层运行配置的验收命令。当前项目配置 TypeScript 类型检查；这只证明类型检查通过，完整功能仍需补充测试命令和任务验收。
-- 执行或验收失败，有可续接上下文时，在同一成员会话和工作副本中最多自动修复 **2 次**。只附上原任务与本次失败摘要；每次修复计入原有成员预算。
-- 用户取消、进程关闭、认证/权限失败、超时和预算不足时停止自动修复。同轮相同任务、同一成员耗尽次数后拒绝重复派工；改变任务描述或任务编号会被视为新任务，并仍受运行预算和轮次上限限制。
-- 已有改动未通过配置验收时，不能直接用 `update_task` 标完成。改动仍留在独立分支，是否应用继续由 `/apply` 决定。
-- 只有修复后的当前提交通过配置验收，才保存失败证据、执行摘要、改动编号、提交、检查名称和次数。后续只按当前任务关键词取最多 3 条相关记录、总长最多 1000 字符，同一会话内复用；记录中的执行摘要仍是成员报告，不能代替新任务的验证。
-- 返回总调度的成员正文最多 `resultMaxChars`（当前 4000）字符，保留开头结论与末尾诊断；大分工表只带活动和少量最近完成项。`/tasks`、网页和存储保留完整任务记录。
-
-验收使用 `{ name, command, args, timeoutSeconds }`，直接启动程序，不走拼接的 shell 字符串。用 `node` 时自动使用当前 Node 可执行文件。其他项目需要换成对应的测试命令；新建到不同项目路径的会话不会沿用本项目验收命令。没有配置检查时，不能把完成报告保存为“已验证经验”。
-
-`npm run test:harness` 验证会话隔离、重启恢复、切换期间后台继续、草稿不串线、修复次数上限及预算保护；使用模拟模型，不产生真实 API 费用。
-
-### 常用命令
-
-`/agents` 查看成员、`/web` 后台地址、`/usage` 查看用量、`/abort` 中止本轮（`/abort all` 连后台派工一起停）、`/new` 开始新的上下文、`/exit` 退出；Ctrl+C 中止正在进行的一轮。
-
-### 共同目标和分工表
-
-像一个真人团队那样协作：大家对最终目标有共同的理解，有一张分工表记录谁负责什么、做到哪了。
-
-- **`.pi-agent/GOAL.md`：最终目标**。写清楚要做成什么、验收标准、约束和不做什么。**以你写的为准**；还没有这个文件时，你把项目目标告诉总调度，它会起草一份并标明"待你确认"，已经存在的不会被它改。
-- **`.pi-agent/ASSIGN.md`：分工表，由 AI 维护**。总调度把项目级任务拆成多项（`plan_tasks`），每项写明角色、负责成员、依赖和验收标准；派工时带上任务编号，成员完成后任务变成"待验收"，总调度对照验收标准核对，再标完成或打回（`update_task`）。任务数据存在 Pi Durable 里（和派工在同一个事务里，崩溃也不会错乱），每次变化后写出 ASSIGN.md，人和任何 AI 都能读。**不要手动编辑**：手动改过的会被另存为 `ASSIGN.edited-*.md`，不会丢，也不会被当成数据导回去。
-- **每次派工，成员都会拿到**：项目最终目标、自己负责的任务和验收标准、前置任务的状态，以及团队分工全貌（知道自己在全局里的位置）。
-- **角色**（配置里的 `roles`）：总调度按角色分工，比如架构用 Claude（opus）、设计用 Codex（GPT）、编码用 DeepSeek（没配时由 Gemini / Codex 顶上）、审查用 Claude（sonnet）。
-
-终端里 `/goal` 看最终目标、`/tasks` 看分工表；后台的「项目」页显示目标、任务看板和角色分工。
-
-### 同步和异步派工
-
-真人团队里，负责人把活分下去以后不会站在旁边干等。总调度也一样，每次派工可以选：
-
-- **同步**（默认）：等成员做完再往下走。同一轮里的几个派工并行执行，但要等最慢的那个。
-- **后台**（`background: true`）：立刻返回后台编号（`J3`），总调度接着派别的、回复你。成员做完后，结果以「【后台结果 J3 · 完成】」开头自动发回总调度，它验收、更新分工表、继续派依赖它的任务；你不在终端前它也会接着推进。
-- **等结果**（`wait_jobs`）：需要某几项的结果才能往下走时，总调度可以等："做完一个就先处理"（any）或"全部做完"（all）。等待中不占进程；有人在等时结果直接交给它，不会再另发一条消息。
-- **取消**（`cancel_job`）：方向错了或不再需要的后台派工，总调度可以取消；已有的改动留在它的分支里，任务退回待办。
-
-**一个成员，多个会话**：同一个成员可以同时开好几个会话（比如 Claude 一边写设计、一边审查另一份改动），各自独立、各在自己的 worktree 里；但同一个会话同一时间只能有一个派工，第二个续接会被拒绝。
-
-后台派工是 Pi Durable 的后台任务：终端关掉或崩溃后再启动，会续接成员的会话接着做，做完照样把结果发回总调度。由后台结果触发的后续处理仍算在你那一轮的花费里，不会重新计数。
-
-终端：`/jobs` 列出后台派工，`/jobs <编号>` 看详情和实时输出，`/jobs cancel <编号|all>` 取消；成员的实时输出带编号打印（`[J3] …`），后台结果以 ◆ 开头。`/abort` 只中止总调度这一轮，后台派工继续，`/abort all` 连它们一起停。
-
-### 子调度
-
-目标很大、能分成几块相对独立的部分时（比如前端 / 后端 / 数据迁移），总调度可以像真人团队的负责人一样，把每一块整个交给一个**子负责人**：`delegate_to_lead`，给出子目标、名字、范围和验收标准。
-
-- 子调度是 Pi Durable 里的一个子对话，和总调度用**同一个模型、同一套工具**（派工、分工表、后台派工），在自己的范围里拆任务、派成员、验收，最后给总调度一份汇报（做了什么、派工几次、改动编号、风险）。总调度仍要对照验收标准核对。
-- **只有一层**：子调度拿不到 `delegate_to_lead`，不能再往下开子调度，所有活都直接派给成员。
-- 几个子调度可以在同一轮里并行；子调度自己也可以把成员派工放到后台。它汇报前还有没收的后台派工时，系统会提醒它用 `wait_jobs` 收齐再汇报。
-- **花费**算在你那一轮里，和总调度共用上限。
-- 交给子调度的任务在分工表里显示为「子调度·名字」负责；它拆出的子任务带 `parent`，显示「属于 T2」。
-- 终端里子调度的进展带名字打印（`[后端] 🔧 ask_codex …`）；后台「协作拓扑」页里，子调度单独一组，它的时间条覆盖从接手到汇报的整段，并用虚线连到它派出的每次派工；派工明细里也包含子调度派的工。
-- 不需要时可以关掉：配置 `"lead": { "enabled": false }`。
-
-### Agent 规范文件
-
-三位成员各读各的规范文件：Claude 读 `CLAUDE.md` 和 `.claude/`（子 agent、命令、技能、设置），Codex 读 `AGENTS.md` 和 `~/.codex/`，Gemini 读 `GEMINI.md` 和 `.gemini/`；另外还有 `.agents/skills`、`.agent/`、`.cursor/rules` 等通用位置。Lemma 把它们统一管起来：
-
-- **扫描**：项目和用户目录（`~`）里各家约定位置的文件，按"哪个成员会读到"归类，列出说明、设置、技能、命令、子 agent。只读白名单里的文件，设置文件里的 token / key 一律打码。
-- **检查**：哪个成员缺少项目级说明、共同规则是否同步、空文件、说明文件之间的矛盾（比如一份写 npm、一份写 pnpm）、设置文件里的明文密钥。
-- **共同规则** `.pi-agent/RULES.md`：三位成员都该遵守的约定写在这一份里，`/rules sync` 把它同步进项目的 `CLAUDE.md`、`AGENTS.md`、`GEMINI.md`（文件不存在就新建）。同步只替换带标记的规则段落，段落外你手写的内容原样保留；RULES.md 改了之后会提示"过期"。
-- 新同步的规范文件还没提交时，新派工的 worktree 也会带上它们（但不算进成员的改动）。
-
-终端：`/rules` 看摘要和检查结果，`/rules init` 生成共同规则模板，`/rules sync` 同步。后台的「Agent 规范」页显示成员矩阵、检查结果和文件浏览器（只读）。
-
-运行中的交互：
-
-| 操作 | 作用 |
+| 类别 | 常用命令与快捷键 |
 |---|---|
-| 总调度正忙时直接输入 | **插话**：这句话插进当前这一轮，总调度在这一轮工具做完后、下一次思考前就能看到（比如"用 pnpm，别用 npm"）。后台的运行记录里标成「你 · 插话」 |
-| `/queue <任务>` | **排队**：等这一轮结束后，作为新的一轮处理 |
-| `/continue` | **续跑**：一轮因为出错、中断或中止没有完成时，不用重新输入，在原来的上下文里接着跑 |
-| `/compact [说明]` | **压缩**：把较早的对话总结成摘要，总调度之后只看摘要和最近的内容（原始记录仍在存储里）。上下文接近上限时也会自动压缩 |
+| 任务与协作 | `/tasks` `/ready` `/jobs` `/jobs cancel <ID\|all>` `/workflow pause\|resume` `/task inspect\|resume\|supply\|reassign\|cancel` `/goal` |
+| 代码隔离与集成 | `/changes` `/diff <ID>` `/apply [ID\|all]`（交互确认）/ `/drop <ID>` `/clean` `/integrate create\|list\|show\|rerun\|repair\|cancel` |
+| 成员与规范 | `/setup` `/agents` `/agent add\|edit\|enable\|disable\|model\|key` `/tool` `/mcp` `/rules [init\|sync]` `/limits edit` |
+| 会话与终端交互 | `/session new\|use\|rename` `/sessions` `/abort [all]` `/continue` `/compact` `/usage` `/web`<br>`Ctrl+K` 会话与只读子对话 · `Ctrl+L` (`/model`) 切换模型 · `Alt+C` (`/tree`) 关系树 · `Ctrl+T` (`/taskgraph`) 原生任务面板 · `Ctrl+N`/`Ctrl+O` 新建/切换会话 · `Ctrl+E` 展开输出 · `Alt+T` 思考块 |
 
-还没放进对话的插话和排队会显示在后台的顶栏和总览「正在执行」里。
+## 本地后台网页
 
-改动（工作区隔离）：
+网页与终端共享同一套 Harness 状态（仅监听 `127.0.0.1` 并校验 Host/Origin，不可跨站控制或从网页直接派发新任务）：
 
-| 命令 | 作用 |
-|---|---|
-| `/changes` | 列出待合并的改动（`/changes all` 列出全部） |
-| `/diff <编号>` | 改了哪些文件、增删多少行；完整差异在后台「改动」页 |
-| `/apply <编号>` | 把改动应用到主目录的工作区（**不提交**，你检查后自己 commit）；冲突时不动你的文件。`/apply all` 处理全部 |
-| `/drop <编号>` | 丢弃改动：删掉 worktree 和分支 |
-| `/clean` | 清理已合并 / 没改动的 worktree（之后不能再续接它们的会话） |
+- **工作台**：**总览**（桑基流向图、实时派工与执行中状态）、**项目**（四格控制台、自适应分工看板、目标与角色分工）、**任务图谱 (`#/dag`)**、**协作时间线 (`#/topology`)**、**运行记录**。
+- **明细与版本管理**：**派工明细**（实时输出/详情抽屉）、**改动**（GitLens 风格多仓库提交图谱、差异审阅与受控推送管理）、**成员会话**、**用量**。
+- **团队与设置**：**成员**（启停与模型切换）、**Agent 规范**（项目/用户级规则一致性扫描与只读查看）、**配置**（模型、预算与按仓库匹配的自动验收编辑器）。
 
-启动时如果有待合并的改动，终端会先列出来。
+## 配置概要 (`pi-agent.config.json`)
 
-默认会话存储在 `data/session.sqlite`，网页新建及其他命名会话存储在 `data/session.sqlite.sessions/<编号>/session.sqlite`（自定义配置时以配置中的存储路径为准）。重启后历史和没跑完的任务都还在，打开对应会话即可恢复。同一个存储同一时间只能开一个终端（有进程锁保护，第二个会拒绝启动）。
+可通过环境变量 `PI_AGENT_CONFIG` 指定自定义配置文件（保留兼容原 `PI_AGENT_*` 变量与 `.pi-agent/` 规则目录）：
 
-### 后台网页
+- **`orchestrator`**：总调度 API（`anthropic-compatible` / `openai-compatible` / `builtin`），支持 `modelId`、`modelIds`、`discoverModels`（`GET /v1/models`）与 `price`。
+- **`agents`**：CLI 成员（`claude` / `codex` / `gemini`，含 `extraArgs`、`models`、`defaultModel`）及内置工具链的 API 成员（如 `deepseek`，默认受 worktree 路径锁与 `api.bash` 白名单约束）。
+- **`roles` / `isolation` / `autonomy` / `budget` / `web`**：角色首选与回退链、Git worktree 快照与依赖目录联接（`linkDirs`）、按目标仓库生效的验收命令（`checks`）与最大修复次数、单轮预算上限与端口设置（默认 `8787`）。
 
-后台和终端共用同一个 Harness，终端里的每一步都实时同步到网页。网页**只看和控制**（中止本轮、开始新上下文、取消后台派工），不能下发任务；配置只读展示。
-
-| 页面 | 内容 |
-|---|---|
-| 总览 | 当前状态、累计派工 / 成功率 / 花费 / token、路由分配（见下）、正在执行的派工单（实时日志）和后台派工（最近一行输出、可取消）、最近运行、成员状态 |
-| 协作拓扑 | 总调度 → 成员 → 会话 → 每次派工：每个会话一条泳道，派工是时间条（重叠 = 并行，虚线斜纹 = 后台派工，闪烁 = 进行中），「基于某次改动」用虚线箭头连起来；没有活动的长空档会被压缩。上方是正在执行的路数、并行峰值、会话数；下方是后台派工列表（实时输出、可以取消） |
-| 项目 | 最终目标（GOAL.md）、分工表看板（待办 / 进行中 / 待验收 / 受阻 / 完成，每项有角色、负责成员、依赖、验收标准、改动）、角色分工 |
-| Agent 规范 | 每个成员实际读到的说明和配置文件、共同规则的同步状态、一致性检查，以及文件浏览器（设置里的密钥打码） |
-| 运行记录 | 按每次输入分组：你的输入 → 总调度的派工 → 各成员结果 → 最终回答；可以加载更早的历史 |
-| 派工明细 | 每次派工一行（含模型、改动编号），可按成员、状态筛选和搜索；点开看完整任务、实时输出、结果、模型、花费和改动 |
-| 改动 | 每个隔离派工的改动：状态（进行中 / 待合并 / 有冲突 / 已合并 / 已丢弃）、改了哪些文件、着色的差异，以及要在终端执行的命令 |
-| 成员 | API / CLI 角色的可用性、模型清单、真实工具权限与工作区方式，以及派工数、成功率、平均耗时、累计花费 |
-| 成员会话 | 会话登记表：成员、目录、最近使用与派工次数；CLI 显示外部续接命令，API 会话由 Lemma 续接 |
-| 用量 | 总调度模型的 token 和花费；派工活动图；各成员的派工次数、累计耗时、累计花费；按模型对比花费和成功率 |
-| 配置 | 当前生效的配置：配置文件、工作目录、存储、总调度协议 / 模型 / 密钥来源（不显示密钥）、成员参数、工作区隔离和花费上限 |
-
-**路由分配**是一张桑基流向图：总调度 → Claude / Codex / Gemini → 完成 / 执行中 / 失败 / 中止。带子宽度可以按**次数、耗时、花费**切换，时间范围可选全部 / 24 小时 / 1 小时；正在执行的线路上有流光。悬停看这条线的次数、平均耗时、花费和占比；点击成员、结果或某条线，跳到派工明细并自动筛选。
-
-- 只监听 `127.0.0.1`，并校验 Host 和 Origin，其他网站无法向它发起操作。不要把它暴露到局域网。
-- 端口被占用时自动往后找；`--no-web` 或配置 `"web": { "enabled": false }` 可以关掉后台。
-
-## 配置
-
-配置文件为项目根目录下的 `pi-agent.config.json`；可用 `PI_AGENT_CONFIG` 指定其他配置文件。
-
-**总调度模型**（`orchestrator`）：总调度本身需要一个 API 模型来做拆解和汇总，CLI 成员走它们各自的登录。
-
-| type | 说明 |
-|---|---|
-| `anthropic-compatible` | Anthropic Messages 协议。默认读取 `~/.claude/settings.json` 里的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`（与 Claude CLI 共用中转站），也可以设置环境变量 `PI_ORCHESTRATOR_API_KEY` 或写 `baseUrl`。 |
-| `openai-compatible` | OpenAI Chat Completions 协议（DeepSeek、Ollama、各种中转站），需填 `baseUrl`。 |
-| `builtin` | pi-ai 内置 provider，填 `provider`（如 `anthropic`、`openai`、`google`），读取对应的标准环境变量。 |
-
-`orchestrator.modelId` 是启动默认模型；中转站可用 `orchestrator.modelIds` 显式列出更多可切换 ID，同用配置的地址、协议、凭据、上下文上限和单价。请只填写服务实际支持的模型，并确认这些参数适用。内置 provider 使用它自己的模型目录与参数。选择器限当前总控 provider，不混入成员模型，不会发出聊天请求。
-
-项目配置启用了 `orchestrator.discoverModels: true`：打开 Ctrl+L 时通过 pi-ai 的目录刷新钩子读取当前服务 `GET /v1/models`（已有 `/v1` 前缀不会重复）。仅接受服务返回的 ID，8 秒超时，失败继续显示显式配置或上次缓存。目录 ID 保存在当前存储旁的 `.models.json`，无密钥；重启可恢复已发现模型的选择。设为 `false` 可关闭网络发现。服务返回目录不等于每个模型都有调用额度或支持当前协议；发现模型暂沿用中转站的上下文、输出上限及定价配置，不能把模板参数当作服务核实的规格。
-
-会话内切换模型不修改项目配置文件。启动默认模型不变时恢复会话选择；显式修改 `orchestrator.modelId` 或 provider 后按新配置更新。旧会话和任务无需迁移。
-
-**成员**（`agents.<claude|codex|gemini>`）：
-
-- `enabled`：开关
-- `extraArgs`：追加的 CLI 参数（权限 / 沙箱模式等，**不要在这里写模型**）。默认值：Claude `--permission-mode acceptEdits --allowedTools "Bash(npm test:*)" "Bash(npm run test:*)" "Bash(node --test:*)"`；Codex `sandbox_mode="workspace-write"`；Gemini `--approval-mode auto_edit --skip-trust`
-  - Claude 的 `acceptEdits` 只放行改文件，其他命令要审批，无头模式下会被直接拒绝。`--allowedTools` 单独放开了跑测试的命令，`git push`、带 `;` 拼接的命令等仍然会被拒绝。被拒绝的操作会附在结果末尾告诉总调度。需要放开别的命令时照这个格式加，比如 `"Bash(pytest:*)"`。
-  - Gemini 的 `--skip-trust`：无头模式下 Gemini 拒绝在未信任的目录运行，这个参数只对本次调用信任当前目录。
-- `models`：总调度可以选的模型清单，每项 `{ "id", "tier": "economy" | "standard" | "premium", "note", "price" }`。`note` 写给总调度看（适合什么活）；`price` 是每百万 tokens 的美元单价 `{ "input", "output", "cacheRead" }`，CLI 不自报花费时（Codex、Gemini）用它估算。
-- `defaultModel`：总调度没指定时用的模型；不填就用 CLI 自己的默认。旧配置里 `extraArgs` 写死的 `-m` 会自动当成默认模型。
-  - 当前配置：Claude 默认 `claude-sonnet-5-5`，可选 haiku（经济）/ opus（强力）；Codex 只列了你本机的 `gpt-6.1-sol`；Gemini 免费档只有 `gemini-3.5-flash-lite` 可用（pro 额度为 0，flash 常 503）。想让总调度有更便宜的选择，把中转站支持的模型加进 `models`。
-- `command`：手动指定启动命令；不填时会在 npm 全局目录里自动查找真实入口
-- `timeoutMinutes`、`maxOutputChars`
-
-**API 成员：DeepSeek**（`agents.deepseek`）：不需要本机装 CLI。派工时 Lemma 在 Pi Durable 里开一个子对话，用 DeepSeek 的 API 做模型，配上内置的 `read` / `write` / `edit` / `bash` 工具，在和其他成员一样的隔离 worktree 里干活。总调度看不到这些读写工具，只能派活给它。
-
-- 要用它，需要两样：**密钥**（默认读环境变量 `DEEPSEEK_API_KEY`，可以改 `api.apiKeyEnv`）和**模型**。DeepSeek 的模型名会变（旧的 `deepseek-chat` / `deepseek-reasoner` 已计划退役），所以默认不写死，按 [DeepSeek 官方文档](https://api-docs.deepseek.com/quick_start/pricing) 填当前的模型名和单价：
-
-  ```json
-  "agents": {
-    "deepseek": {
-      "defaultModel": "<模型名>",
-      "models": [{ "id": "<模型名>", "tier": "economy", "note": "按设计写代码、写测试", "price": { "input": 0, "output": 0 } }]
-    }
-  }
-  ```
-
-  缺一样时它显示为不可用并说明原因，「编码」角色由 Gemini / Codex 顶上。配好后用 `npm run check -- deepseek` 发一句话确认能调通。
-- `api`：`type`（`openai-compatible` 或 `anthropic-compatible`）、`baseUrl`（默认 `https://api.deepseek.com`；用中转站就换成中转站地址）、`apiKeyEnv`、`contextWindow`、`maxTokens`、`maxTurns`（一次派工最多几轮工具调用，默认 40）。
-- **读写只限工作目录**：`read` / `write` / `edit` 只能访问它的隔离副本，绝对路径、`..`、`~` 指到外面都会被拒绝（Pi Durable 的 `beforeTool` 钩子按子对话的工作目录检查）。
-- `api.bash`：`allowlist`（默认）只放行 `api.bashAllow` 里开头的命令（测试、构建、`git status/diff/log`、`ls`、`cat`、`grep` 等），不能用 `;` `&&` `|` `>` `$()` 串接或重定向，参数里也不能有绝对路径、`~` 或 `..`；`all` 全部放行；`off` 不给 bash。被拒绝的命令会告诉模型原因。
-- 会话 = 子对话：结果带回 `session_id`，总调度续接时 DeepSeek 能看到之前的对话。子对话本身是持久的，进程崩溃后重启会接着跑。可以同步派，也可以放后台。
-- 花费按 `models[].price` 计算；项目里有 `.pi-agent/RULES.md` 时，共同规则也会写进它的工作说明。
-
-**工作区隔离**（`isolation`）：`enabled`（默认 `true`，工作目录是 git 仓库时生效）；`linkDirs`（默认 `node_modules`、`.venv`、`venv`）：主目录里被 git 忽略的这些目录会用目录联接挂进 worktree，成员能直接跑测试。worktree 放在会话存储旁边的 `worktrees/` 里，不在你的仓库里。开工时在独立临时 Git 索引中给工作区拍快照，包含未提交改动及未跟踪、未忽略的新文件，不修改用户暂存区或当前分支。
-
-**角色**（`roles`）：数组，每项 `{ "name", "agent", "model", "fallback", "note" }`。`agent` 是首选成员，`fallback` 是首选不可用时依次尝试的成员，`model` 是这个角色用的模型（不填用成员默认）。默认：架构 → claude（`claude-opus-5-5`）、设计 → codex、编码 → deepseek（备选 gemini、codex）、审查 → claude（`claude-sonnet-5-5`）。
-
-**花费上限**（`budget`）：`perRunUsd`（默认 `3`，`null` 不限）。只统计成员的花费：Claude 自报，Codex / Gemini / DeepSeek 按 `models[].price` 计算，没配单价的计为 0。
-
-**总调度单价**（`orchestrator.price`）：中转站模型没有内置定价，配上 `{ "input", "output" }`（每百万 tokens）才能在后台看到总调度花了多少。
-
-**后台网页**（`web`）：`enabled`（默认 `true`）、`port`（默认 `8787`，演示模式用 `port + 1`；环境变量 `PI_AGENT_PORT` 可覆盖）。
-
-`stripEnv`：启动子 CLI 前去掉的环境变量。默认去掉 `CLAUDECODE`、`CLAUDE_CODE_*`、`ANTHROPIC_*`，让各 CLI 使用自己的配置文件，而不是宿主进程注入的变量。
-
-## Token 与效果对照评测
+## 测试与评测
 
 ```bash
-npm run bench:context                         # 本地模拟，只检验流程与裁剪风险
-npm run bench:context -- --real --repeats=1    # 当前总控 API，最多 8 次短请求，可能计费
+npm run typecheck          # TypeScript 类型检查
+npm test                   # 全量离线集成测试（faux 模型 + scripts/fake-agent.mjs，不消耗真实 API）
 ```
 
-评测固定同一成员报告、同一问题和精确验收答案，在独立 Durable 内存会话里比较完整报告与生产使用的 `summarizeResult` 裁剪策略。包含关键信息在首尾及中段的两类样本；多次重复交替策略顺序。输出 `data/benchmarks/<时间>-<模式>/results.json` 与 `report.md`，记录每次服务 usage（input/output/cacheRead/cacheWrite/totalTokens）、请求数、通过/失败、耗时、定价来源和代码版本。模型输出上限 128 tokens、最多两轮工具调用、关闭自动重试，整次限时四分钟；不启动成员 CLI，不修改工作区文件。
-
-本地模拟的 token 与费用标记为未测量。真实运行只使用服务返回的 usage，无单价且服务未报告账单时费用留空，不按免费计算；缺少任一组样本不计算节省比例。失败样本计入通过率，不只挑成功结果。此项只测成员结果裁剪对总控后续请求的影响，**不能代表端到端编码成功率、成员续接收益或多 Agent 总成本**，也不能把一次小样本结果当成稳定收益。中段信息可能被截断，评测刻意保留此反例。
-
-仓库保留了[首次真实测量记录](docs/benchmarks/initial-context-ablation.md)：固定报告小样本中裁剪组 token 少约 44%，但没有更高通过率，也没有更快；不能据此宣称整体性能提高。
-
-另有单 Agent 与团队的完整数据查询任务对照：
-
-```bash
-npm run bench:collaboration                    # 本机固定响应，验证完整链路，不产生模型费用
-npm run bench:collaboration -- --real --repeats=1  # 显式请求付费模型，每样本最多 32 次请求
-```
-
-三个固定任务覆盖金额汇总、缺失信息、负值与零；两组读取相同本机 HTTP 数据。单 Agent 自己查询计算，团队使用生产宿主完成拆解、成员查询、结构化字段交接、独立复核和逐项验收。记录所有总控与成员请求的用量、缓存、费用来源、成功率、耗时和失败，JSON 与 Markdown 报告写入 `data/benchmarks/collaboration-*`。每样本限时 90 秒、单次输出最多 1024 tokens、关闭自动重试；真实模式要求兼容 API 总控，两组使用相同模型与服务。
-
-模拟用量与费用留空，人工介入需求未测量；这组小任务只提供可复现的工程基线，不证明行业任务质量，也没有“团队一定更省 token”的结论。真实模式须主动运行，不会在测试或默认评测中调用付费模型。
-
-## 测试
-
-```bash
-npm test
-```
-
-用模拟 CLI（`scripts/fake-agent.mjs`）和 pi-ai 的 faux 模型做测试，不调用真实 API：
-
-- `npm run test:settings`：终端成员配置的新增、启停、模型与凭据变更即时生效；配置持久化、取消、忙碌保护和外部编辑冲突检测
-- `npm run test:collaboration`：多分支联合集成与重验/修复、Durable 自动依赖推进、独立复核与代码盲审、路径契约（`scope`）拦截、任务恢复、结构化字段交接、并发与预算原子准入、同服务限流、MCP 授权与完整流程模拟对照；已纳入 `npm test`
-- `npm run test:custom-agents`：固定响应的本机 HTTP 服务验证不同 API 协议成员并行、隔离、后台、续接、取消、进程恢复，以及真实终端的配置向导与网页同步；不调用付费模型
-
-- `npm run test:dialogue` / `test/conversation.ts`：检查实际发给模型的身份、模型配置与对话历史，验证追问、纠正、重启、重置和独立会话；检查普通对话无项目写入副作用、授权后执行工具仍可用，模拟回答不作为真实模型质量证明
-- `test/smoke.ts`：并行派活、汇总、会话续接、续接时回到原目录、错误目录处理
-- `test/crash.ts`：成员执行到一半时强杀整个进程树，重启后续接同一会话并完成
-- `test/conventions.ts`：用临时项目和临时用户目录检查规范文件的扫描归类、一致性检查、密钥打码、只能按编号读文件，以及共同规则的新建 / 更新 / 保留原内容 / 过期检测
-- `test/board.ts`：拆任务 → 带目标和任务上下文派工 → 验收；ASSIGN.md 的内容、手动修改被另存；已有的 GOAL.md 不被总调度覆盖
-- `test/api-member.ts`：用 faux 模型代替 DeepSeek API：子对话里真的用 write / edit 改 worktree 的文件、bash 白名单拦下越界命令、总调度拿不到读写工具、续接同一个子对话、后台派工、按单价算花费；没配模型或密钥时不可用
-- `test/lead.ts`：总调度把子目标交给子调度，子调度拆任务、派成员（同步 + 后台）、被提醒收齐后台派工后汇报；子调度没有再开子调度的工具；花费算在用户那一轮；子任务挂在上级任务下；后台拓扑和派工明细里能看到子调度和它派的工
-- `test/jobs.ts`：后台派工立刻返回；`wait_jobs` 的 all / any；没人等时结果自动发回并触发总调度继续；后台结果触发的运行不重置花费；总调度取消、任务退回待办；同一个会话不能同时被两次派工续接
-- `test/steer.ts`：插话在同一次运行里被总调度看到、排队的任务在这一轮之后处理、中止后 `continue` 续跑、手动压缩
-- `test/isolation.ts`：临时 git 仓库里走完整流程：模型白名单、在 worktree 里干活、快照包含未提交改动、依赖目录挂载、`based_on`、估算花费、超预算拦截、`/apply` 不冲掉主目录的未提交改动、`/drop` 删除分支
-- `test/web.ts`：通过 `test/faux-main.ts` 模拟入口启动真实终端与后台服务，从 stdin 下发任务，检查后台接口、Host/Origin 校验、网页不能下发任务、SSE 实时推送（包括后台派工的状态和实时输出）、派工汇总、拓扑接口（多会话泳道、依赖、并行峰值）和历史分页
-- `test/conversations-web.ts`：网页新建、切换、重命名与过期请求保护；比较切换前后的原始聊天、项目任务、成员会话、派工、用量和改动，验证进程重启后历史与选中状态仍保留
-- `test/admin-rebind.ts`：HTTP 服务原位切换会话，同一连接、端口和启动时间保持；验证实时连接重取快照、过期控制请求拒绝、失败回滚及订阅释放
-- `test/terminal.ts`：检查实际使用官方消息、工具、编辑器和选择器实例，验证关系树导航、模型搜索、刷新取消、思考块、流式参数、工具展开、控制序列过滤、窄窗口和输入隔离
-- `test/model-selection.ts`：模型选择写入 Durable，重启恢复、独立会话隔离、后续真实请求路由（假模型）、运行中拒绝切换、配置变更及目录刷新不发出聊天请求
-- `npm run test:metrics`：跨页消息统计与缓存失效、原生列表显示、服务模型目录发现/重启缓存/失败降级、固定报告 A/B 评测和未测量标记
-- `test/terminal-model-selection.ts`：真实终端入口使用原生模型选择器，验证网页与拓扑同步、草稿保留、跨工作会话模型隔离及进程重启恢复，不调用模型服务
-- `test/terminal-state.ts`：原生消息和任务图订阅、完整模型消息、生成文档、嵌套工具、滑动历史窗口、重置后记录保留、最新子对话列表及停止后不再更新，不产生模型请求
-- `test/terminal-child-view.ts`：通过真实终端选择器只读查看成员子对话，验证输入和重置不会修改子对话、返回后恢复草稿，终端与网页服务不重启
+常用专项测试与基准脚本：`test:collaboration`（集成/盲审/契约/恢复）、`test:conversations`（多会话切换/Git 工作台/网页控制）、`test:terminal`（终端组件与交互）、`bench:context` 与 `bench:collaboration`（评测说明见 [初始对照记录](docs/benchmarks/initial-context-ablation.md)）。
 
 ## 代码结构
 
-| 文件 | 作用 |
-|---|---|
-| `src/cli-runner.ts` | 启动子进程：提示词走 stdin、超时、中止时杀进程树 |
-| `src/agents.ts` | 各 CLI 适配器：参数、会话续接、输出解析、进度摘要 |
-| `src/tools.ts` | Pi Durable 工具：`ask_*`（同步 / 后台）、`wait_jobs`、`cancel_job`、分工表工具，后台派工任务，以及总调度的系统提示 |
-| `src/dispatch.ts` | 一次派工的完整过程（选模型、预算、隔离、带上下文、调用 CLI、提交改动、更新分工表），同步和后台派工共用 |
-| `src/api-member.ts` | API 成员（DeepSeek 等）：注册模型、读写工具、路径契约拦截与 bash 白名单、工作说明、在 Pi Durable 子对话里执行派工 |
-| `src/code-tools.ts` | API 编码/审查成员的只读 ACI 代码感知工具：`list_files`、`outline_file`、`find_symbol`、`search_code`、`git_diff` |
-| `src/scope.ts` | 任务级路径边界契约（`scope.allow` / `scope.forbid`）校验与实时/收尾越界拦截 |
-| `src/lead.ts` | 子调度：`delegate_to_lead` 工具、子负责人的工作说明、子对话里的进度和汇报汇总 |
-| `src/jobs.ts` | 后台派工：Pi Durable 里的记录、结果格式、本进程里的取消开关和实时输出 |
-| `src/board.ts` | 共同目标（GOAL.md）和分工表：任务数据、写出 ASSIGN.md、给总调度和成员的上下文 |
-| `src/task-readiness.ts` | 基于分工表计算任务就绪队列与前置依赖等待原因 |
-| `src/task-workflow.ts` | Durable 自动依赖推进、独立复核（含 `blind` 代码盲审）与上限内自动返工闭环 |
-| `src/task-lifecycle.ts` | 任务验收完成前的前置依赖、机器规则、独立复核与路径契约校验 |
-| `src/task-review.ts` | `review_task` 验收工具：针对最新 `result_id` 记录通过、返工或受阻依据 |
-| `src/task-recovery.ts` | `recover_task` 与任务受阻恢复计划准备（续接 / 补资料 / 换成员） |
-| `src/task-commands.ts` | 终端 `/tasks` 与 `/task inspect|resume|supply|reassign|cancel` 恢复命令 |
-| `src/integrations.ts` | 多 worktree 联合集成任务、`rerun` 基线重验与 `repair` 冲突/联调失败独立修复闭环 |
-| `src/integration-git.ts` | 联合集成专用私有 Git index 三方合并、基线/来源过期校验与冲突标记检测 |
-| `src/deliverables.ts` | `lemma.delivery.v1` 结构化交付解析与按字段/偏移交接片段提取 |
-| `src/results.ts` | 成员完整结果持久化与 `read_result` 分页读取 |
-| `src/resources.ts` | 团队/成员/API origin 并发限制、预算预留与费用账本 |
-| `src/operations.ts` | 外部 HTTP 写操作意图记录与未知状态跨成员拦截 |
-| `src/mcp-tools.ts` | 基于官方 MCP SDK 的只读 Streamable HTTP 工具发现与成员隔离授权 |
-| `src/conventions.ts` | Agent 规范文件：扫描归类、一致性检查、打码读取、共同规则同步 |
-| `src/git.ts` | 隔离用到的 git 操作：快照、worktree、提交、差异、合并回主目录 |
-| `src/changes.ts` | 改动记录（存成会话存储旁边的 JSON 文件） |
-| `src/change-ops.ts` | 终端里的合并 / 丢弃 / 清理 |
-| `src/sessions.ts` | 命名会话目录、独立存储和项目看板隔离 |
-| `src/repair.ts` | 有次数和预算限制的自动修复 |
-| `src/learning.ts` | 经配置验收通过的修复记录与按需检索 |
-| `src/native-terminal-components.ts` | 官方 coding-agent 消息与工具组件、原生工具展示钩子与终端控制序列过滤 |
-| `src/native-selectors.ts` | 官方会话列表与关系树的纯展示适配，沿用 Durable ID，禁用文件删除 |
-| `src/model-selection.ts` | Durable agent 模型选择、启动恢复和原生模型目录接口适配 |
-| `src/context-benchmark.ts` | 完整与裁剪报告的 Durable A/B 测量、usage 汇总与失败计数 |
-| `src/result-summary.ts` | 生产派工和对照评测共用的结果裁剪策略 |
-| `scripts/benchmark-context.ts` | 本地/真实评测入口，输出 JSON 和 Markdown 结果 |
-| `src/terminal.ts` | 组合官方消息与工具组件，提供会话选择器、任务面板和持久编辑器 |
-| `src/terminal-state.ts` | 原生 conversation/task graph 订阅、ConversationTranscript、完整模型消息与只读子对话列表 |
-| `src/models.ts` | 总调度模型 |
-| `src/app.ts` | 打开 Harness（SQLite + 工具 + 模型） |
-| `src/printer.ts` | 终端实时显示进度 |
-| `src/main.ts` | 终端入口（交互 / 单次），交互模式顺带启动后台 |
-| `src/admin.ts` | 后台网页服务（嵌在终端进程里）：只读接口 + 控制 + SSE + 派工汇总 |
-| `src/view.ts` | 把对话条目、实时状态和工具结果转成前端用的 JSON |
-| `web/` | 后台前端（原生 ES 模块，无构建步骤、无依赖）：`js/views.js` 各页面，`js/topology.js` 协作拓扑，`js/store.js` 数据同步，`js/sankey.js` 流向图 |
-| `scripts/check-agents.ts` | 实测已启用的本机 CLI 与 API 成员能否调通 |
-| `scripts/fake-agent.mjs` | 模拟 CLI，供测试使用 |
+- `src/main.ts`、`src/app.ts`：CLI 入口、Pi Durable Harness 初始化、进程锁与后台联动。
+- `src/terminal.ts`、`src/terminal-state.ts`、`src/native-*.ts`、`src/printer.ts`：终端交互、Pi Coding Agent 官方组件复用与流式状态。
+- `src/tools.ts`、`src/dispatch.ts`、`src/agents.ts`、`src/cli-runner.ts`、`src/api-member.ts`、`src/lead.ts`：派工引擎、CLI/API 成员接入、只读代码工具（`src/code-tools.ts`）与子调度。
+- `src/board.ts`、`src/task-*.ts`、`src/scope.ts`、`src/jobs.ts`、`src/repair.ts`、`src/learning.ts`：分工表、依赖就绪、自动推进、独立复核、受阻恢复与有限自动修复。
+- `src/git.ts`、`src/changes.ts`、`src/change-ops.ts`、`src/integrations.ts`、`src/integration-git.ts`、`src/git-workbench.ts`：worktree 隔离、改动管理、多分支联合集成、推送审批与终端合并交互。
+- `src/admin.ts`、`src/view.ts`、`web/`：本地 HTTP/SSE 服务与无构建 ES Module 后台界面（总览、项目、任务图谱、协作时间线、改动工作台等）。
