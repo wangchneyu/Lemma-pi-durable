@@ -243,7 +243,7 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 			: api.bash === "all"
 				? "- 可以用 bash 运行命令（测试、构建、查看）。"
 				: `- 可以用 bash 运行这些命令（一次一条，不能串接或重定向）：${api.bashAllow.join("、")}。别的命令会被拒绝。`,
-		readonly ? "- 只读分析与审查，不要尝试修改文件。" : "- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（Lemma 会替你提交到独立分支）。",
+		readonly ? "- 只读分析与审查，不要尝试修改文件。" : "- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（Lemma 会替你提交到独立分支）。\n- 尽量批量化工具调用：同一轮可并行读取多个文件，完成代码修改后再一次性运行完整测试命令，减少碎步式往返轮次。",
 		"- 做完后用中文简要汇报：做了什么、改了哪些文件、测试结果、还有什么没做或有风险。",
 		...(rules ? ["", "项目的共同规则（.pi-agent/RULES.md）：", rules] : []),
 	].join("\n");

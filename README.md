@@ -58,13 +58,13 @@ npm start
 
 ## 效果评测
 
-项目内置分层编码基准与消融评测套件（3 层难度 × 3 题 × 独立隐藏测试集，运行 `npm run bench:coding` 或 `--real` 实测）。基于官方 DeepSeek API（`deepseek-v4-pro` 总控/盲审 + `deepseek-flash` 编码，零限流、含真实费用）的 27 组实测结果（完整数据与局限分析见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)）：
+项目内置分层编码基准与消融评测套件（Tier 1–3 + 故障注入 Chaos + `Tier-Edge` 共 13 题，运行 `npm run bench:coding` 或 `--real` 实测）。基于官方 DeepSeek API（`deepseek-v4-pro` 总控/盲审 + `deepseek-flash` 编码与测试，零限流、含真实费用）的 P1/P2 实测汇总（完整数据与归因见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)）：
 
 | 评测维度 | 真实模型实测结果 | 说明 |
 |---|---|---|
 | **Tier 1 单跳快路消融** | `lemma-adaptive` **3/3 全过（6/6，100%）**，平均 **7.0 请求 / 13.1s** | 对比去掉快路的 `ablation-no-fastpath`（1/3，27.0 请求 / 148.4s / \$0.2920），请求 **-74%**、耗时 **-91%**；快于 `single` 基线（2/3，24.0s） |
-| **Tier 2/3 重型闭环实测** | 优化后 Tier 2 `lemma-adaptive`（完整盲审+契约）从 **0/3 提升至 2/3（67%，4/6）**，追平无盲审组且高于 `single`（1/3）；Tier 3 触发 **2 次**路径契约拦截 | 盲审预内联 `git_diff`、零新建审查 worktree 与 `integrate_changes(wait: true)` 有效打通 Tier 2 闭环；Tier 3 多分支推理合流在 210s 限时内仍待进一步降轮次 |
-| **离线全链路确定性验证** | **27/27 组逻辑断言全通过**（快路、盲审返工、路径契约拦截与联合集成） | `npm run bench:coding` / `test/coding-benchmark-suite.ts` 零费用可复现 |
+| **Tier 2/3 重型闭环实测** | P1 优化后 Tier 2 `lemma-adaptive` 达 **2/3（67%，4/6）**；P2 攻克 Tier 3 首例端到端集成通过（`t3-ledger-engine`，397.1s，3 次契约拦截后自愈合流） | Pre-Flight Gate 将提前交卷（`PREMATURE_STOP`）与死循环降至 **0**；P2 主表 8 题其余 6 次失败精准定位为 `TIMEOUT`（1 次断言未全过） |
+| **Tier-Edge 与离线回归** | 边缘防御真实路由命中 **2/2（100%）**，`edge-ambiguity-wallet` **PASS（2/2）**；离线 37 组 P2 全量回归 + 专项单测 **100% 通过** | `npm run bench:coding` / `test/coding-benchmark-suite.ts` 零费用覆盖快慢路、盲审、契约自愈、Pre-Flight Gate 与死循环熔断 |
 
 ## 测试与评测
 

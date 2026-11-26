@@ -60,12 +60,42 @@
 | **Tier 3 任务通过** | 0/3 (0%) | 0/3 (0%) | `t3-ledger-engine`(34 reqs) 与 `t3-task-dag`(32 reqs) 推进至 210s 超时 |
 | **Tier 3 路径契约拦截** | 1 次 | **2 次** | 越界写入均被实时拦截，但多轮推理总耗时仍超过 210s 上限 |
 
+---
+
+## P2 升级实测（`3c307e7` + P2 框架，不与 P1 基线混算）
+
+- **P2 升级项**：Tier 1–3 分级预算 + 2s 活跃心跳、`maxTokens >= 8192`、6 类细粒度终态分类、Pre-Flight Gate 强制预检门禁、Tier 3 `coder`/`tester` 双成员全路由 `deepseek-flash`、轨迹路由/死循环检测、2 道故障注入自愈题（Chaos A/B）与 2 道 `Tier-Edge` 独立边缘防御题（C/D，共 13 题）。
+- **离线确定性全链路回归**：`npm run bench:coding`（37 次全量运行）与 `node --no-warnings test/coding-benchmark-suite.ts` **100% 通过**：`lemma-adaptive` 在 Tier 1–3 核心 **11/11（100%）**、Tier-Edge **2/2（100%）**，专项验证 `LOOP_DETECTED` 熔断、Pre-Flight Gate 提前交卷拦截与 `PREMATURE_STOP` 分类（归档 [coding-p2-offline/report.md](../../data/benchmarks/coding-p2-offline/report.md)）。
+- **真实模型 P2 快速实测（`repeats=1`，官方 DeepSeek：`deepseek-v4-pro` 总控/盲审 + `deepseek-flash` 编码与测试，归档 [coding-p2-t23edge-r1/report.md](../../data/benchmarks/coding-p2-t23edge-r1/report.md)）**：
+
+### P2 主表（Tier 2 + Tier 3 `lemma-adaptive`，8 次运行）
+
+| 实验臂 | 任务通过率 | 隐藏用例通过率 | 路由准确率 | 自愈/契约拦截 | 失败归因分布 | 平均请求 | 平均耗时 | 总 Token | 美元费用 |
+|---|---:|---:|---:|---|---|---:|---:|---:|---:|
+| `lemma-adaptive` | 1/8 (13%) | 4/14 (29%) | 2/8 (25%) | 自愈 1 / 拦截 9 | `TIMEOUT: 6, PREMATURE_STOP: 0, ASSERTION_FAIL: 1, LOOP: 0, TRUNC: 0` | 29.3 | 325.8s | 2,899,583 | \$1.3713 |
+
+### Tier-Edge 边缘防御独立评测（2 次运行，不计入主分）
+
+| 实验臂 | 任务通过率 | 隐藏用例通过率 | 路由准确率 | 自愈/契约拦截 | 失败归因分布 | 平均请求 | 平均耗时 | 总 Token | 美元费用 |
+|---|---:|---:|---:|---|---|---:|---:|---:|---:|
+| `lemma-adaptive` | 1/2 (50%) | 3/4 (75%) | **2/2 (100%)** | 自愈 1 / 拦截 1 | `TIMEOUT: 1, PREMATURE_STOP: 0, ASSERTION_FAIL: 0, LOOP: 0, TRUNC: 0` | 29.0 | 223.5s | 623,054 | \$0.1919 |
+
+### P2 真实实测关键发现与归因
+
+1. **首个 Tier 3 真实模型端到端合流通过 & 心跳机制生效**：`t3-ledger-engine` 在经历 **3 次**路径契约越界拦截并自愈收敛后，借助心跳延展至 **397.1s（43 请求，\$0.2876）** 完成多分支三方集成并通过隐藏测试（`PASS`，`selfHealed=true`）；Tier 3 四题共实测拦截 **7 次**越界修改。
+2. **Pre-Flight Gate 根治提前交卷**：`PREMATURE_STOP` 为 **0**，`t2-csv-parser` 与 `t3-event-bus` 均被门禁实测拦截 1 次并注入补全指令（`t3-event-bus` 从 P1 的 5 请求提前结束推进至 39 请求）。
+3. **边缘防御真实有效**：`edge-ambiguity-wallet` **PASS（2/2，\$0.0553）**，无交互模式下显式在源码注释声明默认假设且零破坏旧契约；`edge-guardrail-tamper` 100% 启用只读护栏并拦截 1 次测试篡改尝试，最终因 30 请求 / 271.2s 超时仅通过 1/2 用例。
+4. **核心瓶颈显形**：6/7 次主表与边缘失败均精确归因为 `TIMEOUT`（含 `t2-semver-sort` 代码已通过隐藏测试 `2/2` 但后台盲审未及合流、以及 `t2-rate-limiter` / `t3-event-bus` 各自出现 1 次模型 `tokenTruncated` 信号），零 `PREMATURE_STOP` 与零 `LOOP_DETECTED`，说明后续关键在于减少推理模型在审阅/协调回合的纯文本消耗与并发时延。
+
 ## 复现命令
 
 ```bash
-# 离线全套 27 组链路验证（0 费用）
+# P2 离线全套 37 组链路验证（0 费用）
 npm run bench:coding
 
-# 官方 DeepSeek 真实对照与消融（deepseek-v4-pro 总控/盲审 + deepseek-flash 编码）
-npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --repeats=1
+# P2 官方 DeepSeek Tier 2 / Tier 3 / Tier-Edge 快速实测
+npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=2,3,edge --arms=lemma-adaptive --repeats=1 --out=data/benchmarks/coding-p2-t23edge-r1
+
+# P2 官方 DeepSeek 稳定性压测（repeats=3）
+npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=2,3,edge --arms=lemma-adaptive --repeats=3 --out=data/benchmarks/coding-p2-t23edge-r3
 ```

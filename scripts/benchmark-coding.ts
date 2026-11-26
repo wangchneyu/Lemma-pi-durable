@@ -1,7 +1,7 @@
-// P1 分层编码基准与消融实验 CLI 入口：
-//   npm run bench:coding                                 # 离线模拟验证全 9 题 × 对照/消融链路（0 费用）
+// P2 分层编码基准与消融实验 CLI 入口：
+//   npm run bench:coding                                 # 离线模拟验证全 13 题 × 对照/消融链路（0 费用）
 //   npm run bench:coding -- --real --repeats=1           # 使用当前配置模型跑真实定量对照与消融实验
-//   npm run bench:coding -- --real --tier=1,2 --arms=single,lemma-adaptive
+//   npm run bench:coding -- --real --tier=2,3,edge --arms=lemma-adaptive --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -20,7 +20,11 @@ const real = process.argv.includes("--real");
 const repeats = Number(process.argv.find((a) => a.startsWith("--repeats="))?.split("=")[1] ?? 1);
 const tierArg = process.argv.find((a) => a.startsWith("--tier="))?.split("=")[1];
 const tiers = tierArg
-	? tierArg.split(",").map((s) => Number(s.trim())).filter((n): n is BenchmarkTier => n === 1 || n === 2 || n === 3)
+	? tierArg
+		.split(",")
+		.map((s) => s.trim().toLowerCase())
+		.map((s): BenchmarkTier | undefined => (s === "edge" ? "edge" : s === "1" || s === "2" || s === "3" ? (Number(s) as 1 | 2 | 3) : undefined))
+		.filter((n): n is BenchmarkTier => n !== undefined)
 	: undefined;
 const armsArg = process.argv.find((a) => a.startsWith("--arms="))?.split("=")[1];
 const arms = armsArg ? (armsArg.split(",").map((s) => s.trim()).filter(Boolean) as BenchmarkArm[]) : undefined;
@@ -48,7 +52,7 @@ if (real && orchAgent) {
 }
 const outDir = resolve(
 	process.argv.find((a) => a.startsWith("--out="))?.slice(6) ??
-		join("data", "benchmarks", `coding-p1-${new Date().toISOString().replace(/[:.]/g, "-")}`),
+		join("data", "benchmarks", `coding-p2-${new Date().toISOString().replace(/[:.]/g, "-")}`),
 );
 mkdirSync(outDir, { recursive: true });
 
@@ -64,7 +68,7 @@ const save = () => {
 	writeFileSync(join(outDir, "report.md"), renderCodingBenchmarkReport(meta, runs), "utf8");
 };
 
-console.log(real ? `开始真实模型 P1 分层编码基准（model=${base.orchestrator.modelId}, repeats=${repeats}，可能产生费用）…` : "开始离线模拟 P1 分层编码基准（验证 9 题 + 对照/消融链路，不调用付费 API）…");
+console.log(real ? `开始真实模型 P2 分层编码基准（model=${base.orchestrator.modelId}, repeats=${repeats}，可能产生费用）…` : "开始离线模拟 P2 分层编码基准（验证 13 题 + 对照/消融/自愈/边缘防御链路，不调用付费 API）…");
 
 try {
 	await runTieredCodingBenchmark({
@@ -78,7 +82,10 @@ try {
 		onRun(run) {
 			runs.push(run);
 			save();
-			console.log(`[T${run.tier}] ${run.taskId} · ${run.arm} => ${run.success ? "PASS" : "FAIL"} (${run.hiddenPassed}/${run.hiddenTotal}, ${run.requests} reqs, ${run.durationMs}ms)`);
+			const tag = run.tier === "edge" ? "EDGE" : `T${run.tier}`;
+			const routeTag = run.trajectory.routingMatched ? "route:OK" : "route:MISS";
+			const healTag = run.selfHealed ? " · selfHealed" : "";
+			console.log(`[${tag}] ${run.taskId} · ${run.arm} => ${run.status} (${run.hiddenPassed}/${run.hiddenTotal}, ${run.requests} reqs, ${run.durationMs}ms, ${routeTag}${healTag})`);
 		},
 	});
 } finally {
