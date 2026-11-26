@@ -1,6 +1,19 @@
-# Lemma
+<!-- BRAND_START -->
+<div align="center">
 
-> 把复杂目标，化为可验证的每一步。
+<img src="docs/assets/logo.webp" alt="Lemma Logo" width="112" />
+
+<h1>Lemma</h1>
+
+<p><strong>把复杂目标，化为可验证的每一步。</strong></p>
+
+![Node >=22.19](https://img.shields.io/badge/Node-%3E%3D22.19-339933?style=flat-square&logo=nodedotjs&logoColor=white)
+![Tier 1 FastPath](https://img.shields.io/badge/Tier%201%20FastPath-3%2F3%20PASS%20%7C%20-91%25%20%E8%80%97%E6%97%B6%20%7C%20-74%25%20%E8%AF%B7%E6%B1%82-2ea043?style=flat-square)
+![Offline Suite](https://img.shields.io/badge/Offline%20Regression-13%2F13%20Adaptive%20%C2%B7%2037%20Runs-58a6ff?style=flat-square)
+![Bench Chart](https://img.shields.io/badge/Auto%20Bench%20SVGs-3%20Batches-d29922?style=flat-square)
+
+</div>
+<!-- BRAND_END -->
 
 **Lemma（引理）是一个基于 [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable)、面向 coding 场景的多 Agent 协同系统。**
 它将不同能力的模型与 CLI 组织成有明确职责、独立上下文、结构化交接与独立复核机制的工程团队，完成仓库分析、并行开发、盲审返工、多分支联合集成、自动验收与人工确认合并。
@@ -58,13 +71,38 @@ npm start
 
 ## 效果评测
 
-项目内置分层编码基准与消融评测套件（Tier 1–3 + 故障注入 Chaos + `Tier-Edge` 共 13 题，运行 `npm run bench:coding` 或 `--real` 实测）。基于官方 DeepSeek API（`deepseek-v4-pro` 总控/盲审 + `deepseek-flash` 编码与测试，零限流、含真实费用）的 P1/P2 实测汇总（完整数据与归因见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)）：
+<!-- BENCH_START -->
+以下图表与汇总表均由 `npm run bench:chart`（[render-bench-charts.mjs](scripts/render-bench-charts.mjs)）**直接扫描 `data/benchmarks/` 下实测 JSON 自动渲染**（Tier 1 快路对比去快路请求 **-74%**、耗时 **-91%**；完整归因与逐题报告见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)）。最近一次离线全链路回归（`coding-p2-offline`）共 **37 次运行**，`lemma-adaptive` 核心与 `Tier-Edge` 均全量跑通。
 
-| 评测维度 | 真实模型实测结果 | 说明 |
-|---|---|---|
-| **Tier 1 单跳快路消融** | `lemma-adaptive` **3/3 全过（6/6，100%）**，平均 **7.0 请求 / 13.1s** | 对比去掉快路的 `ablation-no-fastpath`（1/3，27.0 请求 / 148.4s / \$0.2920），请求 **-74%**、耗时 **-91%**；快于 `single` 基线（2/3，24.0s） |
-| **Tier 2/3 重型闭环实测** | P1 优化后 Tier 2 `lemma-adaptive` 达 **2/3（67%，4/6）**；P2 攻克 Tier 3 首例端到端集成通过（`t3-ledger-engine`，397.1s，3 次契约拦截后自愈合流） | Pre-Flight Gate 将提前交卷（`PREMATURE_STOP`）与死循环降至 **0**；P2 主表 8 题其余 6 次失败精准定位为 `TIMEOUT`（1 次断言未全过） |
-| **Tier-Edge 与离线回归** | 边缘防御真实路由命中 **2/2（100%）**，`edge-ambiguity-wallet` **PASS（2/2）**；离线 37 组 P2 全量回归 + 专项单测 **100% 通过** | `npm run bench:coding` / `test/coding-benchmark-suite.ts` 零费用覆盖快慢路、盲审、契约自愈、Pre-Flight Gate 与死循环熔断 |
+![Lemma Adaptive 自适应路由架构](docs/assets/bench-architecture-flow.svg)
+
+![Tier 1 单跳快路消融对比](docs/assets/bench-tier1-fastpath.svg)
+
+![分层架构闭环优化前后演进](docs/assets/bench-p1-optimization.svg)
+
+![全量实验臂综合效能与开销对比](docs/assets/bench-ablation-matrix.svg)
+
+### 优化前后演进对照（`lemma-adaptive`）
+
+| 分层 | 基线 `coding-p1-deepseek` (`efbf84d`) | `coding-p1-t23-opt` (`e1589a4`) | `coding-p2-t23edge-r1` (`3c307e7`) |
+|---|---:|---:|---:|
+| **Tier 1** | 3/3 (100%) · 13.1s | 未重测 | 未重测 |
+| **Tier 2** | 0/3 (0%) · 77.3s | **2/3 (67%)** · 隐测 4/6 · 契约拦截 2 · 175.9s | **0/4 (0%)** · 隐测 3/8 · 契约拦截 2 · 249.0s |
+| **Tier 3** | 0/3 (0%) · 101.2s | **0/3 (0%)** · 隐测 0/4 · 契约拦截 2 · 166.5s | **1/4 (25%)** · 隐测 1/6 · 契约拦截 7 · 402.5s |
+
+### 全量实验臂实测汇总（JSON 自动聚合）
+
+| 实验臂与批次 | 任务通过率 | 隐藏用例 | 路由准确率 | 平均请求 | 平均耗时 | 总 Token | 费用 | 机制观测 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `lemma-adaptive` (基线 (coding-p1-deepseek)) | 3/9 (33%) | 6/16 (38%) | — | 9.9 | 63.9s | 694k | $0.2574 | 快路 3 · 契约拦截 1 |
+| `single` (基线 (coding-p1-deepseek)) | 3/9 (33%) | 6/16 (38%) | — | 5.2 | 43.4s | 195k | $0.1134 | — |
+| `ablation-no-fastpath` (基线 (coding-p1-deepseek)) | 1/3 (33%) | 2/6 (33%) | — | 27.0 | 148.4s | 753k | $0.2920 | — |
+| `ablation-no-blind` (基线 (coding-p1-deepseek)) | 2/3 (67%) | 4/6 (67%) | — | 16.7 | 80.1s | 363k | $0.0980 | — |
+| `ablation-no-scope` (基线 (coding-p1-deepseek)) | 0/3 (0%) | 0/4 (0%) | — | 14.0 | 81.4s | 360k | $0.1698 | 契约拦截 1 |
+| `lemma-adaptive` (P1-opt T2+T3 (coding-p1-t23-opt)) | 2/6 (33%) | 4/10 (40%) | — | 18.8 | 171.2s | 1.07M | $0.4947 | 契约拦截 4 |
+| `lemma-adaptive` (P2 T2+T3 (coding-p2-t23edge-r1)) | 1/8 (13%) | 4/14 (29%) | 2/8 (25%) | 29.3 | 325.8s | 2.90M | $1.3713 | 契约拦截 9 · 自愈 1 · 集成 1 · 门禁 2 |
+| `lemma-adaptive [Tier-Edge]` (独立边缘防御 (coding-p2-t23edge-r1)) | 1/2 (50%) | 3/4 (75%) | 2/2 (100%) | 29.0 | 223.5s | 623k | $0.1919 | 契约拦截 1 · 自愈 1 |
+<!-- BENCH_END -->
 
 ## 测试与评测
 
