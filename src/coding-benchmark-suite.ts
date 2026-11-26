@@ -357,7 +357,7 @@ export async function runTieredCodingBenchmark(options: {
 									return (model: any, input: any, settings: any) => {
 										if (requests >= 36) throw new Error("该样本达到 36 次模型请求上限");
 										requests++;
-										const stream = target.streamSimple(model, input, { ...settings, maxTokens: 2048, temperature: 0, maxRetries: 0 });
+										const stream = target.streamSimple(model, input, { ...settings, maxTokens: 2048, temperature: 0, maxRetries: options.simulated ? 0 : 2 });
 										pending.push(
 											stream.result().then((msg) => {
 												observations.push(msg.usage);
@@ -437,8 +437,8 @@ export async function runTieredCodingBenchmark(options: {
 							memory: true,
 							extensions: singleExt ? [singleExt] : [],
 							settings: {
-								retry: { enabled: false, maxRetries: 0 },
-								stream: { timeoutMs: 45_000, maxRetries: 0, cacheRetention: "none" },
+								retry: options.simulated ? { enabled: false, maxRetries: 0 } : { enabled: true, maxRetries: 2 },
+								stream: { timeoutMs: options.simulated ? 45_000 : 60_000, maxRetries: options.simulated ? 0 : 2, cacheRetention: "none" },
 								compaction: { enabled: false },
 								afterFailedRun: "keep",
 							},
@@ -449,7 +449,7 @@ export async function runTieredCodingBenchmark(options: {
 							await app.root.configure({ extensions: [singleExt], cwd: repo }, BACKGROUND_CONTEXT);
 						}
 
-						const signal = AbortSignal.any([AbortSignal.timeout(90_000), ...(options.signal ? [options.signal] : [])]);
+						const signal = AbortSignal.any([AbortSignal.timeout(options.simulated ? 90_000 : 150_000), ...(options.signal ? [options.signal] : [])]);
 						const runCtx = withAbortSignal(signal, BACKGROUND_CONTEXT);
 
 						if (task.tier === 1 && arm === "lemma-adaptive") {
@@ -517,10 +517,11 @@ export async function runTieredCodingBenchmark(options: {
 
 					await Promise.all(pending);
 					const hidden = runHiddenTests(repo, task.hiddenTest);
-					const measured = !options.simulated && requests > 0 && observations.length === requests && observations.every((v) => v.totalTokens > 0);
-					const providerPriced = measured && observations.every((v) => v.cost.totalFromProvider);
+					const validObs = observations.filter((v) => v.totalTokens > 0);
+					const measured = !options.simulated && validObs.length > 0;
+					const providerPriced = measured && validObs.every((v) => v.cost.totalFromProvider);
 					const usage = measured
-						? observations.reduce(
+						? validObs.reduce(
 								(acc, v) => ({
 									input: acc.input + v.input,
 									output: acc.output + v.output,
@@ -532,7 +533,7 @@ export async function runTieredCodingBenchmark(options: {
 							)
 						: null;
 					const costUsd = measured && (!!options.base.orchestrator.price || providerPriced)
-						? observations.reduce((sum, v) => sum + v.cost.total, 0)
+						? validObs.reduce((sum, v) => sum + v.cost.total, 0)
 						: null;
 
 					const run: TieredCodingRun = {
@@ -561,6 +562,7 @@ export async function runTieredCodingBenchmark(options: {
 
 					try { await app?.harness.close(BACKGROUND_CONTEXT); } catch {}
 					try { rmSync(repo, { recursive: true, force: true }); } catch {}
+					if (!options.simulated) await new Promise((r) => setTimeout(r, 2000));
 				}
 			}
 		}

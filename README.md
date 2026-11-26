@@ -56,14 +56,25 @@ npm start
 - **`agents`**：CLI 成员（`claude` / `codex` / `gemini`，含 `extraArgs`、`models`、`defaultModel`）及内置工具链的 API 成员（如 `deepseek`，默认受 worktree 路径锁与 `api.bash` 白名单约束）。
 - **`roles` / `isolation` / `autonomy` / `budget` / `web`**：角色首选与回退链、Git worktree 快照与依赖目录联接（`linkDirs`）、按目标仓库生效的验收命令（`checks`）与最大修复次数、单轮预算上限与端口设置（默认 `8787`）。
 
+## 效果评测
+
+项目内置分层编码基准与消融评测套件（3 层难度 × 3 题 × 独立隐藏测试集，运行 `npm run bench:coding` 或 `--real` 实测）。基于 `claude-sonnet-5-5` 的初始实测结果（完整数据与限流边界见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)）：
+
+| 评测维度 | 对照结果（真实模型实测） | 说明 |
+|---|---|---|
+| **Tier 1 单跳快路消融** | 请求数 **18.3 → 6.7（-63%）**，耗时 **87.0s → 26.0s（-70%）**，隐藏测试 **6/6（100%）** | 对比去掉快路的 `ablation-no-fastpath`；贴近单 Agent 基线（3.7 req / 16.9s） |
+| **总体隐藏用例通过率** | `lemma-adaptive` **9/16（56%）** vs `single` **7/16（44%）** | Tier 2 实测触发异构盲审拦截返工；单样本仍受小样本波动影响 |
+| **离线全链路确定性验证** | **27/27 组逻辑断言全通过**（Tier 1 快路、Tier 2 盲审返工、Tier 3 路径契约拦截与联合集成） | 本轮真实 Tier 3 受中转站连续 `429` 限流中断，需独立配额时段补测 |
+
 ## 测试与评测
 
 ```bash
 npm run typecheck          # TypeScript 类型检查
 npm test                   # 全量离线集成测试（faux 模型 + scripts/fake-agent.mjs，不消耗真实 API）
+npm run bench:coding       # 分层编码基准与消融（加 -- --real 使用真实模型）
 ```
 
-常用专项测试与基准脚本：`test:collaboration`（集成/盲审/契约/恢复）、`test:conversations`（多会话切换/Git 工作台/网页控制）、`test:terminal`（终端组件与交互）、`bench:context` 与 `bench:collaboration`（评测说明见 [初始对照记录](docs/benchmarks/initial-context-ablation.md)）。
+常用专项测试与基准脚本：`test:collaboration`（集成/盲审/契约/快慢路径/基准套件）、`test:conversations`（多会话切换/Git 工作台/网页控制）、`test:terminal`（终端组件与交互）、`bench:context`（[上下文裁剪初始记录](docs/benchmarks/initial-context-ablation.md)）与 `bench:collaboration`。
 
 ## 代码结构
 
