@@ -1,55 +1,60 @@
-# Lemma 分层编码基准与消融评测记录（P1 初始实测）
+# Lemma 分层编码基准与消融评测记录（P1 实测）
 
-- **代码版本**：`56d46fa2c2f3ecd3d79cad9c96e6289a8aa131ec`（含 `--real` 模式瞬时重试与 2s 样本间隔）
-- **评测模型**：`claude-sonnet-5-5`（`anthropic-compatible` 中转站，单样本上限 150s / 36 reqs，`repeats=1`）
-- **评测套件**：`npm run bench:coding -- --real --repeats=1`（3 层难度 × 3 题 × 3 实验臂 = 27 次运行；每题由独立隐藏 `node:test` 脚本评分，不对模型暴露）
+- **代码版本**：`efbf84d54c340321010da3cb56af57c892c3b94d`
+- **主实测配置**：官方 DeepSeek API（`deepseek-v4-pro` 总控与盲审 + `deepseek-flash` 编码，开启 `cacheRetention: "short"`，单样本上限 150s / 36 reqs，`repeats=1`，**全程零 429 限流、零假阳性**）
+- **评测套件**：`npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --repeats=1`（3 层难度 × 3 题 × 3 实验臂 = 27 次运行；每题由独立隐藏 `node:test` 脚本评分，不对模型暴露）
 
-## 核心观测结论
+## 核心发现
 
-1. **Tier 1 单跳快路（Fast Path）显著降低协调税**：
-   - 3 道单文件小改任务中，`single`、`lemma-adaptive` 与 `ablation-no-fastpath` 的隐藏用例通过率均为 **6/6（100%）**。
-   - 对比关闭快路的 `ablation-no-fastpath`（平均 **18.3 次请求 / 87.0s / 306,604 tokens**），`lemma-adaptive` 将平均请求数降至 **6.7 次（-63%）**、平均耗时降至 **26.0s（-70%）**，大幅拉近与 `single`（3.7 次 / 16.9s）的差距（其中 2 组在代码已写完并通过 2/2 隐藏测试后的收尾回复阶段遭遇中转站 `429 rate_limit`）。
-2. **Tier 2 隐藏边界与盲审链路实测**：
-   - 在 `claude-sonnet-5-5` 相同模型下，`single` 在 3 道隐藏边界题上的隐藏用例通过率为 **0/6（0%）**，`lemma-adaptive` 达到 **2/6（33%）** 并实际触发 **1 次异构盲审拦截返工**；全集 16 条隐藏用例总通过率 `lemma-adaptive` 为 **9/16（56%）**，高于 `single` 的 **7/16（44%）**。
-3. **当前实测边界（中转站 429 限流）**：
-   - 连续跑至后半段 Tier 3 时，中转站连续返回瞬时 `429 rate_limit`（多数组在 1 次请求、500–800ms 即失败），因此 Tier 3 的真实并发集成对比尚未获得无干扰样本（离线确定性测试 `test/coding-benchmark-suite.ts` 中 Tier 3 路径契约拦截与多分支联合集成 3/3 全通过）。后续可在配额充足的时段单独执行 `npm run bench:coding -- --real --tier=3` 补测。
+1. **Tier 1 单跳快路（Fast Path）消融收益显著且稳定复现**：
+   - 在官方 DeepSeek 实测中，`lemma-adaptive`（快路 `deepseek-flash`）达到 **3/3 任务全过（隐藏用例 6/6 = 100%）**，平均 **7.0 次请求 / 13.1s**；对比去掉快路的 `ablation-no-fastpath`（**1/3 通过，27.0 次请求 / 148.4s / 752k tokens / \$0.2920**），**请求数减少 74%、耗时减少 91%、通过率提升 +67 个百分点**，且耗时快于单 Agent `deepseek-v4-pro` 基线（2/3 通过，平均 24.0s）。
+   - 在此前的 `claude-sonnet-5-5` 实测中亦复现同一趋势：Tier 1 隐藏用例三组均 6/6（100%），快路将请求数从 **18.3 降至 6.7（-63%）**、耗时从 **87.0s 降至 26.0s（-70%）**。
+2. **Tier 2 / Tier 3 暴露的下一阶段优化方向（P2 重点）**：
+   - **Tier 2**：`ablation-no-blind`（直接派工）通过 **2/3（67%，\$0.0980）**，高于 `single`（1/3，33%）；`lemma-adaptive`（Durable 自动盲审）在本轮 0/3，根因是评测机仅等待后台工作流 30s，在 `deepseek-v4-pro` 较长推理耗时下后台盲审尚未收敛即退出。
+   - **Tier 3**：多模块并行 + 路径契约 + 联合集成在 `lemma-adaptive` 中实测触发了 **1 次路径契约拦截**，但受 150s 单样本超时与 2048 单次输出 token 限制，三组在真实模型下均未在时限内完成合流（离线确定性回归 `test/coding-benchmark-suite.ts` 中 3/3 全通过）。
 
-## 总体汇总（27 次真实运行）
+## 总体汇总（官方 DeepSeek 27 次真实运行）
 
-| 实验臂 | 任务全过 | 隐藏用例通过 | 平均请求 | 平均耗时 | 备注 |
+| 实验臂 | 任务通过率 | 隐藏用例通过率 | 平均请求 | 平均耗时 | 总 Token | 美元费用 |
+|---|---:|---:|---:|---:|---:|---:|
+| `single` | 3/9 (33%) | 6/16 (38%) | 5.2 | 43.4s | 195,422 | \$0.1134 |
+| `lemma-adaptive` | 3/9 (33%) | 6/16 (38%) | 9.9 | 63.9s | 694,308 | \$0.2574 |
+| `ablation-no-fastpath` | 1/3 (33%) | 2/6 (33%) | 27.0 | 148.4s | 752,521 | \$0.2920 |
+| `ablation-no-blind` | 2/3 (67%) | 4/6 (67%) | 16.7 | 80.1s | 363,132 | \$0.0980 |
+| `ablation-no-scope` | 0/3 (0%) | 0/4 (0%) | 14.0 | 81.4s | 360,051 | \$0.1698 |
+
+## 分层对照与消融明细
+
+### Tier 1 · 单文件小改（Fast Path 效率验证）
+
+| 实验臂 | 任务通过 | 隐藏用例通过 | 平均模型请求 | 平均耗时 | 机制观测 |
 |---|---:|---:|---:|---:|---|
-| `single` | 3/9 (33%) | 7/16 (44%) | 3.3 | 15.1s | 基线对照组 |
-| `lemma-adaptive` | 2/9 (22%) | 9/16 (56%) | 6.6 | 27.7s | Tier 1 2 组代码已过隐藏测试但在收尾碰 429 |
-| `ablation-no-fastpath` | 3/3 (100%) | 6/6 (100%) | 18.3 | 87.0s | 仅跑 Tier 1；总 Token 306,604 |
-| `ablation-no-blind` | 2/3 (67%) | 4/6 (67%) | 14.7 | 72.5s | 仅跑 Tier 2；总 Token 223,027 |
-| `ablation-no-scope` | 0/3 (0%) | 1/4 (25%) | 1.0 | 0.6s | 仅跑 Tier 3；全程受中转站 429 限流影响 |
-
-## 分层明细
-
-### Tier 1 · 单文件小改（Fast Path 效率消融）
-
-| 实验臂 | 隐藏用例通过 | 平均模型请求 | 平均耗时 | 机制观测 |
-|---|---:|---:|---:|---|
-| `single` | 6/6 (100%) | 3.7 | 16.9s | 单 Agent 基线 |
-| `lemma-adaptive` | 6/6 (100%) | 6.7 | 26.0s | 快路命中 3/3（较无快路请求 -63%、耗时 -70%） |
-| `ablation-no-fastpath` | 6/6 (100%) | 18.3 | 87.0s | 强制走完整总调度拆解与验收 |
+| `single` | 2/3 | 4/6 (67%) | 4.3 | 24.0s | 单 Agent 基线 |
+| `lemma-adaptive` | **3/3** | **6/6 (100%)** | **7.0** | **13.1s** | 快路命中 3/3（较无快路请求 -74%、耗时 -91%） |
+| `ablation-no-fastpath` | 1/3 | 2/6 (33%) | 27.0 | 148.4s | 2 题因完整编排超 150s 超时 |
 
 ### Tier 2 · 核心算法隐藏边界（盲审对照）
 
-| 实验臂 | 隐藏用例通过 | 平均模型请求 | 平均耗时 | 机制观测 |
-|---|---:|---:|---:|---|
-| `single` | 0/6 (0%) | 3.7 | 20.7s | 盲审拦截 0 次 |
-| `lemma-adaptive` | 2/6 (33%) | 10.7 | 50.8s | 真实触发盲审拦截返工 1 次 |
-| `ablation-no-blind` | 4/6 (67%) | 14.7 | 72.5s | 盲审拦截 0 次 |
+| 实验臂 | 任务通过 | 隐藏用例通过 | 平均模型请求 | 平均耗时 | 说明 |
+|---|---:|---:|---:|---:|---|
+| `single` | 1/3 | 2/6 (33%) | 7.7 | 64.1s | 仅 `t2-semver-sort` 通过 |
+| `lemma-adaptive` | 0/3 | 0/6 (0%) | 6.3 | 77.3s | 后台自动盲审受 30s 等待窗截断 |
+| `ablation-no-blind` | 2/3 | 4/6 (67%) | 16.7 | 80.1s | `t2-semver-sort`、`t2-csv-parser` 通过 |
 
 ### Tier 3 · 多模块并行与联合集成
 
-- 本轮实测运行至 Tier 3 时遭遇中转站连续 429 限流（平均仅 1.0–2.7 次请求即中断），3 臂隐藏用例均为 1/4（25%），暂无有效真实对比结论；离线确定性回归（`test/coding-benchmark-suite.ts`）中 `lemma-adaptive` 3/3 触发路径契约拦截并通过多分支联合集成与隐藏测试。
+| 实验臂 | 任务通过 | 隐藏用例通过 | 平均模型请求 | 平均耗时 | 机制观测 |
+|---|---:|---:|---:|---:|---|
+| `single` | 0/3 | 0/4 (0%) | 3.7 | 42.1s | 未覆盖完整双模块契约 |
+| `lemma-adaptive` | 0/3 | 0/4 (0%) | 16.3 | 101.2s | 实测触发路径契约拦截 1 次；受 150s 超时截断 |
+| `ablation-no-scope` | 0/3 | 0/4 (0%) | 14.0 | 81.4s | 未完成联合集成 |
 
 ## 复现命令
 
 ```bash
-npm run bench:coding                                       # 离线全套 27 组链路验证（0 费用）
-npm run bench:coding -- --real --repeats=1                 # 真实模型全量对照与消融
-npm run bench:coding -- --real --tier=3 --repeats=1        # 单独补测 Tier 3 多分支集成
+# 离线全套 27 组链路验证（0 费用）
+npm run bench:coding
+
+# 官方 DeepSeek 真实对照与消融（deepseek-v4-pro 总控/盲审 + deepseek-flash 编码）
+npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --repeats=1
 ```

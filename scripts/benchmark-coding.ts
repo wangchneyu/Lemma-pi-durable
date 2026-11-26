@@ -25,8 +25,27 @@ const tiers = tierArg
 const armsArg = process.argv.find((a) => a.startsWith("--arms="))?.split("=")[1];
 const arms = armsArg ? (armsArg.split(",").map((s) => s.trim()).filter(Boolean) as BenchmarkArm[]) : undefined;
 const coderAgent = process.argv.find((a) => a.startsWith("--coder-agent="))?.split("=")[1]?.trim() || undefined;
+const orchAgent = process.argv.find((a) => a.startsWith("--orchestrator-agent="))?.split("=")[1]?.trim() || undefined;
+const orchModel = process.argv.find((a) => a.startsWith("--orchestrator-model="))?.split("=")[1]?.trim() || undefined;
 
 const base = loadConfig(process.env.PI_AGENT_CONFIG ?? "pi-agent.config.json");
+if (real && orchAgent) {
+	const src = base.agents[orchAgent];
+	if (!src?.api) throw new Error(`--orchestrator-agent=${orchAgent} 必须是已配置的 API 成员。`);
+	const modelId = orchModel ?? src.defaultModel ?? src.models[0]?.id;
+	if (!modelId) throw new Error(`--orchestrator-agent=${orchAgent} 未配置可用模型。`);
+	const price = src.models.find((m) => m.id === modelId)?.price;
+	base.orchestrator = {
+		...base.orchestrator,
+		type: src.api.type,
+		baseUrl: src.api.baseUrl,
+		apiKeyEnv: src.api.apiKeyEnv,
+		apiKeyFromClaudeSettings: false,
+		credential: src.api.credential,
+		modelId,
+		...(price ? { price } : {}),
+	};
+}
 const outDir = resolve(
 	process.argv.find((a) => a.startsWith("--out="))?.slice(6) ??
 		join("data", "benchmarks", `coding-p1-${new Date().toISOString().replace(/[:.]/g, "-")}`),
