@@ -112,7 +112,7 @@ export async function openApp(
 				toolExecution: "parallel", // 同一轮里派给多个 agent 的任务并行执行
 				// 默认只选派工扩展：API 成员的读写工具不给总调度（它只派活，不自己改代码）
 				extensions: [extension],
-				retry: { maxRetries: 3 },
+				retry: { maxRetries: 4, baseDelayMs: 3000, maxAgentDelayMs: 30_000 },
 				afterFailedRun: "continue",
 				...options.settings,
 			},

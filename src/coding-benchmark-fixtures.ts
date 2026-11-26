@@ -616,9 +616,10 @@ test("enforces integer cents, idempotency, and zero-sum balances", () => {
 	assert.equal(l.balance("bank"), -500);
 	assert.equal(l.balance("alice"), 325);
 	assert.equal(l.balance("bob"), 175);
-	assert.throws(() => l.post({ id: "tx3", from: "a", to: "a", cents: 10 }));
-	assert.throws(() => l.post({ id: "tx4", from: "a", to: "b", cents: 1.5 }));
-	assert.throws(() => l.post({ id: "tx5", from: "a", to: "b", cents: 0 }));
+	const notStub = (err) => err instanceof Error && !/not implemented/i.test(err.message);
+	assert.throws(() => l.post({ id: "tx3", from: "a", to: "a", cents: 10 }), notStub);
+	assert.throws(() => l.post({ id: "tx4", from: "a", to: "b", cents: 1.5 }), notStub);
+	assert.throws(() => l.post({ id: "tx5", from: "a", to: "b", cents: 0 }), notStub);
 });
 `,
 		reference: {
@@ -686,8 +687,8 @@ test("groups independent tasks into sorted parallel layers", () => {
 	assert.deepEqual(layers, [["T1"], ["T2", "T3"], ["T4"]]);
 });
 test("rejects cycles and missing dependencies", () => {
-	assert.throws(() => scheduleLayers([{ id: "A", deps: ["B"] }, { id: "B", deps: ["A"] }]));
-	assert.throws(() => scheduleLayers([{ id: "A", deps: ["NOPE"] }]));
+	assert.throws(() => scheduleLayers([{ id: "A", deps: ["B"] }, { id: "B", deps: ["A"] }]), /cycle|环/i);
+	assert.throws(() => scheduleLayers([{ id: "A", deps: ["NOPE"] }]), /missing|缺失|不存在/i);
 });
 `,
 		reference: {

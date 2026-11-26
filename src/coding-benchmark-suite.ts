@@ -311,6 +311,7 @@ export async function runTieredCodingBenchmark(options: {
 	simulated: boolean;
 	tiers?: BenchmarkTier[];
 	arms?: BenchmarkArm[];
+	coderAgent?: string;
 	repeats?: number;
 	onRun?: (run: TieredCodingRun) => void;
 	signal?: AbortSignal;
@@ -400,6 +401,30 @@ export async function runTieredCodingBenchmark(options: {
 							},
 						});
 
+						const heteroSource = !options.simulated && options.coderAgent ? options.base.agents[options.coderAgent] : undefined;
+						if (!options.simulated && options.coderAgent && (!heteroSource?.api || !heteroSource.defaultModel)) {
+							throw new Error(`--coder-agent=${options.coderAgent} 必须是已配置 API 与默认模型的成员。`);
+						}
+						const coderMember = heteroSource?.api
+							? {
+								enabled: true,
+								description: "负责编写和修复实现代码",
+								workspace: "code" as const,
+								extraArgs: [],
+								models: heteroSource.models.length ? heteroSource.models : [{ id: heteroSource.defaultModel!, tier: "standard" as const }],
+								defaultModel: heteroSource.defaultModel!,
+								timeoutMinutes: 2,
+								maxOutputChars: 8000,
+								api: {
+									...heteroSource.api,
+									tools: ["read", "write", "edit", "bash"] as ("read" | "write" | "edit" | "bash")[],
+									bash: "allowlist" as const,
+									bashAllow: ["node"],
+									maxTurns: 10,
+								},
+							}
+							: makeMember("负责编写和修复实现代码", ["read", "write", "edit", "bash"], "allowlist");
+
 						const checks = task.tier === 3
 							? [{ name: "node-test", command: "node", args: ["--test", task.testPath ?? "test/"], timeoutSeconds: 20 }]
 							: [];
@@ -419,7 +444,7 @@ export async function runTieredCodingBenchmark(options: {
 							],
 							agents: {
 								...Object.fromEntries(["claude", "codex", "gemini", "deepseek"].map((id) => [id, { enabled: false }])),
-								coder: makeMember("负责编写和修复实现代码", ["read", "write", "edit", "bash"], "allowlist"),
+								coder: coderMember,
 								...(task.tier === 3 ? { tester: makeMember("负责编写独立测试", ["read", "write", "edit", "bash"], "allowlist") } : {}),
 								...(task.tier === 2 && arm === "lemma-adaptive" ? { auditor: makeMember("只读代码盲审成员", ["read"], "off") } : {}),
 							},
@@ -437,8 +462,13 @@ export async function runTieredCodingBenchmark(options: {
 							memory: true,
 							extensions: singleExt ? [singleExt] : [],
 							settings: {
-								retry: options.simulated ? { enabled: false, maxRetries: 0 } : { enabled: true, maxRetries: 2 },
-								stream: { timeoutMs: options.simulated ? 45_000 : 60_000, maxRetries: options.simulated ? 0 : 2, cacheRetention: "none" },
+								retry: options.simulated ? { enabled: false, maxRetries: 0 } : { enabled: true, maxRetries: 4, baseDelayMs: 4000, maxAgentDelayMs: 30_000 },
+								stream: {
+									timeoutMs: options.simulated ? 45_000 : 60_000,
+									maxRetries: options.simulated ? 0 : 2,
+									...(options.simulated ? {} : { maxRetryDelayMs: 20_000 }),
+									cacheRetention: options.simulated ? "none" : "short",
+								},
 								compaction: { enabled: false },
 								afterFailedRun: "keep",
 							},
@@ -562,7 +592,7 @@ export async function runTieredCodingBenchmark(options: {
 
 					try { await app?.harness.close(BACKGROUND_CONTEXT); } catch {}
 					try { rmSync(repo, { recursive: true, force: true }); } catch {}
-					if (!options.simulated) await new Promise((r) => setTimeout(r, 2000));
+					if (!options.simulated) await new Promise((r) => setTimeout(r, 3000));
 				}
 			}
 		}

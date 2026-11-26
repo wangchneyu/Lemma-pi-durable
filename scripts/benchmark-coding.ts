@@ -24,6 +24,7 @@ const tiers = tierArg
 	: undefined;
 const armsArg = process.argv.find((a) => a.startsWith("--arms="))?.split("=")[1];
 const arms = armsArg ? (armsArg.split(",").map((s) => s.trim()).filter(Boolean) as BenchmarkArm[]) : undefined;
+const coderAgent = process.argv.find((a) => a.startsWith("--coder-agent="))?.split("=")[1]?.trim() || undefined;
 
 const base = loadConfig(process.env.PI_AGENT_CONFIG ?? "pi-agent.config.json");
 const outDir = resolve(
@@ -53,6 +54,7 @@ try {
 		simulated: !real,
 		tiers,
 		arms,
+		coderAgent,
 		repeats,
 		onRun(run) {
 			runs.push(run);

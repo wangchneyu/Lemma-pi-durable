@@ -118,7 +118,7 @@ export function createTaskWorkflow(deps: DispatchDeps, available: Set<string>, e
 				const reworks = item.checksByMember?.filter((entry) => entry.status === "rework").length ?? 0;
 				if (!reworks || reworks > item.automation.maxReworks) { item.status = "blocked"; item.notes.push("独立复核返工次数已达上限，保留证据交给人工处理。"); continue; }
 				try {
-					const prepared = await prepareRecovery(tx, controller, config, changes, { id: item.id, action: "resume", note: `独立复核要求返工：${item.review!.evidence}` }, `workflow-rework:${item.id}:${item.latestResult}`, at);
+					const prepared = await prepareRecovery(tx, controller, config, changes, { id: item.id, action: "resume", note: `独立复核要求返工：${item.review!.evidence}\n请针对上述具体缺口精准修复，并在工作区运行一条最小边界验证（如 node -e 或单元测试）确认覆盖后再交付。` }, `workflow-rework:${item.id}:${item.latestResult}`, at);
 					if (!prepared.dispatch) continue; args = prepared.dispatch;
 				} catch (error) { item.status = "blocked"; item.notes.push(`自动返工未启动：${error instanceof Error ? error.message : String(error)}`); continue; }
 			} else {

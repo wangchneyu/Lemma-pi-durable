@@ -434,6 +434,9 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	const canReuse = args.context_mode !== "full" && !!priorContext && (!agent.api || priorContext.head === head);
 	if (canReuse && priorContext!.fingerprint === contextState.fingerprint && brief) brief = `【续接上下文】项目目标与任务约束未变化，沿用本会话已有资料${args.task_id ? `；任务 ${args.task_id}` : ""}。只处理本次增量；无法确认已有资料时明确提出缺口。\n\n【本次要做的事】\n`;
 	let prompt = `${brief}${args.task}`;
+	if (args.fast_path && !args.task_id) {
+		prompt = `【单跳快路】直接读取目标文件并做最小精准修改，无需多余目录扫描或反复查看 diff；改完后用一句话简要说明修改即可。\n\n${prompt}`;
+	}
 	if (recoveryEvidence) prompt += `\n\n${recoveryEvidence}`;
 	for (const input of args.inputs ?? []) {
 		const report = await io.commit(async (tx) => { const found = (await tx.doc(Results, io.conversationId, input.result_id, null)).result; return found ? JSON.parse(JSON.stringify(found)) as import("./results.ts").MemberResult : null; });
