@@ -170,11 +170,22 @@ export function buildRuns() {
 	}
 	const real = runs.filter((r) => !r.divider);
 	const last = real.at(-1);
+	const READ_CODE_TOOLS = new Set(["list_files", "search_code", "git_diff", "outline_file", "find_symbol"]);
+	const TEAM_TOOLS = new Set(["plan_tasks", "delegate_to_lead", "integrate_changes", "repair_integration", "review_task"]);
 	for (const run of real) {
 		const assistants = run.items.filter((i) => i.type === "assistant");
 		const lastAssistant = assistants.at(-1);
-		run.agents = [...new Set(assistants.flatMap((a) => a.toolCalls.filter((c) => isDispatch(c.name)).map((c) => kindOf(c.name))))];
-		run.dispatchCount = assistants.reduce((n, a) => n + a.toolCalls.filter((c) => isDispatch(c.name)).length, 0);
+		const allCalls = assistants.flatMap((a) => a.toolCalls ?? []);
+		const toolItems = run.items.filter((i) => i.type === "tool");
+		run.agents = [...new Set(allCalls.filter((c) => isDispatch(c.name)).map((c) => kindOf(c.name)))];
+		run.dispatchCount = allCalls.filter((c) => isDispatch(c.name)).length;
+		const usedReadCode = allCalls.some((c) => READ_CODE_TOOLS.has(c.name));
+		const usedTeam = allCalls.some((c) => TEAM_TOOLS.has(c.name));
+		const dispatchTools = toolItems.filter((t) => isDispatch(t.name));
+		if (usedTeam || run.dispatchCount >= 2) run.execPath = "team";
+		else if (run.dispatchCount === 1) run.execPath = dispatchTools.every((t) => t.details?.readonly) && dispatchTools.length ? "readonly" : "fast";
+		else if (usedReadCode) run.execPath = "readonly";
+		else run.execPath = "chat";
 		const times = run.items.map((i) => i.at).filter(Boolean);
 		run.endAt = times.length ? Math.max(...times) : undefined;
 		run.answer = lastAssistant && !lastAssistant.toolCalls.length ? lastAssistant.text : "";

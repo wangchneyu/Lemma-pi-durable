@@ -61,7 +61,7 @@ export const RunBudget = defineDoc<{ runKey: string | null; spent: number; dispa
 
 const RESUME_AFTER_CRASH = "（系统提示：上一次执行在中途被中断了。请检查当前进度，把这个任务做完，然后给出最终结果。）";
 
-export type DispatchArgs = { task: string; cwd?: string; model?: string; based_on?: string; session_id?: string; task_id?: string; recovery_id?: string; context_mode?: "auto" | "full"; structured?: boolean; inputs?: { result_id: string; field?: string; offset?: number; limit?: number }[] };
+export type DispatchArgs = { task: string; cwd?: string; model?: string; based_on?: string; session_id?: string; task_id?: string; recovery_id?: string; context_mode?: "auto" | "full"; structured?: boolean; readonly?: boolean; fast_path?: boolean; inputs?: { result_id: string; field?: string; offset?: number; limit?: number }[] };
 
 /** 派工过程需要的持久化能力：工具调用和后台任务各自提供 */
 export interface DispatchIO {
@@ -303,10 +303,18 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		io.output(`ℹ 会话 ${args.session_id} 建立在 ${known.cwd}，续接时使用原目录（忽略 cwd=${requested}）\n`);
 	}
 
-	// ---- 隔离：新会话在独立的 worktree 里干活 ----
+	// ---- 隔离：新会话在独立的 worktree 里干活；readonly 只读派工直接免隔离运行 ----
 	const codeWorkspace = agent.workspace !== "none";
-	let change: ChangeRecord | undefined = codeWorkspace ? changes.byPath(cwd) : undefined;
-	if (codeWorkspace && !known && config.isolation.enabled) {
+	const readonlyMode = !!args.readonly;
+	let change: ChangeRecord | undefined = codeWorkspace && !readonlyMode ? changes.byPath(cwd) : undefined;
+	if (codeWorkspace && readonlyMode && !known) {
+		if (args.based_on) {
+			const from = changes.get(args.based_on);
+			if (!from || from.status === "dropped") return fail(`找不到可用的改动 ${args.based_on}。`);
+			if (!existsSync(from.path)) return fail(`改动 #${from.id} 的工作副本已被清理，无法只读挂载。`);
+			cwd = join(from.path, from.subdir);
+		}
+	} else if (codeWorkspace && !known && config.isolation.enabled) {
 		const root = await repoRoot(cwd);
 		if (root) {
 			// 随机编号（memo 保证崩溃重放时拿回同一个），避免重建会话存储后和旧分支撞名
@@ -376,12 +384,12 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	}
 	if (change && change.status !== "running") changes.upsert({ ...change, status: "running" });
 
-	// ---- 分工表：标记任务进行中；把共同目标 + 这项任务 + 分工全貌交给成员 ----
+	// ---- 分工表：标记任务进行中；把共同目标 + 这项任务 + 分工全貌交给成员（单跳快路且无 task_id 时跳过冗长背景） ----
 	const goal = project.goal();
 	let brief = "";
 	let recoveryEvidence = "";
 	let taskScope: TaskScope | undefined;
-	if (args.task_id || goal) {
+	if (args.task_id || (goal && !args.fast_path)) {
 		const { board, result: blocked } = await commitBoard(project, io, async (b, tx) => {
 			const t = args.task_id ? b.tasks[args.task_id] : undefined;
 			if (!t) return;
@@ -454,8 +462,8 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	}
 	await io.memo("started", true);
 
-	io.output(`▶ ${adapter.label} 开始执行${model ? `（模型 ${model}）` : ""}（cwd: ${cwd}${resumeId ? `，续接会话 ${resumeId}` : ""}${change ? `，隔离改动 #${change.id}` : ""}）\n`);
-	const detailBase = { agent: kind, cwd, resumeId: resumeId ?? null, model: model ?? null, changeId: change?.id ?? null };
+	io.output(`▶ ${adapter.label} 开始执行${model ? `（模型 ${model}）` : ""}（cwd: ${cwd}${resumeId ? `，续接会话 ${resumeId}` : ""}${readonlyMode ? "，只读免隔离" : args.fast_path ? "，单跳快路" : ""}${change ? `，隔离改动 #${change.id}` : ""}）\n`);
+	const detailBase = { agent: kind, cwd, resumeId: resumeId ?? null, model: model ?? null, changeId: change?.id ?? null, readonly: readonlyMode, fastPath: !!args.fast_path };
 	await io.details({ ...detailBase, sessionId: (adapter.canResume ? (resumeId ?? presetSession) : undefined) ?? null } as JsonObject);
 
 	// 会话占用：同一个会话同一时间只能有一个派工
@@ -507,19 +515,21 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 				cwd,
 				prompt,
 				resumeId,
-				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label, agent, config.collaboration?.instructions),
+				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label, agent, config.collaboration?.instructions, readonlyMode),
 				scope: taskScope,
+				readonly: readonlyMode,
 				io,
 				timeoutMs: agent.timeoutMinutes * 60_000,
 				onSession: noteSession,
 			});
 		} else {
 			const argv = [...command.slice(1), ...adapter.buildArgs({ resumeId, newSessionId: resumeId ? undefined : presetSession, model, extraArgs: agent.extraArgs })];
+			const cliPrompt = readonlyMode ? `【只读模式】仅查阅与分析代码，不要修改工作区文件或提交更改。\n\n${prompt}` : prompt;
 			result = await runCli({
 				command: command[0]!,
 				args: argv,
 				cwd,
-				stdin: prompt,
+				stdin: cliPrompt,
 				env: cleanEnv(config.stripEnv),
 				timeoutMs: agent.timeoutMinutes * 60_000,
 				signal: io.signal,
@@ -601,6 +611,10 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	const truncated = body.length > outputLimit;
 	body = summarizeResult(body, outputLimit);
 	if (truncated) body += `\n\n[完整结果已保存；result_id: ${resultId}；需要省略部分时用 read_result 分页读取。]`;
+	const escalated = Boolean(args.fast_path && finished && finished.files.length > 2);
+	const escalationLine = escalated
+		? `\n\n【快路自动升级】本次改动涉及 ${finished!.files.length} 个文件（超过单文件快路阈值），已自动保留在独立分支 #${finished!.id}，建议复核或按标准流程验收后再合并。`
+		: "";
 	const changeLine = finished
 		? finished.files.length
 			? `\n\n[改动 #${finished.id}：${finished.files.length} 个文件 +${finished.add} −${finished.del}，在分支 ${finished.branch}，还没有合并到主目录，等用户在终端确认（/apply ${finished.id}）]`
@@ -616,12 +630,13 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 		`result_id: ${resultId}`,
 		usedModel ? `模型: ${usedModel}` : undefined,
 		sessionId && adapter.canResume ? `session_id: ${sessionId}` : undefined,
+		readonlyMode ? "模式: 只读直查" : args.fast_path ? (escalated ? "模式: 快路已升级" : "模式: 单跳快路") : undefined,
 		`耗时: ${Math.round(result.durationMs / 1000)}s`,
 		cost !== undefined ? `花费: $${cost.toFixed(4)}${estimated !== undefined ? "（估算）" : ""}` : undefined,
 	].filter(Boolean);
 
 	const dispatch: DispatchResult = {
-		text: `${body}${changeLine}${taskLine}\n\n[${meta.join(" | ")}]`,
+		text: `${body}${escalationLine}${changeLine}${taskLine}\n\n[${meta.join(" | ")}]`,
 		isError: parsed.isError,
 		...(result.aborted ? { aborted: true } : {}),
 		details: {
@@ -636,6 +651,9 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 			model: usedModel ?? null,
 			usage: parsed.usage ? { ...parsed.usage } : null,
 			changeId: finished?.id ?? null,
+			readonly: readonlyMode,
+			fastPath: !!args.fast_path,
+			escalated,
 		},
 		summary: {
 			sessionId: sessionId && adapter.canResume ? sessionId : undefined,

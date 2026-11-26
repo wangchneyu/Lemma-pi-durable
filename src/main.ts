@@ -549,6 +549,39 @@ async function changeCommand(line: string): Promise<boolean> {
 }
 
 async function command(line: string): Promise<boolean> {
+	if (/^\/fast(?:\s|$)/.test(line)) {
+		const rest = line.slice(5).trim();
+		if (!rest) {
+			log(c.dim("用法：/fast [成员ID|readonly] <单文件任务说明>（跳过总调度首尾往返，直通首选编码成员；改动≤2文件时直接弹出合并确认，超出自动升级保留分支）"));
+			return true;
+		}
+		if (terminalConversation && String(terminalConversation.id) !== String(root.id)) throw new Error("请先 /main 返回总控再使用 /fast。");
+		const firstSpace = rest.search(/\s/);
+		const firstToken = firstSpace === -1 ? rest : rest.slice(0, firstSpace);
+		const afterFirst = firstSpace === -1 ? "" : rest.slice(firstSpace).trim();
+		let member: string | undefined;
+		let readonly = false;
+		let taskText = rest;
+		if (firstToken === "readonly" && afterFirst) {
+			readonly = true;
+			taskText = afterFirst;
+		} else if (afterFirst && Object.prototype.hasOwnProperty.call(config.agents, firstToken)) {
+			member = firstToken;
+			taskText = afterFirst;
+		}
+		log(c.dim(`⚡ 单跳快路启动${readonly ? "（只读免隔离）" : ""}${member ? ` · 成员 ${member}` : ""}…`));
+		const outcome = await app.fastDispatch(root.id, taskText, {
+			member,
+			readonly,
+			onOutput: (chunk) => {
+				for (const ln of chunk.split(/\r?\n/)) if (ln.trim()) log(c.dim(`  ${ln}`));
+			},
+		});
+		log(outcome.result.isError ? c.red(outcome.result.text) : outcome.result.text);
+		if (outcome.applyMessage) log(outcome.applied ? c.green(`✓ ${outcome.applyMessage}`) : c.yellow(outcome.applyMessage));
+		else if (outcome.escalated && outcome.changeId) log(c.yellow(`⚠ 快路改动已自动升级保留在独立分支 #${outcome.changeId}，建议 /diff ${outcome.changeId} 审查后再 /apply。`));
+		return true;
+	}
 	if (/^\/workflow(?:\s|$)/.test(line)) {
 		const [, action = "status", extra] = line.split(/\s+/);
 		if (extra || !["status", "pause", "resume"].includes(action)) throw new Error("/workflow status|pause|resume");
@@ -595,7 +628,7 @@ async function command(line: string): Promise<boolean> {
 		await assertConfigIdle();
 		log(await harness.commit((tx) => resolveOperation(tx, id, outcome as "succeeded" | "not_applied", parts.join(" "), Date.now()), context)); return true;
 	}
-	if (line === "/help") { log(MEMBER_HELP); log(TASK_HELP); log("/sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); log("/ready 就绪队列 · /workflow status|pause|resume 协作控制 · Enter 发送 · Ctrl+J 换行 · 滚轮/PgUp/PgDn 翻阅 · Ctrl+Home/End 到顶/最新 · Alt+End 最新 · Ctrl+K 会话 · Alt+C 关系树 · Ctrl+L 模型 · Ctrl+T 任务面板 · Ctrl+E 工具详情 · Alt+T 思考"); log("/history 补载更早记录 · /thinking 展开/收起思考 · Ctrl+Shift+F 搜索已加载记录；思考仅展示服务实际返回的内容。"); return true; }
+	if (line === "/help") { log(MEMBER_HELP); log(TASK_HELP); log("/fast [成员ID|readonly] <任务> 单跳快路直连 · /sessions 管理会话 · /tasks 分工 · /jobs 后台任务 · /model 选择当前总控模型 · /web 网页 · /exit 退出"); log("/ready 就绪队列 · /workflow status|pause|resume 协作控制 · Enter 发送 · Ctrl+J 换行 · 滚轮/PgUp/PgDn 翻阅 · Ctrl+Home/End 到顶/最新 · Alt+End 最新 · Ctrl+K 会话 · Alt+C 关系树 · Ctrl+L 模型 · Ctrl+T 任务面板 · Ctrl+E 工具详情 · Alt+T 思考"); log("/history 补载更早记录 · /thinking 展开/收起思考 · Ctrl+Shift+F 搜索已加载记录；思考仅展示服务实际返回的内容。"); return true; }
 	if (/^\/(?:agent|setup|tool|limits|mcp)(?:\s|$)/.test(line)) {
 		if (configuring) throw new Error("配置正在进行中。");
 		configuring = true;

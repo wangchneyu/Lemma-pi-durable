@@ -24,7 +24,7 @@ import { scopeViolation, type TaskScope } from "./scope.ts";
 
 /** API 成员在模型目录里的 provider 名 */
 export const memberProvider = (kind: AgentKind) => `member-${kind}`;
-export const MemberIdentity = defineDoc<{ id: string; name: string; scope?: TaskScope }>({
+export const MemberIdentity = defineDoc<{ id: string; name: string; scope?: TaskScope; readonly?: boolean }>({
 	kind: "lemma.member-identity", version: 1, scope: "conversation", history: "latest", fork: "current",
 	initial: () => ({ id: "", name: "" }), checkpointWhen: () => false,
 });
@@ -191,6 +191,10 @@ export function createMemberTools(kind: AgentKind, api: ApiMemberConfig, options
 			// 读写只限工作目录：工作目录从这个子对话自己的 agent 配置里读（派工时设成它的 worktree）
 			hook(ToolTask, {
 				beforeTool: async (call, hookApi, context) => {
+					if (call.name === "write" || call.name === "edit" || call.name === "bash") {
+						const identity = await hookApi.snapshot(MemberIdentity, hookApi.conversationId, context);
+						if (identity?.readonly) return { block: "当前派工为只读模式（readonly: true），禁止修改文件或执行命令。" };
+					}
 					if (!FILE_TOOLS.has(call.name)) return undefined;
 					const agent = (await hookApi.snapshot(AgentDoc, hookApi.conversationId, context)) as { cwd?: string } | undefined;
 					if (!agent?.cwd) return { block: "没有确定的工作目录，不能读写文件。" };
@@ -213,7 +217,7 @@ export function createMemberTools(kind: AgentKind, api: ApiMemberConfig, options
 }
 
 /** 给 API 成员的工作说明（相当于 CLI 自带的系统提示）；项目的共同规则也带上 */
-export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdir: string, label: string, agent?: AgentConfig, domain?: string): string {
+export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdir: string, label: string, agent?: AgentConfig, domain?: string, readonly = false): string {
 	if (agent?.workspace === "none") return [
 		`你是 Lemma 协作团队的成员「${label}」（ID: ${kind}），在自己的独立会话中完成交付的任务。`,
 		domain ?? "", agent.description, agent.instructions ?? "",
@@ -225,7 +229,7 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 	const rulesFile = join(workdir, ".pi-agent", "RULES.md");
 	const rules = existsSync(rulesFile) ? readFileSync(rulesFile, "utf8").trim().slice(0, 6000) : "";
 	const granted = new Set(memberToolNames(api));
-	const canWrite = granted.has("write") || granted.has("edit");
+	const canWrite = !readonly && (granted.has("write") || granted.has("edit"));
 	return [
 		domain ?? "", agent?.instructions ?? "",
 		`你是 Lemma 团队里的成员 ${label}（${kind}），由总调度派活。你在当前工作目录里完成交给你的任务。`,
@@ -234,12 +238,12 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 			: granted.has("read")
 				? "- 当前为只读代码会话：可用 list_files 浏览目录、outline_file 查看结构大纲、find_symbol 定位符号定义与引用、search_code 搜索代码、git_diff 查看相对于基线的改动差异、read 读取文件。所有路径相对当前工作目录，不能修改任何文件。"
 				: "- 当前会话未开放文件工具，请仅基于提供的任务与交接证据分析。",
-		api.bash === "off"
+		readonly || api.bash === "off"
 			? "- 你没有 bash，不能运行命令。"
 			: api.bash === "all"
 				? "- 可以用 bash 运行命令（测试、构建、查看）。"
 				: `- 可以用 bash 运行这些命令（一次一条，不能串接或重定向）：${api.bashAllow.join("、")}。别的命令会被拒绝。`,
-		"- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（Lemma 会替你提交到独立分支）。",
+		readonly ? "- 只读分析与审查，不要尝试修改文件。" : "- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（Lemma 会替你提交到独立分支）。",
 		"- 做完后用中文简要汇报：做了什么、改了哪些文件、测试结果、还有什么没做或有风险。",
 		...(rules ? ["", "项目的共同规则（.pi-agent/RULES.md）：", rules] : []),
 	].join("\n");
@@ -303,6 +307,7 @@ export async function runApiMember(o: {
 	resumeId?: string;
 	instructions: string;
 	scope?: TaskScope;
+	readonly?: boolean;
 	io: DispatchIO;
 	timeoutMs: number;
 	onSession: (id: string) => void;
@@ -323,14 +328,21 @@ export async function runApiMember(o: {
 				await configure(tx, record.id, { model: ref, cwd: o.cwd, instructions: o.instructions, extensions: [o.tools], maxTurns: o.api.maxTurns ?? 40 });
 				const identity = await tx.doc(MemberIdentity, record.id); identity.id = o.kind; identity.name = o.name ?? o.kind;
 				if (o.scope) identity.scope = o.scope; else delete identity.scope;
+				if (o.readonly) identity.readonly = true; else delete identity.readonly;
 				return String(record.id);
 			}
-			const existing = (await tx.scanConversations({ ownerTaskId: Number(io.taskId) as any }, 1)).items[0];
-			if (existing) return String(existing.id);
-			const created = await tx.createConversation({ ownership: { kind: "task", taskId: Number(io.taskId) as any } });
+			const numericTaskId = Number(io.taskId);
+			if (Number.isFinite(numericTaskId)) {
+				const existing = (await tx.scanConversations({ ownerTaskId: numericTaskId as any }, 1)).items[0];
+				if (existing) return String(existing.id);
+			}
+			const created = await tx.createConversation({
+				ownership: Number.isFinite(numericTaskId) ? { kind: "task", taskId: numericTaskId as any } : { kind: "ownerless" },
+			});
 			await configure(tx, created.id, { model: ref, extensions: [o.tools], instructions: o.instructions, cwd: o.cwd, maxTurns: o.api.maxTurns ?? 40 });
 			const identity = await tx.doc(MemberIdentity, created.id); identity.id = o.kind; identity.name = o.name ?? o.kind;
 			if (o.scope) identity.scope = o.scope; else delete identity.scope;
+			if (o.readonly) identity.readonly = true; else delete identity.readonly;
 			return String(created.id);
 		});
 	} catch (error) {

@@ -12,7 +12,7 @@
     "check": "node --no-warnings scripts/check-agents.ts",
     "bench:context": "node --no-warnings scripts/benchmark-context.ts",
     "bench:collaboration": "node --no-warnings scripts/benchmark-collaboration.ts",
-    "test:collaboration": "node --no-warnings test/integrations.ts && node --no-warnings test/task-workflow.ts && node --no-warnings test/task-workflow-api.ts && node --no-warnings test/task-workflow-code.ts && node --no-warnings test/task-recovery.ts && node --no-warnings test/context-handoff.ts && node --no-warnings test/collaboration-controls.ts && node --no-warnings test/mcp.ts && node --no-warnings test/collaboration-benchmark.ts",
+    "test:collaboration": "node --no-warnings test/integrations.ts && node --no-warnings test/task-workflow.ts && node --no-warnings test/task-workflow-api.ts && node --no-warnings test/task-workflow-code.ts && node --no-warnings test/task-recovery.ts && node --no-warnings test/context-handoff.ts && node --no-warnings test/collaboration-controls.ts && node --no-warnings test/mcp.ts && node --no-warnings test/collaboration-benchmark.ts && node --no-warnings test/fast-path.ts",
     "test:metrics": "node --no-warnings test/selector-metadata.ts && node --no-warnings test/model-discovery.ts && node --no-warnings test/context-benchmark.ts",
     "typecheck": "tsc -p .",
     "test:dialogue": "node --no-warnings test/conversation.ts",

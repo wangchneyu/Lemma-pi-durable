@@ -278,6 +278,9 @@ async function createAdminBinding(options: AdminOptions, startedAt: number): Pro
 			if (typeof details?.model === "string") d.model = details.model;
 			d.costEstimated = details?.costEstimated === true || undefined;
 			if (typeof details?.changeId === "string") d.changeId = details.changeId;
+			if (details?.readonly === true) d.readonly = true;
+			if (details?.fastPath === true) d.fastPath = true;
+			if (details?.escalated === true) d.escalated = true;
 			// 后台派工：这条结果只是「已开工」，真正的结果在后台派工记录里（见 withJob）
 			if (typeof details?.job === "string") {
 				d.job = details.job;

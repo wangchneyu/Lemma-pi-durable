@@ -40,6 +40,11 @@ export async function repoRoot(cwd: string): Promise<string | undefined> {
 
 /** 在独立临时索引中拍工作区快照，包含未跟踪且未忽略的新文件，不改用户索引或分支。 */
 export async function snapshot(root: string): Promise<string> {
+	// 干净工作区直接复用 HEAD，跳过全仓临时索引扫描，大幅降低新派工启动耗时
+	const status = await git(root, ["status", "--porcelain"]);
+	if (status.code === 0 && !status.stdout.trim()) {
+		return must(root, ["rev-parse", "HEAD"]);
+	}
 	const directory = mkdtempSync(join(tmpdir(), "pi-agent-index-"));
 	const env = { ...process.env, GIT_INDEX_FILE: join(directory, "index") };
 	const run = async (args: string[]) => {

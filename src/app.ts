@@ -24,6 +24,7 @@ export interface App {
 	cancelIntegration: ReturnType<typeof createLocalAgentsExtension>["integrations"]["cancel"];
 	workflow(action: "status" | "pause" | "resume", context: Context): Promise<{ paused: boolean }>;
 	recoverTask: ReturnType<typeof createLocalAgentsExtension>["recover"];
+	fastDispatch: ReturnType<typeof createLocalAgentsExtension>["fastDispatch"];
 	/** 可选交互终端确认回调：供 request_apply 弹出同意合并确认 */
 	confirmApply?: ConfirmApplyFn;
 	/** Stage an idle-host update; applying retains the same Harness and conversation IDs. */
@@ -87,7 +88,7 @@ export async function openApp(
 	const jobs = new JobHub();
 	let confirmApply: ConfirmApplyFn | undefined;
 	const getConfirmApply = () => confirmApply;
-	let { extension, agents, memberExtensions, recover, ensureWorkflow, integrations } = createLocalAgentsExtension(config, changes, project, jobs, getConfirmApply);
+	let { extension, agents, memberExtensions, recover, fastDispatch, ensureWorkflow, integrations } = createLocalAgentsExtension(config, changes, project, jobs, getConfirmApply);
 	const registry = createRegistry();
 	registry.install(extension);
 	for (const extra of options.extensions ?? []) registry.install(extra);
@@ -142,7 +143,7 @@ export async function openApp(
 	return { harness, root, agents, changes, project, jobs,
 		get confirmApply() { return confirmApply; },
 		set confirmApply(fn) { confirmApply = fn; },
-		integrate: (...args) => integrations.start(...args), rerunIntegration: (...args) => integrations.startRerun(...args), repairIntegration: (...args) => integrations.startRepair(...args), cancelIntegration: (...args) => integrations.cancel(...args), recoverTask: (...args) => recover(...args), async workflow(action, context) {
+		integrate: (...args) => integrations.start(...args), rerunIntegration: (...args) => integrations.startRerun(...args), repairIntegration: (...args) => integrations.startRepair(...args), cancelIntegration: (...args) => integrations.cancel(...args), recoverTask: (...args) => recover(...args), fastDispatch: (...args) => fastDispatch(...args), async workflow(action, context) {
 		if (action === "status") return { paused: (await harness.snapshot(Workflow, context))?.controllers[String(root.id)]?.paused ?? false };
 		await harness.commit(async (tx) => {
 			const state = await tx.doc(Workflow); state.controllers[String(root.id)] ??= {}; state.controllers[String(root.id)]!.paused = action === "pause";
@@ -159,6 +160,7 @@ export async function openApp(
 			for (const member of prepared.memberExtensions) registry.install(member);
 			extension = prepared.extension; memberExtensions = prepared.memberExtensions;
 			recover = prepared.recover;
+			fastDispatch = prepared.fastDispatch;
 			ensureWorkflow = prepared.ensureWorkflow;
 			integrations = prepared.integrations;
 			agents.splice(0, agents.length, ...prepared.agents);

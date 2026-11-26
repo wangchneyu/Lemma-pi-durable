@@ -31,6 +31,16 @@ import {
 
 const RUN_LABEL = { running: "进行中", background: "后台进行中", done: "完成", partial: "有失败", error: "失败", aborted: "已中止", open: "未完成" };
 const PILL = { running: "running", background: "running", done: "done", partial: "error", error: "error", aborted: "aborted", interrupted: "aborted", open: "aborted" };
+const EXEC_PATH = {
+	readonly: { label: "只读直查", cls: "p-readonly" },
+	fast: { label: "单跳快路", cls: "p-fast" },
+	team: { label: "多 Agent 协同", cls: "p-team" },
+	chat: { label: "直接对话", cls: "p-chat" },
+};
+function execPathBadge(path) {
+	const meta = EXEC_PATH[path];
+	return meta ? `<span class="path-badge ${meta.cls}">${meta.label}</span>` : "";
+}
 
 function empty(text) {
 	return `<div class="empty-state">${esc(text)}</div>`;
@@ -268,9 +278,18 @@ function overview() {
 			const s = sankey.summary();
 			const t = totals();
 			const budget = store.state?.budget;
+			const runs = buildRuns().filter((r) => !r.divider);
+			const roCount = runs.filter((r) => r.execPath === "readonly").length;
+			const fastCount = runs.filter((r) => r.execPath === "fast").length;
+			const teamCount = runs.filter((r) => r.execPath === "team").length;
+			const pathBits = [
+				roCount ? `只读直查 <b>${roCount}</b>` : "",
+				fastCount ? `单跳快路 <b>${fastCount}</b>` : "",
+				teamCount ? `多 Agent 协同 <b>${teamCount}</b>` : "",
+			].filter(Boolean).join(" · ");
 			box.innerHTML = s?.total
-				? `<span><b>${s.total}</b> 次派工</span>${s.rate !== null ? `<span><b>${s.rate}%</b> 成功</span>` : ""}${s.running ? `<span class="live"><b>${s.running}</b> 执行中</span>` : ""}<span><b>${money(t.cost)}</b> 花费</span>${budget?.perRunUsd != null && budget.runKey ? `<span>本轮 ${money(budget.spent)} / ${money(budget.perRunUsd)}</span>` : ""}`
-				: `<span>${RANGES[sankey.range].label === "全部" ? "还没有派工" : `最近 ${RANGES[sankey.range].label} 没有派工`}</span>`;
+				? `<span><b>${s.total}</b> 次派工</span>${s.rate !== null ? `<span><b>${s.rate}%</b> 成功</span>` : ""}${s.running ? `<span class="live"><b>${s.running}</b> 执行中</span>` : ""}<span><b>${money(t.cost)}</b> 花费</span>${budget?.perRunUsd != null && budget.runKey ? `<span>本轮 ${money(budget.spent)} / ${money(budget.perRunUsd)}</span>` : ""}${pathBits ? `<span>${pathBits}</span>` : ""}`
+				: `<span>${RANGES[sankey.range].label === "全部" ? "还没有派工" : `最近 ${RANGES[sankey.range].label} 没有派工`}</span>${pathBits ? `<span>${pathBits}</span>` : ""}`;
 		},
 	};
 }
@@ -278,7 +297,7 @@ function overview() {
 function runRow(run) {
 	const text = run.user ? short(run.user.text, 90) : "（输入在更早的历史里）";
 	return `<a class="run-row" href="#/runs/${run.id}" data-id="${run.id}">
-		<span class="run-top"><time>${stamp(run.at)}</time><span class="pill" data-s="${PILL[run.status]}">${RUN_LABEL[run.status]}</span></span>
+		<span class="run-top"><time>${stamp(run.at)}</time><span class="run-top-r">${run.execPath && run.execPath !== "chat" ? execPathBadge(run.execPath) : ""}<span class="pill" data-s="${PILL[run.status]}">${RUN_LABEL[run.status]}</span></span></span>
 		<span class="run-input">${esc(text)}</span>
 		<span class="run-foot">${run.agents.map(agentTag).join("")}<span class="run-meta">${run.dispatchCount ? `派工 ${run.dispatchCount}` : "直接回答"}${run.endAt && run.at ? ` · ${duration(run.endAt - run.at)}` : ""}</span></span>
 	</a>`;
@@ -810,6 +829,7 @@ function runs() {
 			pill.dataset.s = PILL[run.status];
 			pill.textContent = RUN_LABEL[run.status];
 			box.querySelector('[data-n="meta"]').innerHTML = [
+				execPathBadge(run.execPath),
 				`开始 ${stamp(run.at)}`,
 				run.endAt && run.at ? `耗时 ${duration(run.endAt - run.at)}` : "",
 				run.dispatchCount ? `派工 ${run.dispatchCount} 次` : "没有派工",
@@ -900,7 +920,7 @@ function dispatches() {
 						<td class="mono">${stamp(d.at)}</td>
 						<td>${agentTag(d.agent)}</td>
 						<td class="hide-sm">${d.model ? `<span class="model-chip">${esc(d.model)}</span>` : `<span class="muted">—</span>`}</td>
-						<td class="w-task"><span class="cell-task">${d.callId?.startsWith("checker:") ? `<span class="resume-tag">独立复核</span>` : d.callId?.startsWith("integration-repair:") ? `<span class="resume-tag">集成修复</span>` : d.callId?.startsWith("workflow:") ? `<span class="resume-tag">自动推进</span>` : ""}${d.resume ? `<span class="resume-tag">续接</span>` : ""}${d.basedOn ? `<span class="resume-tag">基于 #${esc(d.basedOn)}</span>` : ""}${esc(short(d.task, 140) || "—")}</span></td>
+						<td class="w-task"><span class="cell-task">${d.readonly ? `<span class="resume-tag">只读直查</span>` : d.fastPath ? `<span class="resume-tag">${d.escalated ? "快路已升级" : "单跳快路"}</span>` : ""}${d.callId?.startsWith("checker:") ? `<span class="resume-tag">独立复核</span>` : d.callId?.startsWith("integration-repair:") ? `<span class="resume-tag">集成修复</span>` : d.callId?.startsWith("workflow:") ? `<span class="resume-tag">自动推进</span>` : ""}${d.resume ? `<span class="resume-tag">续接</span>` : ""}${d.basedOn ? `<span class="resume-tag">基于 #${esc(d.basedOn)}</span>` : ""}${esc(short(d.task, 140) || "—")}</span></td>
 						<td><span class="pill" data-s="${PILL[d.status]}">${STATUS_LABEL[d.status]}</span></td>
 						<td class="num mono">${took}</td>
 						<td class="num mono hide-sm" title="${d.costEstimated ? "按单价估算" : ""}">${money(d.cost)}${d.costEstimated ? "≈" : ""}</td>

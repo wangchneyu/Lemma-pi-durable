@@ -111,6 +111,12 @@ export interface Dispatch {
 	costEstimated?: boolean;
 	/** 隔离派工的改动编号 */
 	changeId?: string;
+	/** 只读免隔离派工 */
+	readonly?: boolean;
+	/** 单跳快路派工 */
+	fastPath?: boolean;
+	/** 快路改动超范围已自动升级 */
+	escalated?: boolean;
 	/** 基于哪次改动开工 */
 	basedOn?: string;
 	/** 分工表任务 */

@@ -1,12 +1,14 @@
 // 把本机 CLI 包装成 Pi Durable 工具：ask_claude / ask_codex / ask_gemini。
 // 每次派工可以：由总调度选模型；在独立的 git worktree 里干活（改动等用户在终端确认后才合并）；
 // 受单次运行的花费上限约束；同步等结果，或者放到后台（background: true）由 wait_jobs 收结果。
+import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineExtension, defineTask, defineTool, hook, ToolTask, section, type Extension, type JsonObject, type ConversationId, type Tx } from "@earendil-works/pi-durable";
 import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { agentAdapter } from "./agents.ts";
-import { createMemberTools, memberAvailability } from "./api-member.ts";
+import { createMemberTools, memberAvailability, pathRefusal } from "./api-member.ts";
+import { createCodeReadTools } from "./code-tools.ts";
 import { Board, boardSummary, STATUS_LABEL, type BoardState, type BoardTask, type ProjectFiles, type TaskStatus } from "./board.ts";
 import type { ChangeStore } from "./changes.ts";
 import { resolveCommand, autonomyChecksForRoot, type AgentKind, type AppConfig } from "./config.ts";
@@ -22,6 +24,7 @@ import {
 	type DispatchArgs,
 	type DispatchDeps,
 	type DispatchIO,
+	type DispatchResult,
 } from "./dispatch.ts";
 import { clip, JOB_REPORT_ENTRY, JOB_REQUEST_PREFIX, JobDone, jobReport, Jobs, type JobHub, type JobRecord, type JobsState } from "./jobs.ts";
 import { managedDispatch } from "./repair.ts";
@@ -293,6 +296,8 @@ function createAgentTool(kind: AgentKind, command: string[], deps: DispatchDeps,
 			context_mode: opt(oneOf(["auto", "full"], { description: "auto 续接只传变更和必要任务约束；full 重发相关项目上下文" })),
 			inputs: opt(arr(obj({ result_id: str(), field: opt(str({ description: "结构化字段，如 data.total 或 evidence；不填交接原文" })), offset: opt(num({ minimum: 0 })), limit: opt(num({ minimum: 1, maximum: 8000 })) }), { maxItems: 8, description: "显式交接已成功的成员结果片段；保留来源，不复制完整聊天" })),
 			structured: opt(bool({ description: "要求 lemma.delivery.v1 JSON 交付：conclusion、data、evidence、artifacts、incomplete" })),
+			readonly: opt(bool({ description: "只读分析/审查模式：跳过 Git snapshot 与新建 worktree，禁止修改文件（可搭配 based_on 只读检查已有分支）" })),
+			fast_path: opt(bool({ description: "单文件低风险快路：跳过冗长目标/分工表上下文注入；若实际改动超过 2 个文件将自动升级保留在独立分支" })),
 			background: opt(bool({ description: "放到后台执行，不等结果（耗时长、可以和别的工作并行的任务用）" })),
 			...(adapter.canResume ? { session_id: opt(str({ description: "续接之前的会话（之前返回的 session_id）" })) } : {}),
 		}),
@@ -654,13 +659,41 @@ function createRequestApplyTool(config: AppConfig, changes: ChangeStore, getConf
 	});
 }
 
+export interface FastDispatchOptions {
+	member?: AgentKind;
+	model?: string;
+	readonly?: boolean;
+	cwd?: string;
+	onOutput?: (chunk: string) => void;
+	signal?: AbortSignal;
+	autoConfirmApply?: boolean;
+}
+
+export interface FastDispatchOutcome {
+	member: AgentKind;
+	result: DispatchResult;
+	changeId?: string;
+	filesCount: number;
+	escalated: boolean;
+	applied?: boolean;
+	applyMessage?: string;
+}
+
 export function createLocalAgentsExtension(
 	config: AppConfig,
 	changes: ChangeStore,
 	project: ProjectFiles,
 	hub: JobHub,
 	getConfirmApply?: () => ConfirmApplyFn | undefined,
-): { extension: Extension; agents: AgentAvailability[]; memberExtensions: Extension[]; integrations: ReturnType<typeof createIntegrations>; ensureWorkflow(tx: Tx, controller: ConversationId): Promise<void>; recover(controller: ConversationId, args: RecoveryRequest, key: string, context: Context): Promise<JobRecord> } {
+): {
+	extension: Extension;
+	agents: AgentAvailability[];
+	memberExtensions: Extension[];
+	integrations: ReturnType<typeof createIntegrations>;
+	ensureWorkflow(tx: Tx, controller: ConversationId): Promise<void>;
+	recover(controller: ConversationId, args: RecoveryRequest, key: string, context: Context): Promise<JobRecord>;
+	fastDispatch(controller: ConversationId, task: string, options?: FastDispatchOptions): Promise<FastDispatchOutcome>;
+} {
 	const agents = detectAgents(config);
 	// API 成员的工具扩展：只装给它们自己的子对话，总调度看不到
 	const memberTools = new Map<AgentKind, Extension>();
@@ -683,6 +716,7 @@ export function createLocalAgentsExtension(
 	integrationHooks.available = availableSet;
 	integrationHooks.enqueue = enqueueInternal;
 	integrationHooks.ensureWorkflow = workflow.ensure;
+	const hasCodeMembers = agents.some((a) => a.available && config.agents[a.kind].workspace !== "none");
 	const tools = [
 		...integrations.tools,
 		createReadResultTool(),
@@ -690,6 +724,7 @@ export function createLocalAgentsExtension(
 		createTaskRecoveryTool(project, config, changes),
 		createRepoGitTool({ config, changes, getHarness: () => hub.harness, onChanged: () => hub.changed() }),
 		createRequestApplyTool(config, changes, getConfirmApply),
+		...(hasCodeMembers ? createCodeReadTools(pathRefusal, changes) : []),
 		...agents.filter((a) => a.available).map((a) => createAgentTool(a.kind, a.command!, deps, jobTask)),
 		...createJobTools(hub),
 		...createBoardTools(config, project, changes),
@@ -715,7 +750,6 @@ export function createLocalAgentsExtension(
 		})
 		.join("\n");
 	const limit = config.budget.perRunUsd;
-	const hasCodeMembers = agents.some((a) => a.available && config.agents[a.kind].workspace !== "none");
 
 	const extension = defineExtension({
 		name: "local-agents",
@@ -764,7 +798,7 @@ export function createLocalAgentsExtension(
 						...(roles ? ["角色分工（规划任务时给每项定角色，派工时按角色找成员；首选不可用时用后面的）：", roles, ""] : []),
 						"工作方式：",
 						"1. 先理解用户目标。简单问题直接回答，不必派活，也不必建分工表。",
-						"1a. 总控已有足够资料时直接完成；只有明确需要独立工具、专业能力、并行工作或独立核查才派成员。不要为形式分工，也不要为转述结果再开一个成员。",
+						"1a. 总控自带只读代码感知工具（list_files / outline_file / find_symbol / search_code / git_diff）：仓库问答、定位符号、排查报错直接 1 跳完成，不必派成员。只有明确需要改代码、专业能力、并行工作或独立核查才派成员；只读分析/审查派工传 readonly:true 免建 worktree。",
 						"2. 项目级、多步骤的任务：先用 plan_tasks 拆解，每项写清楚验收标准、角色、依赖；然后按依赖顺序派工，互不依赖的任务同时派。",
 						"3. 派工时传 task_id：成员会同时拿到项目目标、这项任务和分工全貌，知道自己在全局里的位置。",
 						"4. 选模型：按任务难度传 model。简单、机械的活用［经济］，日常开发用［标准］，复杂设计、跨模块改动、疑难问题才用［强力］。不确定就不传，用默认（角色配置里写了模型的优先用它）。",
@@ -775,7 +809,7 @@ export function createLocalAgentsExtension(
 						"5d. ready_tasks 返回系统计算的就绪队列与等待原因。明确授权自动执行时，plan_tasks 为对应任务声明 automation:{member,model?,maxReworks?}；依赖验收通过后 Durable 自动交接结果并派工。未声明不自动执行，不要再对自动执行中的任务重复 ask_*。",
 						"5e. 要求独立复核时，plan_tasks 声明 reviewer:{member,model?,blind?}，成员必须不同于执行者。代码任务可设 blind:true 开启盲审（不向复核员传递执行者的主观自述解释，仅审需求契约与 git_diff 客观代码变更，消除迎合偏见）。交付后系统在独立会话复核并绑定 result_id；通过才完成，返工仅在已授权次数内续接原成员，不可绕过复核标 done。",
 						"5f. 多个成员代码分支先 integrate_changes changes:[完整改动编号]，read_integration id:集成编号 wait:true 原生挂起等待联合检查；若主目录或来源更新导致过期，传 rerun_id 重验；若出现合并冲突（conflict）或跨模块检查失败（failed），可用 repair_integration 在独立修复副本派编码成员解决并重跑全部检查。自动依赖任务包含多分支时由 Durable 先集成，通过才派下游。集成只改独立副本，最终应用必须用户终端 /apply，模型无权代替确认。",
-						"5g. 自适应编码拓扑与路径契约（scope）：单文件低风险任务走 L0（单成员直派）；核心逻辑走 L1（automation + reviewer:{member,blind:true} 异构盲审）；多模块并行或高风险开发走 L2（先建 T1 契约任务冻结接口定义 → 并行派发 T2 功能实现 scope:{allow:['src/'],forbid:['test/']} 与 T3 独立测试 scope:{allow:['test/'],forbid:['src/']} → 下游联合集成测试），用硬性路径边界防止越界改动与篡改测试。",
+						"5g. 自适应快慢路径与路径契约（scope）：只读问答由总控 1 跳直查或传 readonly:true 免隔离派工；单文件低风险小改动走单跳快路（ask_* 传 fast_path:true，不建分工表、不走盲审集成，完成后直接 request_apply 弹窗确认，若实际修改超过 2 个文件系统自动升级保留分支）；核心逻辑启用独立复核/代码盲审（automation + reviewer:{member,blind:true}）；多模块并行或高风险开发走完整契约并行集成（先建契约任务冻结接口 → 并行实现与测试并锁定 scope:{allow,forbid} → 下游联合集成测试）。",
 						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
 						"6a. 成员结果默认只带限长预览；全文按 result_id 持久保存。缺少证据时用 read_result 分页读取，不能把截断预览当全文。续接只发送变更和必要证据，避免重复复制整段历史。",
 						"6b. ask_* 默认自动省略原成员会话里未变化的项目背景与相同交接片段；改了目标/约束会重发。怀疑原会话缺失或用户要求完整核对时用 context_mode=full；不能把少传字符当作真实 token/费用节省结论。",
@@ -854,5 +888,89 @@ export function createLocalAgentsExtension(
 			return job;
 		}, context);
 		hub.harness.resume(); hub.changed(); return job;
+	}, async fastDispatch(controller, task, options = {}) {
+		if (!hub.harness) throw new Error("运行时尚未就绪。");
+		const trimmed = task.trim();
+		if (!trimmed) throw new Error("请输入要执行的任务说明。");
+		const pickCodingMember = (): AgentKind | undefined => {
+			if (options.member) return options.member;
+			const codingRole = config.roles.find((r) => /编码|实现|开发|code|dev/i.test(r.name));
+			if (codingRole) {
+				for (const candidate of [codingRole.agent, ...(codingRole.fallback ?? [])]) {
+					if (commands.has(candidate) && config.agents[candidate]?.workspace !== "none") return candidate;
+				}
+			}
+			for (const a of agents) {
+				if (a.available && config.agents[a.kind]?.workspace !== "none") return a.kind;
+			}
+			return agents.find((a) => a.available)?.kind;
+		};
+		const kind = pickCodingMember();
+		if (!kind || !commands.has(kind)) throw new Error(options.member ? `成员 ${options.member} 不可用，请先 /agents 检查配置。` : "没有可用的编码成员，请先 /agents 检查配置。");
+		const callId = `fast:${randomUUID().slice(0, 8)}`;
+		const memoStore = new Map<string, any>();
+		const io: DispatchIO = {
+			callId,
+			taskId: callId,
+			conversationId: controller,
+			signal: options.signal ?? new AbortController().signal,
+			now: () => Date.now(),
+			commit: async (change) => hub.harness!.commit(change, BACKGROUND_CONTEXT),
+			memo: async (name, candidate) => {
+				if (memoStore.has(name)) return memoStore.get(name);
+				if (candidate !== undefined) memoStore.set(name, candidate);
+				return candidate;
+			},
+			output: (chunk) => options.onOutput?.(chunk),
+			details: async () => {},
+		};
+		const args: DispatchArgs = {
+			task: trimmed,
+			...(options.model ? { model: options.model } : {}),
+			...(options.cwd ? { cwd: options.cwd } : {}),
+			readonly: !!options.readonly,
+			fast_path: !options.readonly,
+		};
+		const over = await checkBudget(io, config);
+		if (over) throw new Error(over);
+		const invalid = await validateDispatch(kind, deps, args, io);
+		if (invalid) throw new Error(invalid);
+		const result = await managedDispatch(kind, commands.get(kind)!, deps, args, io);
+		hub.changed();
+		const changeId = typeof result.details?.changeId === "string" ? result.details.changeId : undefined;
+		const ch = changeId ? changes.get(changeId) : undefined;
+		const filesCount = ch?.files.length ?? 0;
+		const escalated = Boolean(result.details?.escalated) || Boolean(changeId && filesCount > 2) || Boolean(result.isError);
+		let applied: boolean | undefined;
+		let applyMessage: string | undefined;
+		if (!options.readonly && ch && filesCount > 0 && !escalated && options.autoConfirmApply !== false) {
+			const askConfirm = getConfirmApply?.();
+			if (askConfirm) {
+				const decision = await askConfirm({
+					summary: `单跳快路（${agentAdapter(kind, config.agents[kind]).label}）完成小范围改动：${trimmed.slice(0, 80)}`,
+					items: [{
+						id: ch.id,
+						agent: ch.agent,
+						branch: ch.branch,
+						root: ch.root,
+						filesCount: ch.files.length,
+						add: ch.add,
+						del: ch.del,
+						task: ch.task,
+						isIntegration: false,
+					}],
+				});
+				if (!decision.deferred && decision.approvedIds.includes(ch.id)) {
+					const r = await applyChange(changes, ch.id);
+					applied = r.ok;
+					applyMessage = r.message;
+					hub.changed();
+				} else {
+					applied = false;
+					applyMessage = decision.deferred ? (decision.reason ?? `暂未合并，改动保留在待合并队列（#${ch.id}）`) : `暂未合并，改动保留在待合并队列（#${ch.id}）`;
+				}
+			}
+		}
+		return { member: kind, result, changeId, filesCount, escalated, applied, applyMessage };
 	} };
 }
