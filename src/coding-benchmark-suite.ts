@@ -172,27 +172,27 @@ export function localTieredCodingRuntime(task: CodingBenchmarkTask, arm: Benchma
 		}),
 	);
 
-	// 3. auditor 盲审成员模拟（Tier 2 专用）
+	// 3. auditor 盲审成员模拟（Tier 2 专用：预内联 git_diff 已在首轮提供，直接 1 轮出裁决！）
 	const auditor = fauxProvider({ provider: memberProvider("auditor"), models: [{ id: "fixture" }], tokensPerSecond: 100_000 });
 	models.setProvider(auditor.provider);
 	let auditCount = 0;
 	auditor.setResponses(
 		Array.from({ length: 10 }, () => (ctx: any) => {
+			const userMsgs = ctx.messages.filter((m: any) => m.role === "user").map((m: any) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((b: any) => b.text ?? "").join(""))).join("\n");
+			const hasInlineDiff = userMsgs.includes("【预提取客观 git_diff】");
 			const res = toolResults(ctx);
-			const diffRes = res.findLast((r: any) => r.name === "git_diff");
-			if (!diffRes) {
+			if (!hasInlineDiff && !res.findLast((r: any) => r.name === "git_diff")) {
 				return fauxAssistantMessage([fauxToolCall("git_diff", {})], { stopReason: "toolUse" });
 			}
-			const userMsgs = ctx.messages.filter((m: any) => m.role === "user").map((m: any) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((b: any) => b.text ?? "").join(""))).join("\n");
 			const rid = userMsgs.match(/result_id"\s*:\s*"([^"]+)"/)?.[1] ?? userMsgs.match(/result_id="([^"]+)"/)?.[1] ?? "unknown";
 			auditCount++;
 			if (auditCount === 1) {
 				return fauxAssistantMessage(
-					fauxText(JSON.stringify({ verdict: "rework", result_id: rid, evidence: "盲审 git_diff 发现隐藏边界缺陷（未处理高基数清理/预发布规则/引号转义），请修复后重交。" })),
+					fauxText("```json\n" + JSON.stringify({ verdict: "rework", result_id: rid, evidence: "盲审预提取 git_diff 发现隐藏边界缺陷（未处理高基数清理/预发布规则/引号转义），请修复后重交。" }) + "\n```"),
 				);
 			}
 			return fauxAssistantMessage(
-				fauxText(JSON.stringify({ verdict: "accept", result_id: rid, evidence: "盲审 git_diff 确认全部边界条件已修复。" })),
+				fauxText(JSON.stringify({ verdict: "accept", result_id: rid, evidence: "盲审预提取 git_diff 确认全部边界条件已修复。" })),
 			);
 		}),
 	);
@@ -289,11 +289,7 @@ export function localTieredCodingRuntime(task: CodingBenchmarkTask, arm: Benchma
 				const c2 = testerRes?.text.match(/改动 #([a-f0-9]+)/)?.[1];
 				const intRes = res.find((r: any) => r.name === "integrate_changes");
 				if (!intRes && c1 && c2) {
-					return call("integrate_changes", { changes: [c1, c2] });
-				}
-				const intId = intRes?.text.match(/"id"\s*:\s*"([^"]+)"/)?.[1] ?? intRes?.text.match(/#([a-f0-9]+)/)?.[1];
-				if (intId && !res.some((r: any) => r.name === "read_integration")) {
-					return call("read_integration", { id: intId, wait: true });
+					return call("integrate_changes", { changes: [c1, c2], wait: true });
 				}
 				return fauxAssistantMessage(fauxText("多分支并行实现与联合集成已完成。"));
 			}
@@ -358,7 +354,7 @@ export async function runTieredCodingBenchmark(options: {
 									return (model: any, input: any, settings: any) => {
 										if (requests >= 36) throw new Error("该样本达到 36 次模型请求上限");
 										requests++;
-										const stream = target.streamSimple(model, input, { ...settings, maxTokens: 2048, temperature: 0, maxRetries: options.simulated ? 0 : 2 });
+										const stream = target.streamSimple(model, input, { ...settings, maxTokens: options.simulated ? 2048 : 4096, temperature: 0, maxRetries: options.simulated ? 0 : 2 });
 										pending.push(
 											stream.result().then((msg) => {
 												observations.push(msg.usage);
@@ -479,7 +475,7 @@ export async function runTieredCodingBenchmark(options: {
 							await app.root.configure({ extensions: [singleExt], cwd: repo }, BACKGROUND_CONTEXT);
 						}
 
-						const signal = AbortSignal.any([AbortSignal.timeout(options.simulated ? 90_000 : 150_000), ...(options.signal ? [options.signal] : [])]);
+						const signal = AbortSignal.any([AbortSignal.timeout(options.simulated ? 90_000 : 210_000), ...(options.signal ? [options.signal] : [])]);
 						const runCtx = withAbortSignal(signal, BACKGROUND_CONTEXT);
 
 						if (task.tier === 1 && arm === "lemma-adaptive") {
@@ -502,17 +498,17 @@ export async function runTieredCodingBenchmark(options: {
 								prompt = `${task.prompt}\n直接用 ask_coder 完成，不启用独立盲审。`;
 							} else if (task.tier === 3) {
 								prompt = arm === "lemma-adaptive"
-									? `${task.prompt}\n请用 plan_tasks 建立 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}），并行派 ask_coder 和 ask_tester，完成后用 integrate_changes 与 read_integration(wait:true) 联合集成验证。`
-									: `${task.prompt}\n请用 plan_tasks 建立 T1 与 T2（不设置 scope 路径契约），并行派 ask_coder 和 ask_tester，完成后用 integrate_changes 与 read_integration(wait:true) 联合集成验证。`;
+									? `${task.prompt}\n请用 plan_tasks 建立 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}），并行派 ask_coder 和 ask_tester，验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`
+									: `${task.prompt}\n请用 plan_tasks 建立 T1 与 T2（不设置 scope 路径契约），并行派 ask_coder 和 ask_tester，验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`;
 							}
 
 							const submission = await app.root.submit({ type: "input", content: prompt }, BACKGROUND_CONTEXT);
 							await submission.wait(runCtx);
 
-							// Tier 2 自动盲审链路需要等待 Durable workflow 收尾
+							// Tier 2 自动盲审链路需要等待 Durable workflow 收尾（真实模式给足推理收敛预算）
 							if (task.tier === 2 && arm === "lemma-adaptive") {
-								const deadline = Date.now() + 30_000;
-								while (Date.now() < deadline) {
+								const deadline = Date.now() + (options.simulated ? 30_000 : 150_000);
+								while (Date.now() < deadline && !signal.aborted) {
 									const board = await app.harness.snapshot(Board, BACKGROUND_CONTEXT);
 									const t1 = board?.tasks?.T1;
 									if (t1 && (t1.status === "done" || t1.status === "blocked")) break;

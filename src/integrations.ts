@@ -344,38 +344,54 @@ export function createIntegrations(deps: DispatchDeps, hooks: IntegrationHooks =
 		});
 	}
 
-	const tool = defineTool({
+	const tool = defineTool<any, any, { id: string }>({
 		name: "integrate_changes",
-		description: "将 2–8 个已验收的成员代码改动放到独立集成 worktree，依次合并并运行配置中的 autonomy.checks；也可传 rerun_id 对因主目录变化或中断失效的集成基于最新基线重验。返回集成编号，read_integration 查看进度、冲突与测试日志；只有用户终端 /apply 才应用。",
+		description: "将 2–8 个已验收的成员代码改动放到独立集成 worktree，依次合并并运行配置中的 autonomy.checks；也可传 rerun_id 基于最新基线重验。传 wait:true 时由 Durable 原生挂起等待合流与测试完成并直接返回最终结果，省去额外调用 read_integration 的往返；只有用户终端 /apply 才应用。",
 		parameters: obj({
 			changes: opt(arr(str(), { minItems: 2, maxItems: 8, description: "2–8 个已验收成员改动编号（与 rerun_id 二选一）" })),
 			rerun_id: opt(str({ description: "要基于当前最新主目录与来源基线重新合并验证的旧集成编号" })),
+			wait: opt(bool({ description: "为 true 时等待联合集成与全部检查完成后直接返回结果（推荐，减少总调度轮次）" })),
 		}),
 		replay: "safe",
 		execute: async (args, api, context) => {
 			try {
+				if (api.checkpoint?.id) {
+					const current = (await api.snapshot(Integrations, context))?.records[api.checkpoint.id];
+					if (current && !ended(current)) return { sleep: { until: api.now() + 250 }, checkpoint: api.checkpoint } as any;
+					const resolved = current ? changes.get(current.id) ?? current : changes.get(api.checkpoint.id);
+					return { output: [{ type: "text" as const, text: JSON.stringify(resolved ? integrationSummary(resolved) : { id: api.checkpoint.id, status: "unknown" }) }] };
+				}
 				if (!args.rerun_id && (!args.changes || args.changes.length < 2)) throw new Error("请提供 2–8 个 changes 改动编号，或指定 rerun_id 重验已有集成。");
 				const record = await api.commit((tx) => args.rerun_id ? rerun(tx, api.conversationId, args.rerun_id, `tool:${api.taskId}`) : create(tx, api.conversationId, args.changes!, `tool:${api.taskId}`), context);
 				publish(record);
+				if (args.wait && !ended(record)) return { sleep: { until: api.now() + 250 }, checkpoint: { id: record.id } } as any;
 				return { output: [{ type: "text" as const, text: JSON.stringify(integrationSummary(record)) }] };
 			} catch (error) { return { output: [{ type: "text" as const, text: String(error) }], isError: true }; }
 		},
 	});
 
-	const repairTool = defineTool({
+	const repairTool = defineTool<any, any, { id: string }>({
 		name: "repair_integration",
-		description: "针对处于 conflict（合并冲突）或 failed（联合检查未通过）的联合集成，在独立修复副本中派编码成员解决冲突或跨模块问题，完成后自动重跑全部 autonomy.checks。原始来源分支与主目录不会被修改；通过后仍需用户终端 /apply。",
+		description: "针对处于 conflict（合并冲突）或 failed（联合检查未通过）的联合集成，在独立修复副本中派编码成员解决冲突或跨模块问题，完成后自动重跑全部 autonomy.checks。传 wait:true 时原生等待修复与重验完成并直接返回最终结果。",
 		parameters: obj({
 			id: str({ description: "处于 conflict 或 failed 状态的集成编号（如 I...）" }),
 			member: str({ description: "负责修复的可用编码成员 ID（CLI 或具备写权限的 API 编码成员）" }),
 			note: opt(str({ description: "可选修复提示，说明如何取舍冲突或对齐接口" })),
 			model: opt(str({ description: "可选指定成员模型 ID" })),
+			wait: opt(bool({ description: "为 true 时等待修复与联合检查全部完成后直接返回最终结果" })),
 		}),
 		replay: "safe",
 		execute: async (args, api, context) => {
 			try {
+				if (api.checkpoint?.id) {
+					const current = (await api.snapshot(Integrations, context))?.records[api.checkpoint.id];
+					if (current && !ended(current)) return { sleep: { until: api.now() + 250 }, checkpoint: api.checkpoint } as any;
+					const resolved = current ? changes.get(current.id) ?? current : changes.get(api.checkpoint.id);
+					return { output: [{ type: "text" as const, text: JSON.stringify(resolved ? integrationSummary(resolved) : { id: api.checkpoint.id, status: "unknown" }) }] };
+				}
 				const record = await api.commit((tx) => repair(tx, api.conversationId, args.id, args.member, args.note, args.model, `tool:${api.taskId}`), context);
 				publish(record);
+				if (args.wait && !ended(record)) return { sleep: { until: api.now() + 250 }, checkpoint: { id: record.id } } as any;
 				return { output: [{ type: "text" as const, text: JSON.stringify(integrationSummary(record)) }] };
 			} catch (error) { return { output: [{ type: "text" as const, text: String(error) }], isError: true }; }
 		},

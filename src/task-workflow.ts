@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { defineDoc, defineTask, type ConversationId, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { createHash } from "node:crypto";
 import { memberToolNames } from "./api-member.ts";
@@ -18,11 +19,41 @@ export type EnqueueWorkflowJob = (tx: Tx, controller: ConversationId, key: strin
 export type CheckerVerdict = { verdict: "accept" | "rework" | "block"; evidence: string; result_id: string };
 
 export function checkerVerdict(text: string, resultId: string): CheckerVerdict | undefined {
+	const raw = text.trim();
+	const candidates: string[] = [raw];
+	const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+	if (fenced?.[1]) candidates.push(fenced[1].trim());
+	const firstBrace = raw.indexOf("{");
+	const lastBrace = raw.lastIndexOf("}");
+	if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(raw.slice(firstBrace, lastBrace + 1));
+	for (const candidate of candidates) {
+		try {
+			const value = JSON.parse(candidate);
+			if (value && ["accept", "rework", "block"].includes(value.verdict) && value.result_id === resultId && typeof value.evidence === "string" && value.evidence.trim() && value.evidence.length <= 6000) {
+				return { verdict: value.verdict, evidence: value.evidence.trim(), result_id: value.result_id };
+			}
+		} catch {
+			/* 尝试下一个候选 JSON 片段 */
+		}
+	}
+	return undefined;
+}
+
+function inlineDiffForReview(root: string, from: string, to: string, maxChars = 12_000): { text: string; truncated: boolean } | undefined {
 	try {
-		const value = JSON.parse(text.trim());
-		if (!value || !["accept", "rework", "block"].includes(value.verdict) || value.result_id !== resultId || typeof value.evidence !== "string" || !value.evidence.trim() || value.evidence.length > 6000) return;
-		return { verdict: value.verdict, evidence: value.evidence.trim(), result_id: value.result_id };
-	} catch { return; }
+		const out = execFileSync("git", ["-C", root, "diff", "--no-color", "--no-renames", "--unified=3", from, to], {
+			encoding: "utf8",
+			maxBuffer: 512 * 1024,
+			timeout: 3000,
+			windowsHide: true,
+		}).trim();
+		if (!out) return undefined;
+		return out.length > maxChars
+			? { text: `${out.slice(0, maxChars)}\n…（diff 共 ${out.length} 字符，已截断；如需查看其余部分请调用 git_diff 或 read）`, truncated: true }
+			: { text: out, truncated: false };
+	} catch {
+		return undefined;
+	}
 }
 
 const own = (task: BoardTask, controller: string) => task.controllerId === controller || !task.controllerId && task.lastAttempt?.controllerId === controller;
@@ -98,13 +129,14 @@ export function createTaskWorkflow(deps: DispatchDeps, available: Set<string>, e
 				const chunkCount = Math.max(1, Math.ceil(source.text.length / 8000));
 				const reviewInputs = blindReview ? [] : Array.from({ length: chunkCount }, (_, index) => ({ result_id: source.id, offset: index * 8000, limit: 8000 }));
 				const scopeNote = item.scope ? `\n路径契约：${formatScopeSummary(item.scope)}` : "";
+				const preDiff = changed?.files.length ? inlineDiffForReview(changed.root, changes.range(changed)[0], changed.head) : undefined;
 				const codeSummary = changed?.files.length
-					? `\n代码改动 #${changed.id}（${changes.range(changed)[0].slice(0, 12)}..${changed.head.slice(0, 12)}，共 ${changed.files.length} 个文件，+${changed.add} -${changed.del}）：\n${changed.files.slice(0, 30).map((f) => `  - ${f.path} (+${f.add} -${f.del})`).join("\n")}${changed.files.length > 30 ? `\n  - …共 ${changed.files.length} 个文件` : ""}\n请结合工作区只读检查（git_diff / outline_file / find_symbol / search_code / list_files / read）核对真实代码实现与边界情况，不要仅凭执行者自述判断。`
+					? `\n代码改动 #${changed.id}（${changes.range(changed)[0].slice(0, 12)}..${changed.head.slice(0, 12)}，共 ${changed.files.length} 个文件，+${changed.add} -${changed.del}）：\n${changed.files.slice(0, 30).map((f) => `  - ${f.path} (+${f.add} -${f.del})`).join("\n")}${changed.files.length > 30 ? `\n  - …共 ${changed.files.length} 个文件` : ""}${preDiff ? `\n\n【预提取客观 git_diff】\n\`\`\`diff\n${preDiff.text}\n\`\`\`\n${preDiff.truncated ? "diff 已截断，可按需调用 git_diff / read 查看其余文件。" : "以上已是完整改动补丁；若信息已足够，请直接输出最终 JSON 裁决，无需重复调用 git_diff。"}` : "\n请结合工作区只读检查（git_diff / outline_file / find_symbol / search_code / list_files / read）核对真实代码实现与边界情况，不要仅凭执行者自述判断。"}`
 					: "";
 				const blindNote = blindReview
-					? `\n【代码盲审模式（Blind Review）】为消除迎合偏见（Sycophancy），系统已隐去执行者的主观自述解释。请完全依据任务验收标准、路径契约与工作区真实代码改动（git_diff / read）独立核查实现质量与边界缺陷；当前待签名交付版本为 result_id="${source.id}"。`
+					? `\n【代码盲审模式（Blind Review）】为消除迎合偏见（Sycophancy），系统已隐去执行者的主观自述解释。请完全依据任务验收标准、路径契约与客观代码改动独立核查实现质量与边界缺陷；当前待签名交付版本为 result_id="${source.id}"。`
 					: "\n核对引用中的完整交付和证据；资料不足应 block，发现缺陷应 rework。";
-				const args: DispatchArgs = { task: `独立复核任务 ${item.id}：${item.title}。你不是执行者，不得修改交付或代码，不得降低验收标准。\n验收标准：${item.acceptance ?? "逐项核对结论与证据"}${scopeNote}\n机器规则：${JSON.stringify(item.checks ?? [])}${codeSummary}${blindNote}\n仅输出 JSON：{"verdict":"accept|rework|block","result_id":"${source.id}","evidence":"逐项核对依据和具体缺口"}。`, ...(reviewInputs.length ? { inputs: reviewInputs } : {}), ...(changed?.files.length ? { based_on: changed.id } : {}), ...(item.reviewer.model ? { model: item.reviewer.model } : {}) };
+				const args: DispatchArgs = { task: `独立复核任务 ${item.id}：${item.title}。你不是执行者，不得修改交付或代码，不得降低验收标准。\n验收标准：${item.acceptance ?? "逐项核对结论与证据"}${scopeNote}\n机器规则：${JSON.stringify(item.checks ?? [])}${codeSummary}${blindNote}\n仅输出 JSON：{"verdict":"accept|rework|block","result_id":"${source.id}","evidence":"逐项核对依据和具体缺口"}。`, ...(reviewInputs.length ? { inputs: reviewInputs } : {}), ...(changed?.files.length ? { based_on: changed.id, readonly: true } : {}), ...(item.reviewer.model ? { model: item.reviewer.model } : {}) };
 				const job = await enqueue(tx, controller, `checker:${item.id}:${source.id}`, member, args, item.reviewer.model);
 				item.checksByMember ??= []; item.checksByMember.push({ sourceResultId: source.id, member, status: "running", jobId: job.id, at, ...(changed?.files.length ? { sourceChangeId: changed.id, sourceHead: changed.head } : {}) });
 				item.workflowJobs ??= []; item.workflowJobs.push({ jobId: job.id, kind: "review", sourceResultId: source.id }); board.updatedAt = at; return true;

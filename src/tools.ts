@@ -808,7 +808,7 @@ export function createLocalAgentsExtension(
 						"5c. 受阻或被取消后，用 recover_task inspect 查清失败依据；resume 续接原成员、supply 补资料、reassign 换人。按返回的 dispatch 参数调用对应 ask_*，只修失败部分；不重跑已验收前置任务，不降低验收标准。恢复同一任务不要重复 plan_tasks。",
 						"5d. ready_tasks 返回系统计算的就绪队列与等待原因。明确授权自动执行时，plan_tasks 为对应任务声明 automation:{member,model?,maxReworks?}；依赖验收通过后 Durable 自动交接结果并派工。未声明不自动执行，不要再对自动执行中的任务重复 ask_*。",
 						"5e. 要求独立复核时，plan_tasks 声明 reviewer:{member,model?,blind?}，成员必须不同于执行者。代码任务可设 blind:true 开启盲审（不向复核员传递执行者的主观自述解释，仅审需求契约与 git_diff 客观代码变更，消除迎合偏见）。交付后系统在独立会话复核并绑定 result_id；通过才完成，返工仅在已授权次数内续接原成员，不可绕过复核标 done。",
-						"5f. 多个成员代码分支先 integrate_changes changes:[完整改动编号]，read_integration id:集成编号 wait:true 原生挂起等待联合检查；若主目录或来源更新导致过期，传 rerun_id 重验；若出现合并冲突（conflict）或跨模块检查失败（failed），可用 repair_integration 在独立修复副本派编码成员解决并重跑全部检查。自动依赖任务包含多分支时由 Durable 先集成，通过才派下游。集成只改独立副本，最终应用必须用户终端 /apply，模型无权代替确认。",
+						"5f. 多个成员代码分支直接调 integrate_changes(changes:[完整改动编号], wait:true) 原生挂起等待合流与联合检查（一次往返拿最终结果，不必再单独调 read_integration）；若主目录或来源更新导致过期，传 rerun_id + wait:true 重验；若出现合并冲突（conflict）或跨模块检查失败（failed），用 repair_integration(..., wait:true) 在独立修复副本解决并重跑全部检查。自动依赖任务包含多分支时由 Durable 先集成，通过才派下游。集成只改独立副本，最终应用必须用户终端 /apply 或 request_apply 弹窗确认，模型无权代替确认。",
 						"5g. 自适应快慢路径与路径契约（scope）：只读问答由总控 1 跳直查或传 readonly:true 免隔离派工；单文件低风险小改动走单跳快路（ask_* 传 fast_path:true，不建分工表、不走盲审集成，完成后直接 request_apply 弹窗确认，若实际修改超过 2 个文件系统自动升级保留分支）；核心逻辑启用独立复核/代码盲审（automation + reviewer:{member,blind:true}）；多模块并行或高风险开发走完整契约并行集成（先建契约任务冻结接口 → 并行实现与测试并锁定 scope:{allow,forbid} → 下游联合集成测试）。",
 						"6. 需要在之前的上下文里继续时，传入上次返回的 session_id。同一个成员可以同时开多个会话（多个新派工），各自独立；但同一个会话同一时间只能有一个派工。",
 						"6a. 成员结果默认只带限长预览；全文按 result_id 持久保存。缺少证据时用 read_result 分页读取，不能把截断预览当全文。续接只发送变更和必要证据，避免重复复制整段历史。",

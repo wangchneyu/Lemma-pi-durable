@@ -9,9 +9,11 @@
 1. **Tier 1 单跳快路（Fast Path）消融收益显著且稳定复现**：
    - 在官方 DeepSeek 实测中，`lemma-adaptive`（快路 `deepseek-flash`）达到 **3/3 任务全过（隐藏用例 6/6 = 100%）**，平均 **7.0 次请求 / 13.1s**；对比去掉快路的 `ablation-no-fastpath`（**1/3 通过，27.0 次请求 / 148.4s / 752k tokens / \$0.2920**），**请求数减少 74%、耗时减少 91%、通过率提升 +67 个百分点**，且耗时快于单 Agent `deepseek-v4-pro` 基线（2/3 通过，平均 24.0s）。
    - 在此前的 `claude-sonnet-5-5` 实测中亦复现同一趋势：Tier 1 隐藏用例三组均 6/6（100%），快路将请求数从 **18.3 降至 6.7（-63%）**、耗时从 **87.0s 降至 26.0s（-70%）**。
-2. **Tier 2 / Tier 3 暴露的下一阶段优化方向（P2 重点）**：
-   - **Tier 2**：`ablation-no-blind`（直接派工）通过 **2/3（67%，\$0.0980）**，高于 `single`（1/3，33%）；`lemma-adaptive`（Durable 自动盲审）在本轮 0/3，根因是评测机仅等待后台工作流 30s，在 `deepseek-v4-pro` 较长推理耗时下后台盲审尚未收敛即退出。
-   - **Tier 3**：多模块并行 + 路径契约 + 联合集成在 `lemma-adaptive` 中实测触发了 **1 次路径契约拦截**，但受 150s 单样本超时与 2048 单次输出 token 限制，三组在真实模型下均未在时限内完成合流（离线确定性回归 `test/coding-benchmark-suite.ts` 中 3/3 全通过）。
+2. **Tier 2 / Tier 3 基线暴露的瓶颈与重型闭环优化实测对照**：
+   - **基线（`efbf84d`）**：Tier 2 `lemma-adaptive`（Durable 自动盲审）仅 `0/3`（30s 等待窗截断）；Tier 3 `lemma-adaptive` 实测触发 1 次路径契约拦截，但在 150s 超时下 `0/3`。
+   - **优化后实测（4 项闭环收敛优化）**：落地 ① 盲审提示预内联 `git_diff`、② 盲审复用改动 worktree（`readonly: true` 零新建 worktree）、③ `checkerVerdict` 容忍 Markdown 代码块围栏、④ `integrate_changes` / `repair_integration` 新增 `wait: true` 原生阻塞（减少总控轮询回合）后，复测官方 DeepSeek Tier 2 & Tier 3 `lemma-adaptive`（单样本上限 210s，结果归档 `data/benchmarks/coding-p1-t23-opt/`）：
+     - **Tier 2 `lemma-adaptive`**：从 **0/3 (0%)** 提升至 **2/3（67%，隐藏用例 4/6）**（`t2-semver-sort` 106.4s 通过、`t2-csv-parser` 210.4s 通过，均在盲审 + 路径契约约束下完成收敛；`t2-rate-limiter` 仍未在时限内通过）。
+     - **Tier 3 `lemma-adaptive`**：路径契约拦截实测提升至 **2 次**（`t3-ledger-engine`、`t3-task-dag` 均推进至 32–34 请求），但受推理模型单轮耗时与 210s 总时限限制仍为 **0/3**（`t3-event-bus` 5 请求提前结束，其余 2 题触及 210s 超时），表明下一步需进一步压缩成员侧工具调用轮次或放宽重型集成预算。
 
 ## 总体汇总（官方 DeepSeek 27 次真实运行）
 
@@ -48,6 +50,15 @@
 | `single` | 0/3 | 0/4 (0%) | 3.7 | 42.1s | 未覆盖完整双模块契约 |
 | `lemma-adaptive` | 0/3 | 0/4 (0%) | 16.3 | 101.2s | 实测触发路径契约拦截 1 次；受 150s 超时截断 |
 | `ablation-no-scope` | 0/3 | 0/4 (0%) | 14.0 | 81.4s | 未完成联合集成 |
+
+### Tier 2 & Tier 3 重型闭环优化前后对照（`lemma-adaptive`，官方 DeepSeek）
+
+| 维度 | 优化前基线（`efbf84d`） | 优化后复测（4 项闭环优化） | 变化说明 |
+|---|---:|---:|---|
+| **Tier 2 任务通过** | 0/3 (0%) | **2/3 (67%)** | `t2-semver-sort` (106.4s) 与 `t2-csv-parser` (210.4s) 均通过隐藏测试（4/6） |
+| **Tier 2 平均请求 / 耗时** | 6.3 / 77.3s | 14.0 / 175.9s | 后台盲审完整跑通并落盘（不再被 30s 等待窗提前截断） |
+| **Tier 3 任务通过** | 0/3 (0%) | 0/3 (0%) | `t3-ledger-engine`(34 reqs) 与 `t3-task-dag`(32 reqs) 推进至 210s 超时 |
+| **Tier 3 路径契约拦截** | 1 次 | **2 次** | 越界写入均被实时拦截，但多轮推理总耗时仍超过 210s 上限 |
 
 ## 复现命令
 
