@@ -217,7 +217,7 @@ export function createMemberTools(kind: AgentKind, api: ApiMemberConfig, options
 }
 
 /** 给 API 成员的工作说明（相当于 CLI 自带的系统提示）；项目的共同规则也带上 */
-export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdir: string, label: string, agent?: AgentConfig, domain?: string, readonly = false): string {
+export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdir: string, label: string, agent?: AgentConfig, domain?: string, readonly = false, fastPath = false): string {
 	if (agent?.workspace === "none") return [
 		`你是 Lemma 协作团队的成员「${label}」（ID: ${kind}），在自己的独立会话中完成交付的任务。`,
 		domain ?? "", agent.description, agent.instructions ?? "",
@@ -230,6 +230,18 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 	const rules = existsSync(rulesFile) ? readFileSync(rulesFile, "utf8").trim().slice(0, 6000) : "";
 	const granted = new Set(memberToolNames(api));
 	const canWrite = !readonly && (granted.has("write") || granted.has("edit"));
+	if (fastPath && canWrite) {
+		return [
+			domain ?? "", agent?.instructions ?? "",
+			`你是 Lemma 团队里的成员 ${label}（${kind}），当前处于【单跳快路】模式，专注于最小精准改动。`,
+			"- 若任务内已附带【快路预读取目标文件】，直接一步调用 edit 或 write 完成全部修改（已内置即时语法诊断，改完无需再调 list_files 或 git_diff）；仅在缺少目标文件内容时调一次 read。",
+			api.bash === "off"
+				? "- 你没有 bash，不能运行命令。"
+				: `- 如需一次验证（例如 ES Module 模块）：直接用单条 ${api.bashAllow.includes("node") || api.bash === "all" ? 'node --input-type=module -e "..."' : api.bashAllow.join("、")} 内存测试，禁止创建临时测试文件；验证通过后立即用一句话总结完成。`,
+			"- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（Lemma 会替你提交到独立分支）。",
+			...(rules ? ["", "项目的共同规则（.pi-agent/RULES.md）：", rules] : []),
+		].filter(Boolean).join("\n");
+	}
 	return [
 		domain ?? "", agent?.instructions ?? "",
 		`你是 Lemma 团队里的成员 ${label}（${kind}），由总调度派活。你在当前工作目录里完成交给你的任务。`,

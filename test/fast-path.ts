@@ -82,12 +82,18 @@ try {
 		confirmPrompts++;
 		return { approvedIds: req.items.map((item) => item.id) };
 	};
+	let fastPromptSawPreload = false;
 	ds.setResponses([
-		() => fauxAssistantMessage([fauxToolCall("write", { path: "app.ts", content: "export const version = 2;\nexport function greet(name: string) { return `hello ${name}`; }\n" }, { id: "fp-1" })], { stopReason: "toolUse" }),
+		(ctx: any) => {
+			const msgText = (ctx.messages ?? []).map((m: any) => typeof m.content === "string" ? m.content : (m.content ?? []).map((b: any) => b.text ?? "").join("")).join("\n");
+			fastPromptSawPreload = msgText.includes("【快路预读取目标文件") && msgText.includes("export const version = 1");
+			return fauxAssistantMessage([fauxToolCall("write", { path: "app.ts", content: "export const version = 2;\nexport function greet(name: string) { return `hello ${name}`; }\n" }, { id: "fp-1" })], { stopReason: "toolUse" });
+		},
 		() => fauxAssistantMessage(fauxText("已将 version 升级到 2。")),
 	]);
 	const fast1 = await app.fastDispatch(app.root.id, "把 app.ts 的 version 改成 2", { member: "deepseek" });
 	check(fast1.member === "deepseek" && !fast1.escalated && fast1.filesCount === 1, "fastDispatch 单文件改动不触发升级（filesCount=1）");
+	check(fastPromptSawPreload, "fastDispatch 自动预读取并内联任务提及的目标文件，省略首轮 read/list_files");
 	check(confirmPrompts === 1 && fast1.applied === true, "fastDispatch 单文件改动直接弹出 confirmApply 并一键合并到主目录");
 	check(readFileSync(join(repo, "app.ts"), "utf8").includes("version = 2"), "主目录 app.ts 已反映快路合并结果");
 

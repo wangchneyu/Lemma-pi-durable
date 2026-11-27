@@ -2,7 +2,7 @@
 // → 调用本机 CLI → 提交改动 → 更新分工表 → 记下会话。
 // 同步派工（ask_* 工具直接等结果）和后台派工（Pi Durable 后台任务）共用这里，区别只在 DispatchIO 由谁提供。
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, LiveDoc, type ConversationId, type Extension, type JsonObject, type Tx } from "@earendil-works/pi-durable";
@@ -24,6 +24,28 @@ import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
 import { integrationStale } from "./integration-git.ts";
 import { checkFilesScope, type TaskScope } from "./scope.ts";
 
+function inlineFastPathFiles(cwd: string, task: string, maxTotalChars = 8000): string | undefined {
+	const matches = [...new Set(task.match(/(?<![A-Za-z0-9_.-])[\w./-]+\.(?:[tj]sx?|mjs|cjs|json|css|html|md|py)(?![A-Za-z0-9_.-])/g) ?? [])].slice(0, 3);
+	if (!matches.length) return undefined;
+	const rootNorm = process.platform === "win32" ? resolve(cwd).toLowerCase() : resolve(cwd);
+	const blocks: string[] = [];
+	let budget = maxTotalChars;
+	for (const raw of matches) {
+		const target = resolve(cwd, raw);
+		const targetNorm = process.platform === "win32" ? target.toLowerCase() : target;
+		const rel = relative(rootNorm, targetNorm);
+		if (!rel || rel.startsWith("..") || isAbsolute(rel) || !existsSync(target)) continue;
+		try {
+			const st = statSync(target);
+			if (!st.isFile() || st.size > maxTotalChars) continue;
+			const content = readFileSync(target, "utf8");
+			if (content.length > budget) continue;
+			budget -= content.length;
+			blocks.push(`=== ${raw} ===\n\`\`\`\n${content}\n\`\`\``);
+		} catch {}
+	}
+	return blocks.length ? blocks.join("\n\n") : undefined;
+}
 /** 子调度的提交前缀（和 lead.ts 一致；放在这里避免循环引用） */
 const LEAD_PREFIX = "pi-agent:lead:";
 import { memberInstructions, runApiMember, type ExecOutcome } from "./api-member.ts";
@@ -433,9 +455,11 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	const priorContext = args.session_id ? await io.commit(async (tx) => { const session = (await tx.doc(AgentSessions)).sessions[args.session_id!]; return session?.context ? JSON.parse(JSON.stringify(session.context)) as SessionRecord["context"] : null; }) : null;
 	const canReuse = args.context_mode !== "full" && !!priorContext && (!agent.api || priorContext.head === head);
 	if (canReuse && priorContext!.fingerprint === contextState.fingerprint && brief) brief = `【续接上下文】项目目标与任务约束未变化，沿用本会话已有资料${args.task_id ? `；任务 ${args.task_id}` : ""}。只处理本次增量；无法确认已有资料时明确提出缺口。\n\n【本次要做的事】\n`;
+	const fastPath = Boolean(args.fast_path && !args.task_id);
 	let prompt = `${brief}${args.task}`;
-	if (args.fast_path && !args.task_id) {
-		prompt = `【单跳快路】直接读取目标文件并做最小精准修改，无需多余目录扫描或反复查看 diff；改完后用一句话简要说明修改即可。\n\n${prompt}`;
+	if (fastPath) {
+		const preloaded = inlineFastPathFiles(cwd, args.task);
+		prompt = `【单跳快路】直接基于目标做最小精准修改（已内置即时语法诊断，无需调用 list_files 或 git_diff；若需用 node 验证 ES Module，请直接用单条 node --input-type=module -e "..."）。改完后一句话说明结果即可。\n\n${prompt}${preloaded ? `\n\n【快路预读取目标文件（已最新，可直接 edit/write，无需再 read）】\n${preloaded}` : ""}`;
 	}
 	if (recoveryEvidence) prompt += `\n\n${recoveryEvidence}`;
 	for (const input of args.inputs ?? []) {
@@ -518,7 +542,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 				cwd,
 				prompt,
 				resumeId,
-				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label, agent, config.collaboration?.instructions, readonlyMode),
+				instructions: memberInstructions(kind, agent.api, config.workdir, adapter.label, agent, config.collaboration?.instructions, readonlyMode, fastPath),
 				scope: taskScope,
 				readonly: readonlyMode,
 				io,
