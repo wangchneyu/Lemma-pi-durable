@@ -13,7 +13,7 @@
 <rect x="122" y="2" width="115" height="24" fill="#21262d"/>
 <rect x="237" y="2" width="231" height="24" fill="#2ea043"/>
 <text x="179.5" y="18" fill="#e6edf3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" text-anchor="middle">Tier 1 FastPath</text>
-<text x="352.5" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">3/3 PASS · -91% 耗时 · -74% 请求</text>
+<text x="352.5" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">3/3 PASS · -97% 耗时 · -93% 请求</text>
 </g>
 <rect x="122.5" y="2.5" width="345" height="23" rx="5" fill="none" stroke="#30363d" stroke-width="1"/>
 <clipPath id="clip-2"><rect x="476" y="2" width="255" height="24" rx="5"/></clipPath>
@@ -29,7 +29,7 @@
 <rect x="739" y="2" width="82" height="24" fill="#21262d"/>
 <rect x="821" y="2" width="76" height="24" fill="#9e6a03"/>
 <text x="780" y="18" fill="#e6edf3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" text-anchor="middle">Bench SVGs</text>
-<text x="859" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">3 Batches</text>
+<text x="859" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">4 Batches</text>
 </g>
 <rect x="739.5" y="2.5" width="157" height="23" rx="5" fill="none" stroke="#30363d" stroke-width="1"/>
 </svg>

@@ -23,11 +23,11 @@
 
 | 常见多 Agent 编码痛点 | Lemma 的工程解法 | 实际收益与证据 |
 |---|---|---|
-| **小改也走完整编排，协调税比写代码还贵** | **自适应快慢双通路（Fast-Slow Path）**<br>总调度自带只读代码感知工具（零派工零 worktree）；简单单文件改走 `/fast` 单跳直出，干净 worktree 直接复用 `HEAD`；改动超阈值自动无损升级进入完整审查闭环 | Tier 1 实测较完整编排 **请求数 -74%、耗时 -91%**，比单 Agent 更快 |
-| **执行者"既当运动员又当裁判"，自述掩盖边界 bug** | **剥离自述的客观盲审（Blind Review）**<br>`reviewer: { member, blind: true }` 屏蔽执行者总结，由 [task-workflow.ts](src/task-workflow.ts) 预内联客观 `git_diff` 并 `readonly: true` 直接复用原 worktree（零新建审查副本），一次往返结构化裁决返工 | 消灭虚假通过，盲审耗时由多轮探查压至首轮裁决（Tier 2 闭环通过率从 0% 升至 67%） |
+| **小改也走完整编排，协调税比写代码还贵** | **自适应快慢双通路（Fast-Slow Path）**<br>总调度自带只读代码感知工具（零派工零 worktree）；简单单文件改走 `/fast` 单跳直出，预内联任务提及的目标文件并启用快路极简提示，干净 worktree 直接复用 `HEAD` | Tier 1 实测较去快路编排 **请求 -93%、耗时 -97%**（`2.0 reqs / 4.5s`），全面领先 `single`（`7.0 reqs / 35.4s`） |
+| **执行者"既当运动员又当裁判"，自述掩盖边界 bug** | **剥离自述的客观盲审（Blind Review）**<br>`reviewer: { member, blind: true }` 屏蔽执行者总结，由 [task-workflow.ts](src/task-workflow.ts) 预内联客观 `git_diff` 并 `readonly: true` 直接复用原 worktree（零新建审查副本），一次往返结构化裁决返工 | 消灭虚假通过，Core 9 题 Tier 2 闭环通过率从 `0%` 升至 **67%（隐藏用例 6/6 = 100%）** |
 | **靠 Prompt 约束“别改测试目录”形同虚设** | **工具层硬契约拦截（API Scope Guardrails）**<br>任务级 `scope: { allow, forbid }` 在工具执行前（`beforeTool`）物理拒绝越界 `write`/`edit`，叠加收尾硬校验与写后即时语法诊断 | 真实多模块压测连续多次实时拦截越界篡改并驱动自愈（`selfHealed`） |
-| **模型推理中途偷懒提前结束、或死循环卡死** | **Pre-Flight Gate 门禁 + 心跳/死循环熔断（评测 Harness）**<br>交卷前强制校验所有子任务状态、非空 `git_diff`、联合集成落盘与本地语法检查；连续两次同参数报错立即熔断 `LOOP_DETECTED`，活跃流式推理期间心跳延展 | P2 实测提前交卷（`PREMATURE_STOP`）与死循环降至 **0** |
-| **并行改完代码手动合并冲突灾难** | **多 Worktree 三方联合集成（`wait: true`）**<br>并行任务在独立 Git worktree 推进，通过 `integrate_changes(..., wait: true)` 基于 Pi Durable `sleep`/`checkpoint` 原生阻塞完成三方合流、`autonomy.checks` 联合测试与 `repair_integration` | 省去总控多余轮询回合，支撑多分支冲突定位与端到端合流（`t3-ledger-engine` 实测通过） |
+| **模型推理中途偷懒提前结束、或死循环卡死** | **Pre-Flight Gate 门禁 + 心跳/死循环熔断（评测 Harness）**<br>交卷前强制校验所有子任务状态、非空 `git_diff`、联合集成落盘与本地语法检查；连续两次同参数报错立即熔断 `LOOP_DETECTED`，活跃流式推理期间心跳延展 | 实测将提前交卷（`PREMATURE_STOP`）与死循环清零，Core 9 题总隐藏用例达 **16/16（100%）** |
+| **并行改完代码手动合并冲突灾难** | **多 Worktree 三方联合集成（`wait: true`）**<br>并行任务在独立 Git worktree 推进，通过 `integrate_changes(..., wait: true)` 基于 Pi Durable `sleep`/`checkpoint` 原生阻塞完成三方合流、`autonomy.checks` 联合测试与 `repair_integration` | 结合并行测试语法校验契约，Tier 3 Core 通过率从 `0%` 升至 **67%（隐藏用例 4/4 = 100%）** |
 | **跑一半崩溃丢状态、或 CLI / API 混用割裂** | **Durable 持久化 + 异构 CLI/API 混编 + 人工闸门**<br>全量状态与 `lemma.delivery.v1` 结构化交接（按需分页 `read_result`）存于 Pi Durable + SQLite；支持重推理总控 + 高吞吐 Flash + 本机 CLI 混编；合并与推送由终端人类拍板 | 进程中断后 `/task inspect\|resume\|supply\|reassign` 无损续接 |
 
 > 核心特性与架构细节亦直接配套在仓库内：内置 **13 题分层编码/故障注入/边缘防御基准套件**（`npm run bench:coding`）与 **零硬编码全自动 SVG 看板**（`npm run bench:chart`）。
@@ -76,19 +76,23 @@ npm start
 ## 效果评测
 
 <!-- BENCH_START -->
-以下图表与表格由 `npm run bench:chart`（[render-bench-charts.mjs](scripts/render-bench-charts.mjs)）**直接扫描 `data/benchmarks/` 下实测 JSON 自动渲染**。为确保评测口径严谨，主视觉仅展示**完全对齐的同口径实测对照**（Tier 1 快路对比去快路请求 **-74%**、耗时 **-91%**）；Tier 2/3 重型闭环、故障注入（Chaos）及 `Tier-Edge` 独立结果及归因详见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)。最近一次离线全链路回归（`coding-p2-offline`）共 **37 次运行**，`lemma-adaptive` 核心与 `Tier-Edge` 均全量跑通。
+以下图表与表格由 `npm run bench:chart`（[render-bench-charts.mjs](scripts/render-bench-charts.mjs)）**直接扫描 `data/benchmarks/` 下实测 JSON 自动渲染**。为确保评测口径严谨，主视觉仅展示**完全对齐的同口径实测对照**（Tier 1 快路对比去快路请求 **-93%**、耗时 **-97%**）；Tier 2/3 重型闭环、故障注入（Chaos）及 `Tier-Edge` 独立结果及归因详见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)。最近一次离线全链路回归（`coding-p2-offline`）共 **37 次运行**，`lemma-adaptive` 核心与 `Tier-Edge` 均全量跑通。
 
 ![Lemma Adaptive 自适应路由架构](docs/assets/bench-architecture-flow.svg)
 
 ![Tier 1 单跳快路消融对比](docs/assets/bench-tier1-fastpath.svg)
 
+![分层架构同口径闭环演进](docs/assets/bench-p1-optimization.svg)
+
+![全量实验臂综合效能与开销对比](docs/assets/bench-ablation-matrix.svg)
+
 ### 同口径核心对照（`lemma-adaptive` · Core 9 题口径对齐）
 
-| 分层（严格同口径 Core） | 基线 `coding-p1-deepseek` (`efbf84d`) | `coding-p2-t23edge-r1` (`3c307e7`) |
+| 分层（严格同口径 Core） | 基线 `coding-p1-deepseek` (`efbf84d`) | `coding-p3-complete` (`11eb273`) |
 |---|---:|---:|
-| **Tier 1 (Core 3 题)** | 3/3 (100%) · 13.1s | — |
-| **Tier 2 (Core 3 题)** | 0/3 (0%) · 77.3s | **0/3 (0%)** · 隐测 2/6 · 契约拦截 2 · 271.1s |
-| **Tier 3 (Core 3 题)** | 0/3 (0%) · 101.2s | **1/3 (33%)** · 隐测 1/4 · 契约拦截 6 · 405.5s |
+| **Tier 1 (Core 3 题)** | 3/3 (100%) · 13.1s | **3/3 (100%)** · 隐测 6/6 · 契约拦截 0 · 5.0s |
+| **Tier 2 (Core 3 题)** | 0/3 (0%) · 77.3s | **2/3 (67%)** · 隐测 6/6 · 契约拦截 0 · 173.3s |
+| **Tier 3 (Core 3 题)** | 0/3 (0%) · 101.2s | **2/3 (67%)** · 隐测 4/4 · 契约拦截 2 · 232.9s |
 
 ### 全量实测与扩展专项明细（JSON 自动聚合，分母按作用域隔离）
 
@@ -99,9 +103,9 @@ npm start
 | `ablation-no-fastpath` (基线 Core (coding-p1-deepseek)) | 1/3 (33%) | 2/6 (33%) | — | 27.0 | 148.4s | 753k | $0.2920 | — |
 | `ablation-no-blind` (基线 Core (coding-p1-deepseek)) | 2/3 (67%) | 4/6 (67%) | — | 16.7 | 80.1s | 363k | $0.0980 | — |
 | `ablation-no-scope` (基线 Core (coding-p1-deepseek)) | 0/3 (0%) | 0/4 (0%) | — | 14.0 | 81.4s | 360k | $0.1698 | 契约拦截 1 |
-| `lemma-adaptive [Core 同口径]` (T2+T3 Core (coding-p2-t23edge-r1)) | 1/6 (17%) | 3/10 (30%) | 1/6 (17%) | 30.5 | 338.3s | 2.29M | $1.0385 | 契约拦截 8 · 自愈 1 · 集成 1 · 门禁 2 |
-| `lemma-adaptive [Chaos 自愈]` (故障注入加测 (coding-p2-t23edge-r1)) | 0/2 (0%) | 1/4 (25%) | 1/2 (50%) | 25.5 | 288.1s | 613k | $0.3328 | 契约拦截 1 |
-| `lemma-adaptive [Tier-Edge]` (独立边缘防御 (coding-p2-t23edge-r1)) | 1/2 (50%) | 3/4 (75%) | 2/2 (100%) | 29.0 | 223.5s | 623k | $0.1919 | 契约拦截 1 · 自愈 1 |
+| `lemma-adaptive [Core 同口径]` (优化后完整批 (coding-p3-complete)) | 7/9 (78%) | 16/16 (100%) | 7/9 (78%) | 21.6 | 137.1s | 2.24M | $0.9129 | 快路 3 · 契约拦截 2 · 自愈 4 · 集成 2 · 门禁 2 |
+| `lemma-adaptive [Chaos 自愈]` (故障注入加测 (coding-p3-complete)) | 0/2 (0%) | 1/4 (25%) | 0/2 (0%) | 24.5 | 346.5s | 553k | $0.2228 | 契约拦截 1 |
+| `lemma-adaptive [Tier-Edge]` (独立边缘防御 (coding-p3-complete)) | 2/2 (100%) | 4/4 (100%) | 2/2 (100%) | 19.0 | 94.6s | 338k | $0.1439 | 自愈 1 |
 <!-- BENCH_END -->
 
 ## 测试与评测

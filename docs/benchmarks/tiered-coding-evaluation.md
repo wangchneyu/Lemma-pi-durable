@@ -87,15 +87,42 @@
 3. **边缘防御真实有效**：`edge-ambiguity-wallet` **PASS（2/2，\$0.0553）**，无交互模式下显式在源码注释声明默认假设且零破坏旧契约；`edge-guardrail-tamper` 100% 启用只读护栏并拦截 1 次测试篡改尝试，最终因 30 请求 / 271.2s 超时仅通过 1/2 用例。
 4. **核心瓶颈显形**：6/7 次主表与边缘失败均精确归因为 `TIMEOUT`（含 `t2-semver-sort` 代码已通过隐藏测试 `2/2` 但后台盲审未及合流、以及 `t2-rate-limiter` / `t3-event-bus` 各自出现 1 次模型 `tokenTruncated` 信号），零 `PREMATURE_STOP` 与零 `LOOP_DETECTED`，说明后续关键在于减少推理模型在审阅/协调回合的纯文本消耗与并发时延。
 
+## P3 完整同口径实测与快路极致优化（`11eb273`，Core 9 题对齐 + 扩展 4 题）
+
+- **本轮核心优化**：
+  1. **快路零轮次预读取 + 极简指令**（[dispatch.ts](../../src/dispatch.ts)、[api-member.ts](../../src/api-member.ts)）：`fastDispatch` 自动内联任务提及的小目标文件，去掉多余 `list_files`/`git_diff` 与会触发 `SHELL_OPERATORS` 拦截的 `node -e "...;..."` 提示，并将 `maxTurns` 恢复为 `12`。
+  2. **Tier 2/3 并行去空桩与盲审提速**（[task-workflow.ts](../../src/task-workflow.ts)、[tools.ts](../../src/tools.ts)、[coding-benchmark-suite.ts](../../src/coding-benchmark-suite.ts)）：Tier 3 并行测试分支仅以 `node --check` 校对测试语法、杜绝孤立分支死调未实现 `src/` 桩；盲审成员复用高吞吐配置并将输出上限收紧至 `2048`，心跳宽限对齐至 `90s`。
+
+### 1. Tier 1 三臂最新真实对照（`coding-p3-t1`，9 次运行）
+
+| 实验臂 | 任务通过 | 隐藏用例 | 路由准确率 | 平均请求 | 平均耗时 | 总 Token | 费用 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **`lemma-adaptive` (快路)** | **3/3 (100%)** | **6/6 (100%)** | 3/3 (100%) | **2.0** | **4.5s** | **14,735** | **\$0.0026** |
+| `single` (单 Agent 基线) | 3/3 (100%) | 6/6 (100%) | 3/3 (100%) | 7.0 | 35.4s | 78,770 | \$0.0321 |
+| `ablation-no-fastpath` (去快路) | 1/3 (33%) | 6/6 (100%) | 3/3 (100%) | 28.7 | 134.4s | 781,917 | \$0.3017 |
+
+> 相对 `single`，`lemma-adaptive` 在 Tier 1 请求 **-71%**、耗时 **-87%**、费用 **-92%**；相对去快路消融组，请求 **-93%**、耗时 **-97%**、费用 **-99%**。
+
+### 2. Core 9 题同口径演进对照 + Chaos/Edge 独立实测（`coding-p3-complete`，13 次运行）
+
+| 分层 / 分组 | 基线（`coding-p1-deepseek`） | 最新（`coding-p3-complete`） | 关键变化与归因 |
+|---|---:|---:|---|
+| **Core Tier 1 (3 题)** | 3/3 (100%) · 13.1s | **3/3 (100%) · 5.0s · 2.0 reqs** | 全部 2 次请求极速完成（隐测 `6/6`） |
+| **Core Tier 2 (3 题)** | 0/3 (0%) · 77.3s | **2/3 (67%) · 隐测 6/6 (100%)** | `t2-rate-limiter`（86.2s）与 `t2-semver-sort`（102.2s）完整盲审通过；`t2-csv-parser` 代码已过 `2/2`（331.6s 超时） |
+| **Core Tier 3 (3 题)** | 0/3 (0%) · 101.2s | **2/3 (67%) · 隐测 4/4 (100%)** | `t3-ledger-engine` 与 `t3-task-dag` 联合集成通过；`t3-event-bus` 代码过 `1/1` 但达 50 请求上限 |
+| **Core 9 题合计** | **3/9 (33%) · 隐测 6/16 (38%)** | **7/9 (78%) · 隐测 16/16 (100%)** | **任务通过率 +45 个百分点，隐藏用例达 100%**（\$0.9129） |
+| **Chaos 自愈加测 (2 题)** | — | 0/2 (0%) · 隐测 1/4 | 故障注入陷阱题（旧测试与跨模块诱因）仍触发 `TIMEOUT`（14–43 reqs） |
+| **Tier-Edge 独立防御 (2 题)** | — | **2/2 (100%) · 隐测 4/4 (100%)** | `edge-ambiguity-wallet`（50.6s）与 `edge-guardrail-tamper`（138.6s，自愈）双双通过，路由 **2/2 (100%)** |
+
 ## 复现命令
 
 ```bash
-# P2 离线全套 37 组链路验证（0 费用）
+# P2/P3 离线全套 37 组链路验证（0 费用）
 npm run bench:coding
 
-# P2 官方 DeepSeek Tier 2 / Tier 3 / Tier-Edge 快速实测
-npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=2,3,edge --arms=lemma-adaptive --repeats=1 --out=data/benchmarks/coding-p2-t23edge-r1
+# Tier 1 三臂真实对照
+npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=1 --arms=single,lemma-adaptive,ablation-no-fastpath --repeats=1 --out=data/benchmarks/coding-p3-t1
 
-# P2 官方 DeepSeek 稳定性压测（repeats=3）
-npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=2,3,edge --arms=lemma-adaptive --repeats=3 --out=data/benchmarks/coding-p2-t23edge-r3
+# Tier 1–3 + Edge 全量同口径真实评测，并自动刷新图表与 README
+npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=1,2,3,edge --arms=lemma-adaptive --repeats=1 --out=data/benchmarks/coding-p3-complete && npm run bench:chart
 ```

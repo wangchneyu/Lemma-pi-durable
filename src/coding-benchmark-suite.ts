@@ -88,8 +88,11 @@ export interface TierBudget {
 	blindWaitMs: number;
 }
 
-export function budgetForTier(tier: BenchmarkTier, simulated: boolean): TierBudget {
+export function budgetForTier(tier: BenchmarkTier, simulated: boolean, arm?: BenchmarkArm): TierBudget {
 	if (tier === 1) {
+		if (arm === "ablation-no-fastpath") {
+			return { timeoutMs: simulated ? 60_000 : 120_000, maxRequests: 32, blindWaitMs: 0 };
+		}
 		return { timeoutMs: 60_000, maxRequests: simulated ? 20 : 15, blindWaitMs: 0 };
 	}
 	if (tier === 2) {
@@ -609,10 +612,9 @@ export async function runTieredCodingBenchmark(options: {
 			const armsForTask = options.arms?.length
 				? options.arms.filter((a) => defaultArmsForTier(task.tier).includes(a) || a === "single" || a === "lemma-adaptive")
 				: defaultArmsForTier(task.tier);
-			const budget = budgetForTier(task.tier, options.simulated);
-
 			for (let repeat = 0; repeat < repeats; repeat++) {
 				for (const arm of armsForTask) {
+					const budget = budgetForTier(task.tier, options.simulated, arm);
 					options.signal?.throwIfAborted();
 					const repo = initTaskRepo(task);
 					let requests = 0;
@@ -849,7 +851,7 @@ export async function runTieredCodingBenchmark(options: {
 							} else if (task.tier === 1 && arm === "ablation-no-fastpath") {
 								prompt = `${task.prompt}\n请严格按标准多步流程执行：先用 plan_tasks 建立任务 T1，再派 ask_coder 完成 T1，最后用 review_task 验收后汇报。`;
 							} else if (task.tier === 2 && arm === "lemma-adaptive") {
-								prompt = `${task.prompt}\n请用 plan_tasks 建立 T1，声明 automation:{member:"coder",maxReworks:2} 与 reviewer:{member:"auditor",blind:true}（不要添加阻止 coder 编辑所需测试文件的额外 scope 限制；提示 coder 直接用 node --input-type=module -e 进行内存自测，避免新建临时测试文件），由 Durable 自动推进实现与代码盲审返工。`;
+								prompt = `${task.prompt}\n请用 plan_tasks 建立 T1，声明 automation:{member:"coder",maxReworks:2} 与 reviewer:{member:"auditor",blind:true}（不要添加阻止 coder 编辑所需测试文件的额外 scope 限制；提示 coder 改完后仅用 node --check 检查语法或跑题目指定的已有测试文件，严禁新建临时测试文件或运行含 ;/&/| 的命令），由 Durable 自动推进实现与代码盲审返工。`;
 							} else if (task.tier === 2 && arm === "ablation-no-blind") {
 								prompt = `${task.prompt}\n直接用 ask_coder 完成，不启用独立盲审。`;
 							} else if (task.tier === "edge" && arm === "lemma-adaptive") {
@@ -858,7 +860,7 @@ export async function runTieredCodingBenchmark(options: {
 									: `${task.prompt}\n请直接委派 ask_coder 实现，如遇未明确细节必须在代码注释中显式声明默认假设。`;
 							} else if (task.tier === 3) {
 								prompt = arm === "lemma-adaptive"
-									? `${task.prompt}\n请用 plan_tasks 建立 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}），并行派 ask_coder 与 ask_tester（提示 ask_coder 用 node --input-type=module -e 自测；提示 ask_tester 其分支里的 src/ 尚为未实现初始桩，写完测试后仅运行 node --check 校对测试语法即可，严禁运行 node --test 调试空桩或触碰 src/），验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`
+									? `${task.prompt}\n请用 plan_tasks 建立 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}），并行派 ask_coder 与 ask_tester（提示 ask_coder 用 node --check 校验语法且勿新建测试文件或含 ;/&/| 命令；提示 ask_tester 其分支里的 src/ 尚为未实现初始桩，写完测试后仅运行 node --check 校对测试语法即可，严禁运行 node --test 调试空桩或触碰 src/），验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`
 									: `${task.prompt}\n请用 plan_tasks 建立 T1 与 T2（不设置 scope 路径契约），并行派 ask_coder 和 ask_tester（ask_tester 仅用 node --check 校对测试语法），验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`;
 							}
 
