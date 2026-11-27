@@ -17,13 +17,20 @@
 
 执行与会话状态由 Pi Durable + SQLite 持久化；终端负责下发任务与人工决策，本地后台网页（默认 `http://127.0.0.1:8787`）同步提供实时进度、图谱、代码改动与用量观测。
 
-## 核心特性
+## 核心创新与差异化设计
 
-- **职责分工与依赖编排**：通过 `.pi-agent/GOAL.md`（目标）与 `.pi-agent/ASSIGN.md`（任务看板）组织工作，支持 `plan_tasks` 依赖图、异步后台派工（`background: true` / `wait_jobs`）及单层子调度（`delegate_to_lead`）。
-- **上下文隔离与结构化交接**：成员各自持有独立会话与上下文窗口，不混用全局聊天记录；长结果自动截断预览并持久化全文（`read_result` 按需分页提取，`lemma.delivery.v1` 按字段交接）。
-- **路径契约与独立盲审**：支持任务级 `scope: { allow, forbid }` 路径边界（API 写前拦截 + 收尾硬校验），以及 `reviewer: { member, blind }` 独立复核 / 代码盲审（盲审仅审契约与 `git_diff`，剥离执行者自述）。
-- **Worktree 隔离与联合集成**：代码任务默认在独立 Git worktree 中执行，支持多分支三方合流集成（`/integrate` / `integrate_changes` + 冲突修复 `repair_integration`）及按目标仓库匹配的 `autonomy.checks` 自动验收与有限修复。
-- **人工闸门与可恢复性**：总调度可通过 `request_apply` 在终端弹窗请求合并确认，敏感/分歧仓库推送受人工审批保护；中断、重启或受阻后可在终端直接 `/task inspect|resume|supply|reassign` 续接。
+不同于把多个 Agent 塞进同一个聊天室“靠 Prompt 自觉协作”的通用框架，Lemma 针对真实 **coding 工程闭环**的痛点（编排税、上下文污染、自我吹嘘幻觉、越界改测试、提前交白卷与多分支冲突）设计了一套可物理强制执行、可断点续跑的工程机制：
+
+| 常见多 Agent 编码痛点 | Lemma 的工程解法 | 实际收益与证据 |
+|---|---|---|
+| **小改也走完整编排，协调税比写代码还贵** | **自适应快慢双通路（Fast-Slow Path）**<br>总调度自带只读代码感知工具（零派工零 worktree）；简单单文件改走 `/fast` 单跳直出，干净 worktree 直接复用 `HEAD`；改动超阈值自动无损升级进入完整审查闭环 | Tier 1 实测较完整编排 **请求数 -74%、耗时 -91%**，比单 Agent 更快 |
+| **执行者"既当运动员又当裁判"，自述掩盖边界 bug** | **剥离自述的客观盲审（Blind Review）**<br>`reviewer: { member, blind: true }` 屏蔽执行者总结，由 [task-workflow.ts](src/task-workflow.ts) 预内联客观 `git_diff` 并 `readonly: true` 直接复用原 worktree（零新建审查副本），一次往返结构化裁决返工 | 消灭虚假通过，盲审耗时由多轮探查压至首轮裁决（Tier 2 闭环通过率从 0% 升至 67%） |
+| **靠 Prompt 约束“别改测试目录”形同虚设** | **工具层硬契约拦截（API Scope Guardrails）**<br>任务级 `scope: { allow, forbid }` 在工具执行前（`beforeTool`）物理拒绝越界 `write`/`edit`，叠加收尾硬校验与写后即时语法诊断 | 真实多模块压测连续多次实时拦截越界篡改并驱动自愈（`selfHealed`） |
+| **模型推理中途偷懒提前结束、或死循环卡死** | **Pre-Flight Gate 门禁 + 心跳/死循环熔断（评测 Harness）**<br>交卷前强制校验所有子任务状态、非空 `git_diff`、联合集成落盘与本地语法检查；连续两次同参数报错立即熔断 `LOOP_DETECTED`，活跃流式推理期间心跳延展 | P2 实测提前交卷（`PREMATURE_STOP`）与死循环降至 **0** |
+| **并行改完代码手动合并冲突灾难** | **多 Worktree 三方联合集成（`wait: true`）**<br>并行任务在独立 Git worktree 推进，通过 `integrate_changes(..., wait: true)` 基于 Pi Durable `sleep`/`checkpoint` 原生阻塞完成三方合流、`autonomy.checks` 联合测试与 `repair_integration` | 省去总控多余轮询回合，支撑多分支冲突定位与端到端合流（`t3-ledger-engine` 实测通过） |
+| **跑一半崩溃丢状态、或 CLI / API 混用割裂** | **Durable 持久化 + 异构 CLI/API 混编 + 人工闸门**<br>全量状态与 `lemma.delivery.v1` 结构化交接（按需分页 `read_result`）存于 Pi Durable + SQLite；支持重推理总控 + 高吞吐 Flash + 本机 CLI 混编；合并与推送由终端人类拍板 | 进程中断后 `/task inspect\|resume\|supply\|reassign` 无损续接 |
+
+> 核心特性与架构细节亦直接配套在仓库内：内置 **13 题分层编码/故障注入/边缘防御基准套件**（`npm run bench:coding`）与 **零硬编码全自动 SVG 看板**（`npm run bench:chart`）。
 
 ## 快速开始
 
