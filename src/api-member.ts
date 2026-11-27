@@ -234,10 +234,10 @@ export function memberInstructions(kind: AgentKind, api: ApiMemberConfig, workdi
 		return [
 			domain ?? "", agent?.instructions ?? "",
 			`你是 Lemma 团队里的成员 ${label}（${kind}），当前处于【单跳快路】模式，专注于最小精准改动。`,
-			"- 若任务内已附带【快路预读取目标文件】，直接一步调用 edit 或 write 完成全部修改（已内置即时语法诊断，改完无需再调 list_files 或 git_diff）；仅在缺少目标文件内容时调一次 read。",
+			"- 若任务内已附带【快路预读取目标文件】，直接一步调用 edit 或 write 完成全部修改（已内置即时语法诊断），改完无需再调 list_files、read、git_diff 或 bash，直接用一句话总结完成。",
 			api.bash === "off"
 				? "- 你没有 bash，不能运行命令。"
-				: `- 如需一次验证（例如 ES Module 模块）：直接用单条 ${api.bashAllow.includes("node") || api.bash === "all" ? 'node --input-type=module -e "..."' : api.bashAllow.join("、")} 内存测试，禁止创建临时测试文件；验证通过后立即用一句话总结完成。`,
+				: `- 仅当任务明确要求执行测试时才运行单一简单命令（允许开头：${api.bashAllow.join("、")}，禁止含分号 ;、&&、|| 或换行）；禁止创建临时测试文件。`,
 			"- 只做任务范围内的改动，不要顺手重构无关代码，不要提交 git（Lemma 会替你提交到独立分支）。",
 			...(rules ? ["", "项目的共同规则（.pi-agent/RULES.md）：", rules] : []),
 		].filter(Boolean).join("\n");

@@ -459,7 +459,7 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	let prompt = `${brief}${args.task}`;
 	if (fastPath) {
 		const preloaded = inlineFastPathFiles(cwd, args.task);
-		prompt = `【单跳快路】直接基于目标做最小精准修改（已内置即时语法诊断，无需调用 list_files 或 git_diff；若需用 node 验证 ES Module，请直接用单条 node --input-type=module -e "..."）。改完后一句话说明结果即可。\n\n${prompt}${preloaded ? `\n\n【快路预读取目标文件（已最新，可直接 edit/write，无需再 read）】\n${preloaded}` : ""}`;
+		prompt = `【单跳快路】直接一步调用 edit 或 write 完成最小精准修改（内置即时语法诊断），改完后不要调 list_files、git_diff 或 bash，直接一句话收尾即可。\n\n${prompt}${preloaded ? `\n\n【快路预读取目标文件（已最新，可直接 edit/write，无需再 read）】\n${preloaded}` : ""}`;
 	}
 	if (recoveryEvidence) prompt += `\n\n${recoveryEvidence}`;
 	for (const input of args.inputs ?? []) {
