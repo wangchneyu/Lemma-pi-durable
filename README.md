@@ -7,10 +7,7 @@
 
 <p><strong>把复杂目标，化为可验证的每一步。</strong></p>
 
-![Node >=22.19](https://img.shields.io/badge/Node-%3E%3D22.19-339933?style=flat-square&logo=nodedotjs&logoColor=white)
-![Tier 1 FastPath](https://img.shields.io/badge/Tier%201%20FastPath-3%2F3%20PASS%20%7C%20-91%25%20%E8%80%97%E6%97%B6%20%7C%20-74%25%20%E8%AF%B7%E6%B1%82-2ea043?style=flat-square)
-![Offline Suite](https://img.shields.io/badge/Offline%20Regression-13%2F13%20Adaptive%20%C2%B7%2037%20Runs-58a6ff?style=flat-square)
-![Bench Chart](https://img.shields.io/badge/Auto%20Bench%20SVGs-3%20Batches-d29922?style=flat-square)
+<img src="docs/assets/bench-badges.svg" alt="Lemma 核心动态指标徽章" />
 
 </div>
 <!-- BRAND_END -->

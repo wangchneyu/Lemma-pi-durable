@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="899" height="28" viewBox="0 0 899 28" role="img" aria-label="Lemma 核心指标徽章">
+<clipPath id="clip-0"><rect x="2" y="2" width="112" height="24" rx="5"/></clipPath>
+<g clip-path="url(#clip-0)">
+<rect x="2" y="2" width="43" height="24" fill="#21262d"/>
+<rect x="45" y="2" width="69" height="24" fill="#238636"/>
+<text x="23.5" y="18" fill="#e6edf3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" text-anchor="middle">Node</text>
+<text x="79.5" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">&gt;= 22.19</text>
+</g>
+<rect x="2.5" y="2.5" width="111" height="23" rx="5" fill="none" stroke="#30363d" stroke-width="1"/>
+<clipPath id="clip-1"><rect x="122" y="2" width="346" height="24" rx="5"/></clipPath>
+<g clip-path="url(#clip-1)">
+<rect x="122" y="2" width="115" height="24" fill="#21262d"/>
+<rect x="237" y="2" width="231" height="24" fill="#2ea043"/>
+<text x="179.5" y="18" fill="#e6edf3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" text-anchor="middle">Tier 1 FastPath</text>
+<text x="352.5" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">3/3 PASS · -91% 耗时 · -74% 请求</text>
+</g>
+<rect x="122.5" y="2.5" width="345" height="23" rx="5" fill="none" stroke="#30363d" stroke-width="1"/>
+<clipPath id="clip-2"><rect x="476" y="2" width="255" height="24" rx="5"/></clipPath>
+<g clip-path="url(#clip-2)">
+<rect x="476" y="2" width="102" height="24" fill="#21262d"/>
+<rect x="578" y="2" width="153" height="24" fill="#1f6feb"/>
+<text x="527" y="18" fill="#e6edf3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" text-anchor="middle">Offline Suite</text>
+<text x="654.5" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">13/13 PASS · 37 Runs</text>
+</g>
+<rect x="476.5" y="2.5" width="254" height="23" rx="5" fill="none" stroke="#30363d" stroke-width="1"/>
+<clipPath id="clip-3"><rect x="739" y="2" width="158" height="24" rx="5"/></clipPath>
+<g clip-path="url(#clip-3)">
+<rect x="739" y="2" width="82" height="24" fill="#21262d"/>
+<rect x="821" y="2" width="76" height="24" fill="#9e6a03"/>
+<text x="780" y="18" fill="#e6edf3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" text-anchor="middle">Bench SVGs</text>
+<text x="859" y="18" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="700" text-anchor="middle">3 Batches</text>
+</g>
+<rect x="739.5" y="2.5" width="157" height="23" rx="5" fill="none" stroke="#30363d" stroke-width="1"/>
+</svg>

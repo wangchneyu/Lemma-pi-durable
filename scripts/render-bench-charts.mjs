@@ -602,7 +602,16 @@ function replaceBetween(source, startMarker, endMarker, inner) {
 	return `${source.slice(0, s + startMarker.length)}\n${inner.trim()}\n${source.slice(e)}`;
 }
 
-function buildBrandSection({ tier1Source, optBatches, offlineDataset }) {
+function estimateTextPx(str) {
+	let px = 0;
+	for (const ch of String(str)) {
+		px += ch.charCodeAt(0) > 0x7f ? 11.5 : 6.6;
+	}
+	return Math.ceil(px);
+}
+
+/** 顶部同源动态徽章行 SVG（不依赖外网 img.shields.io） */
+function renderBrandBadgesSvg({ tier1Source, optBatches, offlineDataset }) {
 	const t1Fast = summarizeRuns(tier1Source.runs.filter((r) => r.tier === 1 && r.arm === "lemma-adaptive"));
 	const t1NoFast = summarizeRuns(tier1Source.runs.filter((r) => r.tier === 1 && r.arm === "ablation-no-fastpath"));
 	const reqDrop = t1NoFast.avgRequests > 0 ? Math.round(((t1NoFast.avgRequests - t1Fast.avgRequests) / t1NoFast.avgRequests) * 100) : 0;
@@ -611,6 +620,50 @@ function buildBrandSection({ tier1Source, optBatches, offlineDataset }) {
 	const offAdaptive = offlineDataset ? offlineDataset.runs.filter((r) => r.arm === "lemma-adaptive") : [];
 	const offAdaptivePass = offAdaptive.filter((r) => r.success).length;
 
+	const items = [
+		{ label: "Node", value: ">= 22.19", color: "#238636" },
+		{ label: "Tier 1 FastPath", value: `${t1Fast.passed}/${t1Fast.total} PASS · -${timeDrop}% 耗时 · -${reqDrop}% 请求`, color: "#2ea043" },
+		...(offlineDataset ? [{ label: "Offline Suite", value: `${offAdaptivePass}/${offAdaptive.length} PASS · ${offTotal} Runs`, color: "#1f6feb" }] : []),
+		{ label: "Bench SVGs", value: `${optBatches.length + 1} Batches`, color: "#9e6a03" },
+	];
+
+	const gap = 8;
+	const h = 24;
+	const badges = items.map((it) => {
+		const lw = estimateTextPx(it.label) + 16;
+		const vw = estimateTextPx(it.value) + 16;
+		return { ...it, lw, vw, w: lw + vw };
+	});
+	const totalW = badges.reduce((s, b) => s + b.w, 0) + gap * (badges.length - 1);
+	const W = totalW + 4;
+	const H = h + 4;
+
+	const parts = [];
+	let x = 2;
+	for (const b of badges) {
+		const clipId = `clip-${badges.indexOf(b)}`;
+		parts.push(
+			`<clipPath id="${clipId}"><rect x="${x}" y="2" width="${b.w}" height="${h}" rx="5"/></clipPath>`,
+			`<g clip-path="url(#${clipId})">`,
+			`<rect x="${x}" y="2" width="${b.lw}" height="${h}" fill="#21262d"/>`,
+			`<rect x="${x + b.lw}" y="2" width="${b.vw}" height="${h}" fill="${b.color}"/>`,
+			`<text x="${x + b.lw / 2}" y="18" fill="#e6edf3" font-family="${FONT}" font-size="11" font-weight="600" text-anchor="middle">${esc(b.label)}</text>`,
+			`<text x="${x + b.lw + b.vw / 2}" y="18" fill="#ffffff" font-family="${FONT}" font-size="11" font-weight="700" text-anchor="middle">${esc(b.value)}</text>`,
+			`</g>`,
+			`<rect x="${x + 0.5}" y="2.5" width="${b.w - 1}" height="${h - 1}" rx="5" fill="none" stroke="${PALETTE.border}" stroke-width="1"/>`,
+		);
+		x += b.w + gap;
+	}
+
+	return [
+		`<?xml version="1.0" encoding="UTF-8"?>`,
+		`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc("Lemma 核心指标徽章")}">`,
+		parts.join("\n"),
+		`</svg>`,
+	].join("\n");
+}
+
+function buildBrandSection() {
 	const lines = [];
 	const hasLogo = existsSync(join(ASSETS_DIR, "logo.webp"));
 	if (hasLogo) {
@@ -623,10 +676,7 @@ function buildBrandSection({ tier1Source, optBatches, offlineDataset }) {
 			``,
 			`<p><strong>把复杂目标，化为可验证的每一步。</strong></p>`,
 			``,
-			`![Node >=22.19](https://img.shields.io/badge/Node-%3E%3D22.19-339933?style=flat-square&logo=nodedotjs&logoColor=white)`,
-			`![Tier 1 FastPath](https://img.shields.io/badge/Tier%201%20FastPath-${encodeURIComponent(`${t1Fast.passed}/${t1Fast.total} PASS | -${timeDrop}% 耗时 | -${reqDrop}% 请求`)}-2ea043?style=flat-square)`,
-			...(offlineDataset ? [`![Offline Suite](https://img.shields.io/badge/Offline%20Regression-${encodeURIComponent(`${offAdaptivePass}/${offAdaptive.length} Adaptive · ${offTotal} Runs`)}-58a6ff?style=flat-square)`] : []),
-			`![Bench Chart](https://img.shields.io/badge/Auto%20Bench%20SVGs-${optBatches.length + 1}%20Batches-d29922?style=flat-square)`,
+			`<img src="docs/assets/bench-badges.svg" alt="Lemma 核心动态指标徽章" />`,
 			``,
 			`</div>`,
 		);
@@ -711,6 +761,7 @@ function main() {
 	const offlineDataset = offlineDatasets.length ? offlineDatasets[offlineDatasets.length - 1] : null;
 
 	const outputs = [
+		["bench-badges.svg", renderBrandBadgesSvg({ tier1Source, optBatches, offlineDataset })],
 		["bench-tier1-fastpath.svg", renderTier1FastpathSvg(tier1Source)],
 		["bench-p1-optimization.svg", renderOptimizationEvolutionSvg(baseline, optBatches)],
 		["bench-ablation-matrix.svg", renderAblationMatrixSvg(baseline, optBatches)],
@@ -722,11 +773,11 @@ function main() {
 	}
 
 	let readme = readFileSync(README_PATH, "utf8");
-	readme = replaceBetween(readme, "<!-- BRAND_START -->", "<!-- BRAND_END -->", buildBrandSection({ tier1Source, optBatches, offlineDataset }));
+	readme = replaceBetween(readme, "<!-- BRAND_START -->", "<!-- BRAND_END -->", buildBrandSection());
 	readme = replaceBetween(readme, "<!-- BENCH_START -->", "<!-- BENCH_END -->", buildReadmeBenchSection({ baseline, tier1Source, optBatches, offlineDataset }));
 	writeFileSync(README_PATH, readme, "utf8");
 
-	console.log(`已自动扫描 ${realDatasets.length} 组真实评测批次（基线=${baseline.name}, 最新=${latest.name}），生成 4 张 SVG 至 docs/assets/ 并同步更新 README.md ✅`);
+	console.log(`已自动扫描 ${realDatasets.length} 组真实评测批次（基线=${baseline.name}, 最新=${latest.name}），生成 5 张 SVG 至 docs/assets/ 并同步更新 README.md ✅`);
 }
 
 main();
