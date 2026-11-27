@@ -154,6 +154,18 @@ function summarizeRuns(runs) {
 	};
 }
 
+const CORE_TASK_IDS = new Set([
+	"t1-slugify-fix",
+	"t1-parse-env",
+	"t1-lru-peek",
+	"t2-rate-limiter",
+	"t2-semver-sort",
+	"t2-csv-parser",
+	"t3-event-bus",
+	"t3-ledger-engine",
+	"t3-task-dag",
+]);
+
 function pickDatasets(realDatasets) {
 	if (!realDatasets.length) {
 		throw new Error("data/benchmarks/ 中未找到任何真实模型（simulated: false）的编码评测 results.json。");
@@ -173,8 +185,10 @@ function pickDatasets(realDatasets) {
 	const optBatches = realDatasets.filter(
 		(d) => d.name !== baseline.name && d.mtimeMs >= baseline.mtimeMs && (d.tiers.has(2) || d.tiers.has(3)),
 	);
-	const latest = optBatches.length ? optBatches[optBatches.length - 1] : baseline;
-	return { baseline, tier1Source, optBatches, latest };
+	const completeSweeps = optBatches.filter((d) => d.tiers.has(1) && d.tiers.has(2) && d.tiers.has(3));
+	const latestComplete = completeSweeps.length ? completeSweeps[completeSweeps.length - 1] : null;
+	const latest = latestComplete ?? (optBatches.length ? optBatches[optBatches.length - 1] : baseline);
+	return { baseline, tier1Source, optBatches, latestComplete, latest };
 }
 
 function batchShortLabel(ds, index, totalOpt) {
@@ -286,40 +300,38 @@ function renderTier1FastpathSvg(tier1Source) {
 	return svgWrap(W, H, "Tier 1 单跳快路消融对比", parts.join("\n"));
 }
 
-/** 图表 2：分层架构闭环优化前后通过率演进图 */
-function renderOptimizationEvolutionSvg(baseline, optBatches) {
+/** 图表 2：分层架构闭环优化同口径对比图（严格按核心 9 题同分母对比，消除未重测与混题偏差） */
+function renderOptimizationEvolutionSvg(baseline, optBatches, latestComplete) {
 	const W = 920;
 	const H = 460;
-	const stages = [
-		{ label: `基线 (${baseline.revision})`, ds: baseline, color: PALETTE.blue },
-		...optBatches.slice(-2).map((ds, idx) => ({
-			label: ds.name.includes("p2") ? `P2 (${ds.revision})` : ds.name.includes("opt") ? `P1-opt (${ds.revision})` : `优化 ${idx + 1} (${ds.revision})`,
-			ds,
-			color: idx === optBatches.slice(-2).length - 1 ? PALETTE.green : PALETTE.amber,
-		})),
-	];
-	if (stages.length === 1) {
-		stages.push({ label: "当前唯一真实批次", ds: baseline, color: PALETTE.green });
-	}
+	const stages = latestComplete
+		? [
+			{ label: `基线 (${baseline.revision})`, ds: baseline, color: PALETTE.blue },
+			{ label: `架构优化后 (${latestComplete.revision})`, ds: latestComplete, color: PALETTE.green },
+		]
+		: [
+			{ label: `基线 (${baseline.revision})`, ds: baseline, color: PALETTE.blue },
+			...(optBatches.length ? [{ label: `最新闭环 (${optBatches[optBatches.length - 1].revision})`, ds: optBatches[optBatches.length - 1], color: PALETTE.green }] : []),
+		];
 
 	const tiers = [
-		{ tier: 1, label: "Tier 1 · 单文件快路" },
-		{ tier: 2, label: "Tier 2 · 盲审与边界自愈" },
-		{ tier: 3, label: "Tier 3 · 多模块联合集成" },
+		{ tier: 1, label: "Tier 1 · 单文件快路 (Core 3 题)" },
+		{ tier: 2, label: "Tier 2 · 盲审自愈 (Core 3 题)" },
+		{ tier: 3, label: "Tier 3 · 多模块集成 (Core 3 题)" },
 	];
 
 	const parts = [];
 	parts.push(
-		`<text x="28" y="42" fill="${PALETTE.text}" font-family="${FONT}" font-size="20" font-weight="700">分层架构闭环优化前后演进（lemma-adaptive）</text>`,
-		`<text x="28" y="66" fill="${PALETTE.muted}" font-family="${FONT}" font-size="13">动态读取各真实批次的 Tier 1–3 任务通过率与机制拦截/自愈观测</text>`,
+		`<text x="28" y="42" fill="${PALETTE.text}" font-family="${FONT}" font-size="20" font-weight="700">分层架构同口径闭环演进（Core 9 题 · lemma-adaptive）</text>`,
+		`<text x="28" y="66" fill="${PALETTE.muted}" font-family="${FONT}" font-size="13">严格对齐相同 9 道核心基线题对比，独立隔离 Chaos / Edge 扩展加测，杜绝分母不一致失真</text>`,
 	);
 
 	// Legend
 	stages.forEach((st, i) => {
-		const lx = 480 + i * 145;
+		const lx = 540 + i * 175;
 		parts.push(
 			`<rect x="${lx}" y="30" width="12" height="12" rx="3" fill="${st.color}"/>`,
-			`<text x="${lx + 18}" y="41" fill="${PALETTE.text}" font-family="${FONT}" font-size="11">${esc(st.label.slice(0, 18))}</text>`,
+			`<text x="${lx + 18}" y="41" fill="${PALETTE.text}" font-family="${FONT}" font-size="11">${esc(st.label)}</text>`,
 		);
 	});
 
@@ -333,7 +345,6 @@ function renderOptimizationEvolutionSvg(baseline, optBatches) {
 	const plotH = plotBottom - plotTop;
 	parts.push(`<rect x="${cardX}" y="${cardY}" width="${cardW}" height="${cardH}" rx="8" fill="${PALETTE.card}" stroke="${PALETTE.border}"/>`);
 
-	// Horizontal grid lines 0%, 25%, 50%, 75%, 100%
 	for (const pct of [0, 25, 50, 75, 100]) {
 		const gy = Math.round(plotBottom - (plotH * pct) / 100);
 		parts.push(
@@ -342,34 +353,31 @@ function renderOptimizationEvolutionSvg(baseline, optBatches) {
 		);
 	}
 
-	const groupW = (W - 130) / tiers.length;
-	const barW = Math.min(58, Math.floor((groupW - 50) / stages.length));
+	const activeTiers = tiers.filter((t) =>
+		stages.every((st) => st.ds.runs.some((r) => r.tier === t.tier && CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive")),
+	);
+	const displayTiers = activeTiers.length ? activeTiers : tiers;
+	const groupW = (W - 130) / displayTiers.length;
+	const barW = Math.min(72, Math.floor((groupW - 64) / stages.length));
 
-	tiers.forEach((t, ti) => {
-		const gx = 92 + ti * groupW;
+	displayTiers.forEach((t, ti) => {
+		const gx = 104 + ti * groupW;
 		parts.push(
-			`<text x="${gx + (stages.length * (barW + 10)) / 2 - 5}" y="${plotBottom + 24}" fill="${PALETTE.text}" font-family="${FONT}" font-size="13" font-weight="600" text-anchor="middle">${esc(t.label)}</text>`,
+			`<text x="${gx + (stages.length * (barW + 14)) / 2 - 7}" y="${plotBottom + 24}" fill="${PALETTE.text}" font-family="${FONT}" font-size="12" font-weight="600" text-anchor="middle">${esc(t.label)}</text>`,
 		);
 
 		stages.forEach((st, si) => {
-			const subset = st.ds.runs.filter((r) => r.tier === t.tier && r.arm === "lemma-adaptive");
-			const bx = gx + si * (barW + 10);
-			if (!subset.length) {
-				parts.push(
-					`<rect x="${bx}" y="${plotBottom - 36}" width="${barW}" height="36" rx="4" fill="none" stroke="${PALETTE.border}" stroke-dasharray="4 3"/>`,
-					`<text x="${bx + barW / 2}" y="${plotBottom - 14}" fill="${PALETTE.muted}" font-family="${FONT}" font-size="10" text-anchor="middle">未重测</text>`,
-				);
-				return;
-			}
+			const subset = st.ds.runs.filter((r) => r.tier === t.tier && CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive");
+			const bx = gx + si * (barW + 14);
 			const s = summarizeRuns(subset);
 			const bh = Math.max(4, Math.round((plotH * s.passRate) / 100));
 			const by = plotBottom - bh;
 			const barColor = s.passRate === 0 ? PALETTE.red : st.color;
 			const mechNote = t.tier === 1
-				? `快路 ${s.fastPathHits}/${s.total}`
+				? `快路 ${s.fastPathHits}/${s.total} · ${fmtSec(s.avgDurationMs)}`
 				: t.tier === 2
-					? (s.statusCounts?.TIMEOUT ? `超时 ${s.statusCounts.TIMEOUT}` : `隐测 ${s.hiddenPassed}/${s.hiddenTotal}`)
-					: `契约 ${s.scopeCaught} · 集成 ${s.integrationPassed}`;
+					? `隐测 ${s.hiddenPassed}/${s.hiddenTotal} · ${s.avgRequests.toFixed(1)}req`
+					: `契约 ${s.scopeCaught} · 集成 ${s.integrationPassed}/${s.total}`;
 			parts.push(
 				`<rect x="${bx}" y="${by}" width="${barW}" height="${bh}" rx="4" fill="${barColor}"/>`,
 				`<text x="${bx + barW / 2}" y="${by - 20}" fill="${PALETTE.text}" font-family="${MONO}" font-size="11" font-weight="700" text-anchor="middle">${s.passed}/${s.total} (${Math.round(s.passRate)}%)</text>`,
@@ -378,39 +386,47 @@ function renderOptimizationEvolutionSvg(baseline, optBatches) {
 		});
 	});
 
-	// Footer observation including Tier-Edge if present
-	const latest = stages[stages.length - 1].ds;
-	const edgeRuns = latest.runs.filter((r) => r.tier === "edge" && r.arm === "lemma-adaptive");
-	const edgeSummary = edgeRuns.length ? summarizeRuns(edgeRuns) : null;
-	const footerText = edgeSummary
-		? `最新批次 ${latest.name} 附带 Tier-Edge 独立边缘防御：通过 ${edgeSummary.passed}/${edgeSummary.total}（隐藏用例 ${edgeSummary.hiddenPassed}/${edgeSummary.hiddenTotal}），路由命中 ${edgeSummary.routingMatched}/${edgeSummary.total}。`
-		: `统计口径：按各批次真实模型运行直接聚合（不含离线模拟数据）。`;
+	const tailDs = stages[stages.length - 1].ds;
+	const extraRuns = tailDs.runs.filter((r) => !CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive");
+	const extraSummary = extraRuns.length ? summarizeRuns(extraRuns) : null;
+	const footerText = extraSummary
+		? `独立扩展加测（${tailDs.name} · Chaos 2 题 + Tier-Edge 2 题）：通过 ${extraSummary.passed}/${extraSummary.total}（隐测 ${extraSummary.hiddenPassed}/${extraSummary.hiddenTotal}，自愈 ${extraSummary.selfHealed}，契约拦截 ${extraSummary.scopeCaught}）。`
+		: `统计口径：严格对比完全对齐的 Core 9 题真实运行结果（不含离线模拟）。`;
 	parts.push(`<text x="28" y="${H - 24}" fill="${PALETTE.muted}" font-family="${FONT}" font-size="12">${esc(footerText)}</text>`);
 
-	return svgWrap(W, H, "分层架构闭环优化前后通过率演进", parts.join("\n"));
+	return svgWrap(W, H, "分层架构同口径闭环演进", parts.join("\n"));
 }
 
-function buildMatrixRows(baseline, optBatches) {
+function buildMatrixRows(baseline, optBatches, latestComplete) {
 	const rows = [];
 	for (const arm of ["lemma-adaptive", "single", "ablation-no-fastpath", "ablation-no-blind", "ablation-no-scope"]) {
-		const list = baseline.runs.filter((r) => r.arm === arm);
+		const list = baseline.runs.filter((r) => r.arm === arm && CORE_TASK_IDS.has(r.taskId));
 		if (!list.length) continue;
 		rows.push({
 			label: `${arm}`,
-			tag: `基线 (${baseline.name})`,
+			tag: `基线 Core (${baseline.name})`,
 			s: summarizeRuns(list),
 			highlight: arm === "lemma-adaptive" ? PALETTE.blue : PALETTE.muted,
 		});
 	}
-	for (const ds of optBatches) {
-		const coreList = ds.runs.filter((r) => r.tier !== "edge" && r.arm === "lemma-adaptive");
+	const highlightDs = latestComplete ? [latestComplete] : optBatches.slice(-1);
+	for (const ds of highlightDs) {
+		const coreList = ds.runs.filter((r) => CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive");
 		if (coreList.length) {
-			const isP2 = ds.name.includes("p2");
 			rows.push({
-				label: `lemma-adaptive`,
-				tag: isP2 ? `P2 T2+T3 (${ds.name})` : `P1-opt T2+T3 (${ds.name})`,
+				label: `lemma-adaptive [Core 同口径]`,
+				tag: `${latestComplete ? "优化后完整批" : "T2+T3 Core"} (${ds.name})`,
 				s: summarizeRuns(coreList),
-				highlight: isP2 ? PALETTE.amberBright : PALETTE.greenBright,
+				highlight: PALETTE.greenBright,
+			});
+		}
+		const chaosList = ds.runs.filter((r) => !CORE_TASK_IDS.has(r.taskId) && r.tier !== "edge" && r.arm === "lemma-adaptive");
+		if (chaosList.length) {
+			rows.push({
+				label: `lemma-adaptive [Chaos 自愈]`,
+				tag: `故障注入加测 (${ds.name})`,
+				s: summarizeRuns(chaosList),
+				highlight: PALETTE.amberBright,
 			});
 		}
 		const edgeList = ds.runs.filter((r) => r.tier === "edge" && r.arm === "lemma-adaptive");
@@ -427,8 +443,8 @@ function buildMatrixRows(baseline, optBatches) {
 }
 
 /** 图表 3：全量实验臂综合效能与开销对比图 */
-function renderAblationMatrixSvg(baseline, optBatches) {
-	const rows = buildMatrixRows(baseline, optBatches);
+function renderAblationMatrixSvg(baseline, optBatches, latestComplete) {
+	const rows = buildMatrixRows(baseline, optBatches, latestComplete);
 	const W = 960;
 	const rowH = 52;
 	const topY = 122;
@@ -686,34 +702,33 @@ function buildBrandSection() {
 	return lines.join("\n");
 }
 
-function buildReadmeBenchSection({ baseline, tier1Source, optBatches, offlineDataset }) {
+function buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComplete, offlineDataset }) {
 	const t1Fast = summarizeRuns(tier1Source.runs.filter((r) => r.tier === 1 && r.arm === "lemma-adaptive"));
 	const t1NoFast = summarizeRuns(tier1Source.runs.filter((r) => r.tier === 1 && r.arm === "ablation-no-fastpath"));
 	const reqDrop = t1NoFast.avgRequests > 0 ? Math.round(((t1NoFast.avgRequests - t1Fast.avgRequests) / t1NoFast.avgRequests) * 100) : 0;
 	const timeDrop = t1NoFast.avgDurationMs > 0 ? Math.round(((t1NoFast.avgDurationMs - t1Fast.avgDurationMs) / t1NoFast.avgDurationMs) * 100) : 0;
 
+	const compareBatches = latestComplete ? [latestComplete] : optBatches.slice(-1);
 	const evoRows = [];
 	for (const tier of [1, 2, 3]) {
-		const baseSub = baseline.runs.filter((r) => r.tier === tier && r.arm === "lemma-adaptive");
+		const baseSub = baseline.runs.filter((r) => r.tier === tier && CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive");
 		const bs = summarizeRuns(baseSub);
-		const cells = [`| **Tier ${tier}** | ${bs.passed}/${bs.total} (${fmtPct(bs.passed, bs.total)}) · ${fmtSec(bs.avgDurationMs)} |`];
-		for (const ds of optBatches) {
-			const sub = ds.runs.filter((r) => r.tier === tier && r.arm === "lemma-adaptive");
-			if (!sub.length) {
-				cells.push(` 未重测 |`);
-			} else {
-				const s = summarizeRuns(sub);
-				cells.push(` **${s.passed}/${s.total} (${fmtPct(s.passed, s.total)})** · 隐测 ${s.hiddenPassed}/${s.hiddenTotal} · 契约拦截 ${s.scopeCaught} · ${fmtSec(s.avgDurationMs)} |`);
-			}
+		const cells = [`| **Tier ${tier} (Core 3 题)** | ${bs.passed}/${bs.total} (${fmtPct(bs.passed, bs.total)}) · ${fmtSec(bs.avgDurationMs)} |`];
+		for (const ds of compareBatches) {
+			const sub = ds.runs.filter((r) => r.tier === tier && CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive");
+			const s = summarizeRuns(sub);
+			cells.push(sub.length
+				? ` **${s.passed}/${s.total} (${fmtPct(s.passed, s.total)})** · 隐测 ${s.hiddenPassed}/${s.hiddenTotal} · 契约拦截 ${s.scopeCaught} · ${fmtSec(s.avgDurationMs)} |`
+				: ` — |`);
 		}
 		evoRows.push(cells.join(""));
 	}
 
-	const optHeaders = optBatches.map((ds) => `\`${ds.name}\` (\`${ds.revision}\`)`);
-	const evoHeader = `| 分层 | 基线 \`${baseline.name}\` (\`${baseline.revision}\`) | ${optHeaders.join(" | ")} |`;
-	const evoSep = `|---|---:|${optBatches.map(() => "---:|").join("")}`;
+	const optHeaders = compareBatches.map((ds) => `\`${ds.name}\` (\`${ds.revision}\`)`);
+	const evoHeader = `| 分层（严格同口径 Core） | 基线 \`${baseline.name}\` (\`${baseline.revision}\`) | ${optHeaders.join(" | ")} |`;
+	const evoSep = `|---|---:|${compareBatches.map(() => "---:|").join("")}`;
 
-	const matrixRows = buildMatrixRows(baseline, optBatches).map((row) => {
+	const matrixRows = buildMatrixRows(baseline, optBatches, latestComplete).map((row) => {
 		const s = row.s;
 		const routeStr = s.routingMatched !== null ? `${s.routingMatched}/${s.total} (${fmtPct(s.routingMatched, s.total)})` : "—";
 		const extra = [
@@ -730,24 +745,32 @@ function buildReadmeBenchSection({ baseline, tier1Source, optBatches, offlineDat
 		? `最近一次离线全链路回归（\`${offlineDataset.name}\`）共 **${offlineDataset.runs.length} 次运行**，\`lemma-adaptive\` 核心与 \`Tier-Edge\` 均全量跑通。`
 		: "";
 
-	return [
-		`以下图表与汇总表均由 \`npm run bench:chart\`（[render-bench-charts.mjs](scripts/render-bench-charts.mjs)）**直接扫描 \`data/benchmarks/\` 下实测 JSON 自动渲染**（Tier 1 快路对比去快路请求 **-${reqDrop}%**、耗时 **-${timeDrop}%**；完整归因与逐题报告见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)）。${offlineNote}`,
-		``,
+	const chartEmbeds = [
 		`![Lemma Adaptive 自适应路由架构](docs/assets/bench-architecture-flow.svg)`,
 		``,
 		`![Tier 1 单跳快路消融对比](docs/assets/bench-tier1-fastpath.svg)`,
+		...(latestComplete
+			? [
+				``,
+				`![分层架构同口径闭环演进](docs/assets/bench-p1-optimization.svg)`,
+				``,
+				`![全量实验臂综合效能与开销对比](docs/assets/bench-ablation-matrix.svg)`,
+			]
+			: []),
+	];
+
+	return [
+		`以下图表与表格由 \`npm run bench:chart\`（[render-bench-charts.mjs](scripts/render-bench-charts.mjs)）**直接扫描 \`data/benchmarks/\` 下实测 JSON 自动渲染**。为确保评测口径严谨，主视觉仅展示**完全对齐的同口径实测对照**（Tier 1 快路对比去快路请求 **-${reqDrop}%**、耗时 **-${timeDrop}%**）；Tier 2/3 重型闭环、故障注入（Chaos）及 \`Tier-Edge\` 独立结果及归因详见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)。${offlineNote}`,
 		``,
-		`![分层架构闭环优化前后演进](docs/assets/bench-p1-optimization.svg)`,
+		...chartEmbeds,
 		``,
-		`![全量实验臂综合效能与开销对比](docs/assets/bench-ablation-matrix.svg)`,
-		``,
-		`### 优化前后演进对照（\`lemma-adaptive\`）`,
+		`### 同口径核心对照（\`lemma-adaptive\` · Core 9 题口径对齐）`,
 		``,
 		evoHeader,
 		evoSep,
 		...evoRows,
 		``,
-		`### 全量实验臂实测汇总（JSON 自动聚合）`,
+		`### 全量实测与扩展专项明细（JSON 自动聚合，分母按作用域隔离）`,
 		``,
 		`| 实验臂与批次 | 任务通过率 | 隐藏用例 | 路由准确率 | 平均请求 | 平均耗时 | 总 Token | 费用 | 机制观测 |`,
 		`|---|---:|---:|---:|---:|---:|---:|---:|---|`,
@@ -757,14 +780,14 @@ function buildReadmeBenchSection({ baseline, tier1Source, optBatches, offlineDat
 
 function main() {
 	const { realDatasets, offlineDatasets } = discoverDatasets();
-	const { baseline, tier1Source, optBatches, latest } = pickDatasets(realDatasets);
+	const { baseline, tier1Source, optBatches, latestComplete, latest } = pickDatasets(realDatasets);
 	const offlineDataset = offlineDatasets.length ? offlineDatasets[offlineDatasets.length - 1] : null;
 
 	const outputs = [
 		["bench-badges.svg", renderBrandBadgesSvg({ tier1Source, optBatches, offlineDataset })],
 		["bench-tier1-fastpath.svg", renderTier1FastpathSvg(tier1Source)],
-		["bench-p1-optimization.svg", renderOptimizationEvolutionSvg(baseline, optBatches)],
-		["bench-ablation-matrix.svg", renderAblationMatrixSvg(baseline, optBatches)],
+		["bench-p1-optimization.svg", renderOptimizationEvolutionSvg(baseline, optBatches, latestComplete)],
+		["bench-ablation-matrix.svg", renderAblationMatrixSvg(baseline, optBatches, latestComplete)],
 		["bench-architecture-flow.svg", renderArchitectureFlowSvg(tier1Source, latest)],
 	];
 
@@ -774,7 +797,7 @@ function main() {
 
 	let readme = readFileSync(README_PATH, "utf8");
 	readme = replaceBetween(readme, "<!-- BRAND_START -->", "<!-- BRAND_END -->", buildBrandSection());
-	readme = replaceBetween(readme, "<!-- BENCH_START -->", "<!-- BENCH_END -->", buildReadmeBenchSection({ baseline, tier1Source, optBatches, offlineDataset }));
+	readme = replaceBetween(readme, "<!-- BENCH_START -->", "<!-- BENCH_END -->", buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComplete, offlineDataset }));
 	writeFileSync(README_PATH, readme, "utf8");
 
 	console.log(`已自动扫描 ${realDatasets.length} 组真实评测批次（基线=${baseline.name}, 最新=${latest.name}），生成 5 张 SVG 至 docs/assets/ 并同步更新 README.md ✅`);

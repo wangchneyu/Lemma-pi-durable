@@ -76,35 +76,31 @@ npm start
 ## 效果评测
 
 <!-- BENCH_START -->
-以下图表与汇总表均由 `npm run bench:chart`（[render-bench-charts.mjs](scripts/render-bench-charts.mjs)）**直接扫描 `data/benchmarks/` 下实测 JSON 自动渲染**（Tier 1 快路对比去快路请求 **-74%**、耗时 **-91%**；完整归因与逐题报告见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)）。最近一次离线全链路回归（`coding-p2-offline`）共 **37 次运行**，`lemma-adaptive` 核心与 `Tier-Edge` 均全量跑通。
+以下图表与表格由 `npm run bench:chart`（[render-bench-charts.mjs](scripts/render-bench-charts.mjs)）**直接扫描 `data/benchmarks/` 下实测 JSON 自动渲染**。为确保评测口径严谨，主视觉仅展示**完全对齐的同口径实测对照**（Tier 1 快路对比去快路请求 **-74%**、耗时 **-91%**）；Tier 2/3 重型闭环、故障注入（Chaos）及 `Tier-Edge` 独立结果及归因详见 [分层编码评测记录](docs/benchmarks/tiered-coding-evaluation.md)。最近一次离线全链路回归（`coding-p2-offline`）共 **37 次运行**，`lemma-adaptive` 核心与 `Tier-Edge` 均全量跑通。
 
 ![Lemma Adaptive 自适应路由架构](docs/assets/bench-architecture-flow.svg)
 
 ![Tier 1 单跳快路消融对比](docs/assets/bench-tier1-fastpath.svg)
 
-![分层架构闭环优化前后演进](docs/assets/bench-p1-optimization.svg)
+### 同口径核心对照（`lemma-adaptive` · Core 9 题口径对齐）
 
-![全量实验臂综合效能与开销对比](docs/assets/bench-ablation-matrix.svg)
+| 分层（严格同口径 Core） | 基线 `coding-p1-deepseek` (`efbf84d`) | `coding-p2-t23edge-r1` (`3c307e7`) |
+|---|---:|---:|
+| **Tier 1 (Core 3 题)** | 3/3 (100%) · 13.1s | — |
+| **Tier 2 (Core 3 题)** | 0/3 (0%) · 77.3s | **0/3 (0%)** · 隐测 2/6 · 契约拦截 2 · 271.1s |
+| **Tier 3 (Core 3 题)** | 0/3 (0%) · 101.2s | **1/3 (33%)** · 隐测 1/4 · 契约拦截 6 · 405.5s |
 
-### 优化前后演进对照（`lemma-adaptive`）
-
-| 分层 | 基线 `coding-p1-deepseek` (`efbf84d`) | `coding-p1-t23-opt` (`e1589a4`) | `coding-p2-t23edge-r1` (`3c307e7`) |
-|---|---:|---:|---:|
-| **Tier 1** | 3/3 (100%) · 13.1s | 未重测 | 未重测 |
-| **Tier 2** | 0/3 (0%) · 77.3s | **2/3 (67%)** · 隐测 4/6 · 契约拦截 2 · 175.9s | **0/4 (0%)** · 隐测 3/8 · 契约拦截 2 · 249.0s |
-| **Tier 3** | 0/3 (0%) · 101.2s | **0/3 (0%)** · 隐测 0/4 · 契约拦截 2 · 166.5s | **1/4 (25%)** · 隐测 1/6 · 契约拦截 7 · 402.5s |
-
-### 全量实验臂实测汇总（JSON 自动聚合）
+### 全量实测与扩展专项明细（JSON 自动聚合，分母按作用域隔离）
 
 | 实验臂与批次 | 任务通过率 | 隐藏用例 | 路由准确率 | 平均请求 | 平均耗时 | 总 Token | 费用 | 机制观测 |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| `lemma-adaptive` (基线 (coding-p1-deepseek)) | 3/9 (33%) | 6/16 (38%) | — | 9.9 | 63.9s | 694k | $0.2574 | 快路 3 · 契约拦截 1 |
-| `single` (基线 (coding-p1-deepseek)) | 3/9 (33%) | 6/16 (38%) | — | 5.2 | 43.4s | 195k | $0.1134 | — |
-| `ablation-no-fastpath` (基线 (coding-p1-deepseek)) | 1/3 (33%) | 2/6 (33%) | — | 27.0 | 148.4s | 753k | $0.2920 | — |
-| `ablation-no-blind` (基线 (coding-p1-deepseek)) | 2/3 (67%) | 4/6 (67%) | — | 16.7 | 80.1s | 363k | $0.0980 | — |
-| `ablation-no-scope` (基线 (coding-p1-deepseek)) | 0/3 (0%) | 0/4 (0%) | — | 14.0 | 81.4s | 360k | $0.1698 | 契约拦截 1 |
-| `lemma-adaptive` (P1-opt T2+T3 (coding-p1-t23-opt)) | 2/6 (33%) | 4/10 (40%) | — | 18.8 | 171.2s | 1.07M | $0.4947 | 契约拦截 4 |
-| `lemma-adaptive` (P2 T2+T3 (coding-p2-t23edge-r1)) | 1/8 (13%) | 4/14 (29%) | 2/8 (25%) | 29.3 | 325.8s | 2.90M | $1.3713 | 契约拦截 9 · 自愈 1 · 集成 1 · 门禁 2 |
+| `lemma-adaptive` (基线 Core (coding-p1-deepseek)) | 3/9 (33%) | 6/16 (38%) | — | 9.9 | 63.9s | 694k | $0.2574 | 快路 3 · 契约拦截 1 |
+| `single` (基线 Core (coding-p1-deepseek)) | 3/9 (33%) | 6/16 (38%) | — | 5.2 | 43.4s | 195k | $0.1134 | — |
+| `ablation-no-fastpath` (基线 Core (coding-p1-deepseek)) | 1/3 (33%) | 2/6 (33%) | — | 27.0 | 148.4s | 753k | $0.2920 | — |
+| `ablation-no-blind` (基线 Core (coding-p1-deepseek)) | 2/3 (67%) | 4/6 (67%) | — | 16.7 | 80.1s | 363k | $0.0980 | — |
+| `ablation-no-scope` (基线 Core (coding-p1-deepseek)) | 0/3 (0%) | 0/4 (0%) | — | 14.0 | 81.4s | 360k | $0.1698 | 契约拦截 1 |
+| `lemma-adaptive [Core 同口径]` (T2+T3 Core (coding-p2-t23edge-r1)) | 1/6 (17%) | 3/10 (30%) | 1/6 (17%) | 30.5 | 338.3s | 2.29M | $1.0385 | 契约拦截 8 · 自愈 1 · 集成 1 · 门禁 2 |
+| `lemma-adaptive [Chaos 自愈]` (故障注入加测 (coding-p2-t23edge-r1)) | 0/2 (0%) | 1/4 (25%) | 1/2 (50%) | 25.5 | 288.1s | 613k | $0.3328 | 契约拦截 1 |
 | `lemma-adaptive [Tier-Edge]` (独立边缘防御 (coding-p2-t23edge-r1)) | 1/2 (50%) | 3/4 (75%) | 2/2 (100%) | 29.0 | 223.5s | 623k | $0.1919 | 契约拦截 1 · 自愈 1 |
 <!-- BENCH_END -->
 
