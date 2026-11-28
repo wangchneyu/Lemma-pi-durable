@@ -202,9 +202,14 @@ function pickDatasets(realDatasets) {
 		(d) => d.name !== baseline.name && d.mtimeMs >= baseline.mtimeMs && (d.tiers.has(2) || d.tiers.has(3)),
 	);
 	const completeSweeps = optBatches.filter((d) => d.tiers.has(1) && d.tiers.has(2) && d.tiers.has(3));
-	const latestComplete = completeSweeps.length ? completeSweeps[completeSweeps.length - 1] : null;
+	const flagshipCompletes = completeSweeps.filter((d) => d.model === baseline.model);
+	const latestComplete = flagshipCompletes.length
+		? flagshipCompletes[flagshipCompletes.length - 1]
+		: (completeSweeps.length ? completeSweeps[completeSweeps.length - 1] : null);
+	const flashCompletes = completeSweeps.filter((d) => d.model !== baseline.model && /flash/i.test(d.model));
+	const flashComplete = flashCompletes.length ? flashCompletes[flashCompletes.length - 1] : null;
 	const latest = latestComplete ?? (optBatches.length ? optBatches[optBatches.length - 1] : baseline);
-	return { baseline, tier1Source, optBatches, latestComplete, latest };
+	return { baseline, tier1Source, optBatches, latestComplete, flashComplete, latest };
 }
 
 function batchShortLabel(ds, index, totalOpt) {
@@ -413,7 +418,7 @@ function renderOptimizationEvolutionSvg(baseline, optBatches, latestComplete) {
 	return svgWrap(W, H, "分层架构同口径闭环演进", parts.join("\n"));
 }
 
-function buildMatrixRows(baseline, optBatches, latestComplete) {
+function buildMatrixRows(baseline, optBatches, latestComplete, flashComplete = null) {
 	const rows = [];
 	for (const arm of ["lemma-adaptive", "single", "ablation-no-fastpath", "ablation-no-blind", "ablation-no-scope"]) {
 		const list = baseline.runs.filter((r) => r.arm === arm && CORE_TASK_IDS.has(r.taskId));
@@ -431,7 +436,7 @@ function buildMatrixRows(baseline, optBatches, latestComplete) {
 		if (coreList.length) {
 			rows.push({
 				label: `lemma-adaptive [Core 同口径]`,
-				tag: `${latestComplete ? "优化后完整批" : "T2+T3 Core"} (${ds.name})`,
+				tag: `${latestComplete ? `${ds.model} 主控` : "T2+T3 Core"} (${ds.name})`,
 				s: summarizeRuns(coreList),
 				highlight: PALETTE.greenBright,
 			});
@@ -455,12 +460,23 @@ function buildMatrixRows(baseline, optBatches, latestComplete) {
 			});
 		}
 	}
+	if (flashComplete && flashComplete.name !== latestComplete?.name) {
+		const flashCore = flashComplete.runs.filter((r) => CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive");
+		if (flashCore.length) {
+			rows.push({
+				label: `lemma-adaptive [Flash 全栈 Core]`,
+				tag: `${flashComplete.model} 经济高速 (${flashComplete.name})`,
+				s: summarizeRuns(flashCore),
+				highlight: PALETTE.blue,
+			});
+		}
+	}
 	return rows;
 }
 
 /** 图表 3：全量实验臂综合效能与开销对比图 */
-function renderAblationMatrixSvg(baseline, optBatches, latestComplete) {
-	const rows = buildMatrixRows(baseline, optBatches, latestComplete);
+function renderAblationMatrixSvg(baseline, optBatches, latestComplete, flashComplete = null) {
+	const rows = buildMatrixRows(baseline, optBatches, latestComplete, flashComplete);
 	const W = 960;
 	const rowH = 52;
 	const topY = 122;
@@ -718,13 +734,16 @@ function buildBrandSection() {
 	return lines.join("\n");
 }
 
-function buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComplete, offlineDataset }) {
+function buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComplete, flashComplete, offlineDataset }) {
 	const t1Fast = summarizeRuns(tier1Source.runs.filter((r) => r.tier === 1 && r.arm === "lemma-adaptive"));
 	const t1NoFast = summarizeRuns(tier1Source.runs.filter((r) => r.tier === 1 && r.arm === "ablation-no-fastpath"));
 	const reqDrop = t1NoFast.avgRequests > 0 ? Math.round(((t1NoFast.avgRequests - t1Fast.avgRequests) / t1NoFast.avgRequests) * 100) : 0;
 	const timeDrop = t1NoFast.avgDurationMs > 0 ? Math.round(((t1NoFast.avgDurationMs - t1Fast.avgDurationMs) / t1NoFast.avgDurationMs) * 100) : 0;
 
-	const compareBatches = latestComplete ? [latestComplete] : optBatches.slice(-1);
+	const compareBatches = [
+		...(latestComplete ? [latestComplete] : optBatches.slice(-1)),
+		...(flashComplete && flashComplete.name !== latestComplete?.name ? [flashComplete] : []),
+	];
 	const evoRows = [];
 	for (const tier of [1, 2, 3]) {
 		const baseSub = baseline.runs.filter((r) => r.tier === tier && CORE_TASK_IDS.has(r.taskId) && r.arm === "lemma-adaptive");
@@ -740,11 +759,11 @@ function buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComp
 		evoRows.push(cells.join(""));
 	}
 
-	const optHeaders = compareBatches.map((ds) => `\`${ds.name}\` (\`${ds.revision}\`)`);
-	const evoHeader = `| 分层（严格同口径 Core） | 基线 \`${baseline.name}\` (\`${baseline.revision}\`) | ${optHeaders.join(" | ")} |`;
+	const optHeaders = compareBatches.map((ds) => `\`${ds.name}\` (\`${ds.model}\`)`);
+	const evoHeader = `| 分层（严格同口径 Core） | 基线 \`${baseline.name}\` (\`${baseline.model}\`) | ${optHeaders.join(" | ")} |`;
 	const evoSep = `|---|---:|${compareBatches.map(() => "---:|").join("")}`;
 
-	const matrixRows = buildMatrixRows(baseline, optBatches, latestComplete).map((row) => {
+	const matrixRows = buildMatrixRows(baseline, optBatches, latestComplete, flashComplete).map((row) => {
 		const s = row.s;
 		const routeStr = s.routingMatched !== null ? `${s.routingMatched}/${s.total} (${fmtPct(s.routingMatched, s.total)})` : "—";
 		const extra = [
@@ -797,14 +816,14 @@ function buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComp
 
 function main() {
 	const { realDatasets, offlineDatasets } = discoverDatasets();
-	const { baseline, tier1Source, optBatches, latestComplete, latest } = pickDatasets(realDatasets);
+	const { baseline, tier1Source, optBatches, latestComplete, flashComplete, latest } = pickDatasets(realDatasets);
 	const offlineDataset = offlineDatasets.length ? offlineDatasets[offlineDatasets.length - 1] : null;
 
 	const outputs = [
 		["bench-badges.svg", renderBrandBadgesSvg({ tier1Source, optBatches, offlineDataset })],
 		["bench-tier1-fastpath.svg", renderTier1FastpathSvg(tier1Source)],
 		["bench-p1-optimization.svg", renderOptimizationEvolutionSvg(baseline, optBatches, latestComplete)],
-		["bench-ablation-matrix.svg", renderAblationMatrixSvg(baseline, optBatches, latestComplete)],
+		["bench-ablation-matrix.svg", renderAblationMatrixSvg(baseline, optBatches, latestComplete, flashComplete)],
 		["bench-architecture-flow.svg", renderArchitectureFlowSvg(tier1Source, latest)],
 	];
 
@@ -814,7 +833,7 @@ function main() {
 
 	let readme = readFileSync(README_PATH, "utf8");
 	readme = replaceBetween(readme, "<!-- BRAND_START -->", "<!-- BRAND_END -->", buildBrandSection());
-	readme = replaceBetween(readme, "<!-- BENCH_START -->", "<!-- BENCH_END -->", buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComplete, offlineDataset }));
+	readme = replaceBetween(readme, "<!-- BENCH_START -->", "<!-- BENCH_END -->", buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComplete, flashComplete, offlineDataset }));
 	writeFileSync(README_PATH, readme, "utf8");
 
 	console.log(`已自动扫描 ${realDatasets.length} 组真实评测批次（基线=${baseline.name}, 最新=${latest.name}），生成 5 张 SVG 至 docs/assets/ 并同步更新 README.md ✅`);

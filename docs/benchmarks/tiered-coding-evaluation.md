@@ -134,6 +134,15 @@
 
 > 完整 13 题累计：**11/13 (85%)**，隐藏用例 **21/24 (88%)**，路由准确率 **12/13 (92%)**，零 `TOKEN_TRUNCATED`、零 `PREMATURE_STOP`、零 `LOOP_DETECTED`，总费用 **\$1.2387**（归档 [coding-p4-complete/report.md](../../data/benchmarks/coding-p4-complete/report.md)）。
 
+## P5 成员限额修复与全员 `deepseek-flash`（V4.1 Flash）实测（`444d868`）
+
+- **P5 关键修复（`1381ef1` → `444d868`）**：成员输出上限提至 `12288–16384`（盲审 `6144`）根除 `t2-rate-limiter` `tokenTruncated` 空交付；`read_result` 传入 `field` 于纯文本交付自动回退全文读取避免循环报错；`api-member.ts` 禁止多行/分号 `node -e`；`benchmark-coding.ts` 新增 `--tasks=`、`--resume` 与 `repeats > 1` `Pass@k`/`Pass^k` 统计及失败 `diagnostics` 快照。
+- **全员 `deepseek-flash` 实测（`coding-p5-flash-complete`，13 题累计 `\$0.3841` / 实际扣费 `1.25 CNY`）**：
+  - **Core 9 题**：**6/9 (67%)**（隐测 `12/16`，路由 `8/9`），平均 **15.6 reqs / 109.9s / \$0.2819**（费用较 `v4-pro` 降低 **68%**）。其中 Tier 1 **3/3 (100%, 2.0 reqs / 4.9s)**，`t2-rate-limiter` **PASS (2/2, 15 reqs / 123.2s)**，`t2-csv-parser` **PASS (2/2, 10 reqs / 95.7s)**，`t3-ledger-engine` **PASS (1/1, 19 reqs / 88.7s)**。
+  - **Chaos（2 题）**：**1/2 (50%)**（`t3-chaos-scope-heal` **PASS 2/2, 31 reqs / 98.4s, 契约拦截 1 · 集成通过**；`t2-chaos-type-heal` **8 reqs / 38.1s**, 隐测 `1/2`）。
+  - **Tier-Edge（2 题）**：**2/2 (100%)**（隐测 `4/4`, 平均 **20.5 reqs / 80.4s / \$0.0462**）。
+  - **全集 13 题**：**9/13 (69%)**，隐藏用例 **19/24 (79%)**，**零 `TOKEN_TRUNCATED`、零 `PREMATURE_STOP`、零 `LOOP_DETECTED`**，总耗时显著缩短、总费用仅为 `v4-pro` 主控方案的 **31%**；实测对比表明：复杂多模块架构设计（Tier 3）推荐总控使用 `deepseek-v4-pro` 保证 **100%** 契约不漂移，而快速迭代与低预算场景全栈 `deepseek-flash` 性价比较高。
+
 ## 复现命令
 
 ```bash

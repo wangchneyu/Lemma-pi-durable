@@ -88,11 +88,11 @@ npm start
 
 ### 同口径核心对照（`lemma-adaptive` · Core 9 题口径对齐）
 
-| 分层（严格同口径 Core） | 基线 `coding-p1-deepseek` (`efbf84d`) | `coding-p4-complete` (`f1882c2`) |
-|---|---:|---:|
-| **Tier 1 (Core 3 题)** | 3/3 (100%) · 13.1s | **3/3 (100%)** · 隐测 6/6 · 契约拦截 0 · 4.4s |
-| **Tier 2 (Core 3 题)** | 0/3 (0%) · 77.3s | **2/3 (67%)** · 隐测 4/6 · 契约拦截 0 · 186.4s |
-| **Tier 3 (Core 3 题)** | 0/3 (0%) · 101.2s | **3/3 (100%)** · 隐测 4/4 · 契约拦截 4 · 245.9s |
+| 分层（严格同口径 Core） | 基线 `coding-p1-deepseek` (`deepseek-v4-pro`) | `coding-p4-complete` (`deepseek-v4-pro`) | `coding-p5-flash-complete` (`deepseek-flash`) |
+|---|---:|---:|---:|
+| **Tier 1 (Core 3 题)** | 3/3 (100%) · 13.1s | **3/3 (100%)** · 隐测 6/6 · 契约拦截 0 · 4.4s | **3/3 (100%)** · 隐测 6/6 · 契约拦截 0 · 4.9s |
+| **Tier 2 (Core 3 题)** | 0/3 (0%) · 77.3s | **2/3 (67%)** · 隐测 4/6 · 契约拦截 0 · 186.4s | **2/3 (67%)** · 隐测 4/6 · 契约拦截 0 · 183.3s |
+| **Tier 3 (Core 3 题)** | 0/3 (0%) · 101.2s | **3/3 (100%)** · 隐测 4/4 · 契约拦截 4 · 245.9s | **1/3 (33%)** · 隐测 2/4 · 契约拦截 2 · 141.5s |
 
 ### 全量实测与扩展专项明细（JSON 自动聚合，分母按作用域隔离）
 
@@ -103,9 +103,10 @@ npm start
 | `ablation-no-fastpath` (基线 Core (coding-p1-deepseek)) | 1/3 (33%) | 2/6 (33%) | — | 27.0 | 148.4s | 753k | $0.2920 | — |
 | `ablation-no-blind` (基线 Core (coding-p1-deepseek)) | 2/3 (67%) | 4/6 (67%) | — | 16.7 | 80.1s | 363k | $0.0980 | — |
 | `ablation-no-scope` (基线 Core (coding-p1-deepseek)) | 0/3 (0%) | 0/4 (0%) | — | 14.0 | 81.4s | 360k | $0.1698 | 契约拦截 1 |
-| `lemma-adaptive [Core 同口径]` (优化后完整批 (coding-p4-complete)) | 8/9 (89%) | 14/16 (88%) | 8/9 (89%) | 19.6 | 145.6s | 1.82M | $0.8901 | 快路 3 · 契约拦截 4 · 自愈 4 · 集成 3 · 门禁 1 |
+| `lemma-adaptive [Core 同口径]` (deepseek-v4-pro 主控 (coding-p4-complete)) | 8/9 (89%) | 14/16 (88%) | 8/9 (89%) | 19.6 | 145.6s | 1.82M | $0.8901 | 快路 3 · 契约拦截 4 · 自愈 4 · 集成 3 · 门禁 1 |
 | `lemma-adaptive [Chaos 自愈]` (故障注入加测 (coding-p4-complete)) | 1/2 (50%) | 3/4 (75%) | 2/2 (100%) | 24.5 | 157.9s | 450k | $0.2342 | 契约拦截 2 · 自愈 1 · 集成 1 |
 | `lemma-adaptive [Tier-Edge]` (独立边缘防御 (coding-p4-complete)) | 2/2 (100%) | 4/4 (100%) | 2/2 (100%) | 12.0 | 73.8s | 230k | $0.1144 | 自愈 2 |
+| `lemma-adaptive [Flash 全栈 Core]` (deepseek-flash 经济高速 (coding-p5-flash-complete)) | 6/9 (67%) | 12/16 (75%) | 8/9 (89%) | 15.6 | 109.9s | 1.75M | $0.2819 | 快路 3 · 契约拦截 2 · 自愈 2 · 集成 3 · 门禁 1 |
 <!-- BENCH_END -->
 
 ## 测试与评测
