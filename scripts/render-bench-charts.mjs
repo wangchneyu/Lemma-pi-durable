@@ -80,6 +80,10 @@ function discoverDatasets() {
 		}
 		if (!Array.isArray(parsed?.runs) || !parsed.runs.length) continue;
 		if (!parsed.runs[0]?.taskId || !parsed.runs[0]?.arm) continue;
+		// 跳过因 401/402/余额耗尽中途异常中止的不完整半成品数据集
+		if (parsed.runs.some((r) => /模型服务商认证或余额异常|insufficient balance|insufficient_balance|\b40[123]\b/i.test(String(r.error ?? "")))) {
+			continue;
+		}
 		const st = statSync(jsonPath);
 		const ds = {
 			name: entry.name,
