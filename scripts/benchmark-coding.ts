@@ -29,6 +29,8 @@ const tiers = tierArg
 	: undefined;
 const armsArg = process.argv.find((a) => a.startsWith("--arms="))?.split("=")[1];
 const arms = armsArg ? (armsArg.split(",").map((s) => s.trim()).filter(Boolean) as BenchmarkArm[]) : undefined;
+const tasksArg = process.argv.find((a) => a.startsWith("--tasks="))?.split("=")[1];
+const taskIds = tasksArg ? tasksArg.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
 const coderAgent = process.argv.find((a) => a.startsWith("--coder-agent="))?.split("=")[1]?.trim() || undefined;
 const orchAgent = process.argv.find((a) => a.startsWith("--orchestrator-agent="))?.split("=")[1]?.trim() || undefined;
 const orchModel = process.argv.find((a) => a.startsWith("--orchestrator-model="))?.split("=")[1]?.trim() || undefined;
@@ -96,6 +98,7 @@ try {
 		runtime: (task, arm) => (real ? createOrchestratorModel(base.orchestrator) : localTieredCodingRuntime(task, arm)),
 		simulated: !real,
 		tiers,
+		taskIds,
 		arms,
 		coderAgent,
 		repeats,

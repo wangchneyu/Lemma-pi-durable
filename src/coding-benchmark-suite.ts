@@ -80,6 +80,12 @@ export interface TieredCodingRun {
 	selfHealed: boolean;
 	trajectory: TrajectoryMetrics;
 	error?: string;
+	diagnostics?: {
+		loopDetail?: string;
+		lastToolError?: string;
+		board?: unknown;
+		hiddenOutput?: string;
+	};
 }
 
 export interface TierBudget {
@@ -183,6 +189,8 @@ function analyzeConversationMessages(messages: any[], seenScopeResultIds: Set<st
 	const callById = new Map<string, { name: string; argsJson: string }>();
 	let prevFailedSignature: string | undefined;
 	let loopDetected = false;
+	let loopDetail: string | undefined;
+	let lastToolError: string | undefined;
 
 	for (const msg of messages ?? []) {
 		if (msg?.role === "assistant" && Array.isArray(msg.content)) {
@@ -215,8 +223,10 @@ function analyzeConversationMessages(messages: any[], seenScopeResultIds: Set<st
 				}
 				const normErr = text.trim().replace(/\s+/g, " ").slice(0, 240);
 				const sig = `${call?.name ?? msg.toolName ?? ""}|${call?.argsJson ?? ""}|${normErr}`;
+				lastToolError = sig.slice(0, 420);
 				if (prevFailedSignature && prevFailedSignature === sig) {
 					loopDetected = true;
+					loopDetail = sig.slice(0, 420);
 				}
 				prevFailedSignature = sig;
 			} else {
@@ -232,6 +242,8 @@ function analyzeConversationMessages(messages: any[], seenScopeResultIds: Set<st
 		hadRecoverableError,
 		newScopeViolations,
 		loopDetected,
+		loopDetail,
+		lastToolError,
 	};
 }
 
@@ -666,6 +678,8 @@ export async function runTieredCodingBenchmark(options: {
 					let tokenTruncated = false;
 					let hadRecoverableError = false;
 					let preFlightIntercepts = 0;
+					let loopDetail: string | undefined;
+					let lastToolError: string | undefined;
 
 					const runAbort = new AbortController();
 					const signal = AbortSignal.any([runAbort.signal, ...(options.signal ? [options.signal] : [])]);
@@ -699,10 +713,12 @@ export async function runTieredCodingBenchmark(options: {
 										if (trace.scopeChecked) scopeChecked = true;
 										if (trace.integrationCalled) integrationCalled = true;
 										if (trace.hadRecoverableError) hadRecoverableError = true;
+										if (trace.lastToolError) lastToolError = trace.lastToolError;
 										if (trace.newScopeViolations > 0) scopeViolationsCaught += trace.newScopeViolations;
 										if (trace.loopDetected) {
 											loopDetected = true;
-											const loopErr = new Error("LOOP_DETECTED: 连续 2 次以完全相同参数调用工具且返回相同报错");
+											loopDetail = trace.loopDetail;
+											const loopErr = new Error(`LOOP_DETECTED: 连续 2 次以完全相同参数调用工具且返回相同报错${trace.loopDetail ? ` [${trace.loopDetail}]` : ""}`);
 											runAbort.abort(loopErr);
 											throw loopErr;
 										}
@@ -712,11 +728,11 @@ export async function runTieredCodingBenchmark(options: {
 										}
 										requests++;
 										const isOrchestratorCall = model?.provider === "orchestrator" || model?.provider === "bench-ctrl";
-										const fallbackCap = isOrchestratorCall ? (model?.maxTokens ?? 16_000) : 4096;
+										const fallbackCap = isOrchestratorCall ? (model?.maxTokens ?? 16_000) : 12_288;
 										const rawCap = typeof settings?.maxTokens === "number" && settings.maxTokens > 0 ? settings.maxTokens : fallbackCap;
 										const maxTokens = isOrchestratorCall
 											? Math.min(Math.max(rawCap, 12_288), 16_384)
-											: Math.min(Math.max(rawCap, 2048), 8192);
+											: Math.min(Math.max(rawCap, 4096), 16_384);
 										const stream = target.streamSimple(model, input, {
 											...settings,
 											maxTokens,
@@ -796,18 +812,18 @@ export async function runTieredCodingBenchmark(options: {
 										bash,
 										bashAllow: bash === "off" ? [] : ["node"],
 										maxTurns: 12,
-										maxTokens: Math.min(Math.max(heteroSource.api.maxTokens ?? 4096, 4096), 4096),
+										maxTokens: Math.min(Math.max(heteroSource.api.maxTokens ?? 12_288, 12_288), 16_384),
 									},
 								}
-								: makeMember(desc, tools, bash, 4096);
+								: makeMember(desc, tools, bash, 12_288);
 
 						const coderMember = buildHeteroMember("负责编写和修复实现代码", ["read", "write", "edit", "bash"], "allowlist");
 						// Tier 3：编码与测试成员均路由至高吞吐模型（如 deepseek-flash），仅总控与盲审保留重型推理模型
 						const testerMember = buildHeteroMember("负责编写独立测试", ["read", "write", "edit", "bash"], "allowlist");
-						// 盲审成员优先高吞吐快速审阅，但保留 4096 输出与 6 turns 余量防止思考链截断 JSON
+						// 盲审成员保留 6144 输出与 6 turns 余量防止思考链截断 JSON
 						const auditorMember = heteroSource?.api
-							? { ...buildHeteroMember("只读代码盲审成员", ["read"], "off"), api: { ...buildHeteroMember("只读代码盲审成员", ["read"], "off").api!, maxTokens: 4096, maxTurns: 6 } }
-							: makeMember("只读代码盲审成员", ["read"], "off", 4096);
+							? { ...buildHeteroMember("只读代码盲审成员", ["read"], "off"), api: { ...buildHeteroMember("只读代码盲审成员", ["read"], "off").api!, maxTokens: 6144, maxTurns: 6 } }
+							: makeMember("只读代码盲审成员", ["read"], "off", 6144);
 
 						const checks = task.tier === 3
 							? [{ name: "node-test", command: "node", args: ["--test", task.testPath ?? "test/"], timeoutSeconds: 20 }]
@@ -896,10 +912,10 @@ export async function runTieredCodingBenchmark(options: {
 							const submission = await app.root.submit({ type: "input", content: prompt }, BACKGROUND_CONTEXT);
 							await submission.wait(runCtx);
 
+							const blindDeadline = Date.now() + budget.blindWaitMs;
 							const waitTier2BlindReview = async () => {
 								if (task.tier !== 2 || arm !== "lemma-adaptive") return;
-								const deadline = Date.now() + budget.blindWaitMs;
-								while (Date.now() < deadline && !signal.aborted) {
+								while (Date.now() < blindDeadline && !signal.aborted) {
 									const board = await app!.harness.snapshot(Board, BACKGROUND_CONTEXT);
 									const t1 = board?.tasks?.T1;
 									if (t1?.reviewer?.blind) blindReviewTriggered = true;
@@ -1069,6 +1085,22 @@ export async function runTieredCodingBenchmark(options: {
 						tokenTruncated,
 					};
 
+					let boardDiag: unknown;
+					if (app) {
+						try {
+							const bSnap = await app.harness.snapshot(Board, BACKGROUND_CONTEXT);
+							if (bSnap?.tasks && Object.keys(bSnap.tasks).length) {
+								boardDiag = Object.values(bSnap.tasks).map((t) => ({
+									id: t.id,
+									status: t.status,
+									latestResult: t.latestResult,
+									checks: t.checksByMember?.map((c) => ({ status: c.status, evidence: c.evidence?.slice(0, 200) })),
+									notes: t.notes.slice(-3),
+								}));
+							}
+						} catch {}
+					}
+
 					const run: TieredCodingRun = {
 						taskId: task.id,
 						tier: task.tier,
@@ -1093,6 +1125,16 @@ export async function runTieredCodingBenchmark(options: {
 						selfHealed,
 						trajectory,
 						...(error ? { error } : hidden.ok ? {} : { error: `隐藏测试未全过 (${hidden.passed}/${hidden.total})` }),
+						...(status !== "PASS"
+							? {
+								diagnostics: {
+									...(loopDetail ? { loopDetail } : {}),
+									...(lastToolError ? { lastToolError } : {}),
+									...(boardDiag ? { board: boardDiag } : {}),
+									...(!hidden.ok && hidden.output ? { hiddenOutput: hidden.output.slice(-700) } : {}),
+								},
+							}
+							: {}),
 					};
 					runs.push(run);
 					options.onRun?.(run);

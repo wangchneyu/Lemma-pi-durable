@@ -41,7 +41,12 @@ export function createReadResultTool() {
 		replay: "safe",
 		execute: async (args, api, context) => {
 			const result = (await api.snapshot(Results, api.conversationId, args.result_id, context))?.result;
-			return { output: [{ type: "text" as const, text: result ? JSON.stringify({ ...resultPage(result, args.offset, args.limit), ...(args.field ? { field: args.field, ...resultExcerpt(result, args) } : {}), availableFields: result.deliverable ? Object.keys(result.deliverable) : [] }) : "Result not found in this controller." }], isError: !result };
+			if (!result) return { output: [{ type: "text" as const, text: "Result not found in this controller." }], isError: true };
+			const delivery = result.deliverable ?? parseDeliverable(result.text);
+			const payload = delivery && args.field
+				? { ...resultPage(result, args.offset, args.limit), field: args.field, ...resultExcerpt({ ...result, deliverable: delivery }, args), availableFields: Object.keys(delivery) }
+				: { ...resultPage(result, args.offset, args.limit), availableFields: delivery ? Object.keys(delivery) : [], ...(args.field ? { note: "该结果未启用结构化交付，已直接返回正文原文片段。" } : {}) };
+			return { output: [{ type: "text" as const, text: JSON.stringify(payload) }], isError: false };
 		},
 	});
 }
