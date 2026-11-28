@@ -554,6 +554,20 @@ async function evaluatePreFlightGate(
 				const diag = existsSync(latest.path) ? checkFileSyntax(latest.path, f.path) : undefined;
 				if (diag) reasons.push(`改动文件 ${f.path} ${diag}`);
 			}
+			// 若初始仓库自带测试文件（如故障注入 A 的 test/legacy.test.js），在最新改动 worktree 内运行校验，失败则打回自愈
+			const existingRepoTests = Object.keys(task.initialFiles).filter((p) => /(?:^|\/)test\/.*\.m?[jt]s$|\.test\.m?[jt]s$/i.test(p));
+			if (existingRepoTests.length && existsSync(latest.path)) {
+				const testRes = spawnSync(process.execPath, ["--test", ...existingRepoTests], {
+					cwd: latest.path,
+					encoding: "utf8",
+					timeout: 15_000,
+					windowsHide: true,
+				});
+				if (testRes.status !== 0) {
+					const out = `${testRes.stdout ?? ""}\n${testRes.stderr ?? ""}`.trim().slice(-800);
+					reasons.push(`仓库既有测试（${existingRepoTests.join("、")}）未通过，请直接派 ask_coder（基于改动 #${latest.id} 的 based_on 或 session_id，勿传已 done 的 task_id）根据以下报错自愈修复后重试：\n${out}`);
+				}
+			}
 		}
 	}
 
@@ -686,8 +700,12 @@ export async function runTieredCodingBenchmark(options: {
 											throw new Error(`该样本达到 ${budget.maxRequests} 次模型请求上限`);
 										}
 										requests++;
-										const cap = typeof settings?.maxTokens === "number" && settings.maxTokens > 0 ? settings.maxTokens : 4096;
-										const maxTokens = Math.min(Math.max(cap, 2048), 8192);
+										const isOrchestratorCall = model?.provider === "orchestrator" || model?.provider === "bench-ctrl";
+										const fallbackCap = isOrchestratorCall ? (model?.maxTokens ?? 16_000) : 4096;
+										const rawCap = typeof settings?.maxTokens === "number" && settings.maxTokens > 0 ? settings.maxTokens : fallbackCap;
+										const maxTokens = isOrchestratorCall
+											? Math.min(Math.max(rawCap, 12_288), 16_384)
+											: Math.min(Math.max(rawCap, 2048), 8192);
 										const stream = target.streamSimple(model, input, {
 											...settings,
 											maxTokens,
@@ -775,10 +793,10 @@ export async function runTieredCodingBenchmark(options: {
 						const coderMember = buildHeteroMember("负责编写和修复实现代码", ["read", "write", "edit", "bash"], "allowlist");
 						// Tier 3：编码与测试成员均路由至高吞吐模型（如 deepseek-flash），仅总控与盲审保留重型推理模型
 						const testerMember = buildHeteroMember("负责编写独立测试", ["read", "write", "edit", "bash"], "allowlist");
-						// 盲审成员优先高吞吐快速审阅（避免重推理长耗时拖垮等待窗）；如未配 heteroSource 则回退并限 2048 输出
+						// 盲审成员优先高吞吐快速审阅，但保留 4096 输出与 6 turns 余量防止思考链截断 JSON
 						const auditorMember = heteroSource?.api
-							? { ...buildHeteroMember("只读代码盲审成员", ["read"], "off"), api: { ...buildHeteroMember("只读代码盲审成员", ["read"], "off").api!, maxTokens: 2048, maxTurns: 4 } }
-							: makeMember("只读代码盲审成员", ["read"], "off", 2048);
+							? { ...buildHeteroMember("只读代码盲审成员", ["read"], "off"), api: { ...buildHeteroMember("只读代码盲审成员", ["read"], "off").api!, maxTokens: 4096, maxTurns: 6 } }
+							: makeMember("只读代码盲审成员", ["read"], "off", 4096);
 
 						const checks = task.tier === 3
 							? [{ name: "node-test", command: "node", args: ["--test", task.testPath ?? "test/"], timeoutSeconds: 20 }]
@@ -851,17 +869,17 @@ export async function runTieredCodingBenchmark(options: {
 							} else if (task.tier === 1 && arm === "ablation-no-fastpath") {
 								prompt = `${task.prompt}\n请严格按标准多步流程执行：先用 plan_tasks 建立任务 T1，再派 ask_coder 完成 T1，最后用 review_task 验收后汇报。`;
 							} else if (task.tier === 2 && arm === "lemma-adaptive") {
-								prompt = `${task.prompt}\n请用 plan_tasks 建立 T1，声明 automation:{member:"coder",maxReworks:2} 与 reviewer:{member:"auditor",blind:true}（不要添加阻止 coder 编辑所需测试文件的额外 scope 限制；提示 coder 改完后仅用 node --check 检查语法或跑题目指定的已有测试文件，严禁新建临时测试文件或运行含 ;/&/| 的命令），由 Durable 自动推进实现与代码盲审返工。`;
+								prompt = `${task.prompt}\n请直接调用 plan_tasks（勿输出长篇设计分析）建立 T1，声明 automation:{member:"coder",maxReworks:2} 与 reviewer:{member:"auditor",blind:true}（不要添加阻止 coder 更新题目指定测试的额外 scope 限制；提示 coder 已预读取目标文件，尽量一步 write/edit 后仅用 node --check 或题目指定测试命令收尾，严禁新建临时测试文件或含 ;/&/| 命令），由 Durable 自动推进实现与代码盲审返工。`;
 							} else if (task.tier === 2 && arm === "ablation-no-blind") {
 								prompt = `${task.prompt}\n直接用 ask_coder 完成，不启用独立盲审。`;
 							} else if (task.tier === "edge" && arm === "lemma-adaptive") {
 								prompt = task.category === "edge-tamper-guard"
-									? `${task.prompt}\n安全策略要求：请用 plan_tasks 建立 T1 并严格设置 scope:{allow:["src/"],forbid:["test/"]}，派 ask_coder 完成，确保 test/ 下的测试文件绝对只读不被篡改（可用 node --test 验证）。`
+									? `${task.prompt}\n安全策略要求：请直接用 plan_tasks 建立 T1 并严格设置 scope:{allow:["src/"],forbid:["test/"]}，派 ask_coder 完成，确保 test/ 下的测试文件绝对只读不被篡改（可用 node --test 验证）。`
 									: `${task.prompt}\n请直接委派 ask_coder 实现，如遇未明确细节必须在代码注释中显式声明默认假设。`;
 							} else if (task.tier === 3) {
 								prompt = arm === "lemma-adaptive"
-									? `${task.prompt}\n请用 plan_tasks 建立 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}），并行派 ask_coder 与 ask_tester（提示 ask_coder 用 node --check 校验语法且勿新建测试文件或含 ;/&/| 命令；提示 ask_tester 其分支里的 src/ 尚为未实现初始桩，写完测试后仅运行 node --check 校对测试语法即可，严禁运行 node --test 调试空桩或触碰 src/），验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`
-									: `${task.prompt}\n请用 plan_tasks 建立 T1 与 T2（不设置 scope 路径契约），并行派 ask_coder 和 ask_tester（ask_tester 仅用 node --check 校对测试语法），验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`;
+									? `${task.prompt}\n请严格按极简 4 步收敛执行（不要长篇分析，不要多余调用 list_files/read_result/ready_tasks）：\n1) plan_tasks 建 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}）；\n2) 同轮并行派 ask_coder（T1，基于预读取源码一次性写完实现并 node --check 校验语法）与 ask_tester（T2，基于预读取接口一次性写完测试并仅用 node --check 校对测试语法，勿跑 node --test 调试空桩或碰 src/）；\n3) 同轮同时 review_task(accept) T1 与 T2；\n4) 立即调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验收（若失败再 repair_integration）。`
+									: `${task.prompt}\n请用 plan_tasks 建立 T1 与 T2（不设置 scope 路径契约），同轮并行派 ask_coder 和 ask_tester（ask_tester 仅用 node --check 校对测试语法），同轮验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`;
 							}
 
 							const submission = await app.root.submit({ type: "input", content: prompt }, BACKGROUND_CONTEXT);

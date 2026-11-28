@@ -197,7 +197,67 @@ check(
 	`未完成核心改动且两次门禁后仍无产出的运行被归类为 PREMATURE_STOP（intercepts=${ledgerPrematureRun?.trajectory.preFlightIntercepts}）`,
 );
 
-// 5. 验证 P2 Markdown 报告格式（独立主表 + Tier-Edge 独立章节 + 新增 3 列 + 状态码列）
+// 5. 专项验证：Chaos A 仓库既有测试门禁（漏改 test/legacy.test.js 时 Pre-Flight Gate 运行旧测试并打回自愈 + 验证非快路预读取内联）
+let chaosCoderSawPreload = false;
+const chaosGateRuns = await runTieredCodingBenchmark({
+	base,
+	simulated: true,
+	tiers: [2],
+	taskIds: ["t2-chaos-type-heal"],
+	arms: ["lemma-adaptive"],
+	runtime: (task) => {
+		const models = createModels();
+		const ctrl = fauxProvider({ provider: "bench-ctrl", models: [{ id: "fixture" }], tokensPerSecond: 100_000 });
+		models.setProvider(ctrl.provider);
+		const coder = fauxProvider({ provider: memberProvider("coder"), models: [{ id: "fixture" }], tokensPerSecond: 100_000 });
+		models.setProvider(coder.provider);
+		coder.setResponses([
+			(ctx: any) => {
+				const text = (ctx.messages ?? []).map((m: any) => typeof m.content === "string" ? m.content : (m.content ?? []).map((b: any) => b.text ?? "").join("")).join("\n");
+				chaosCoderSawPreload = text.includes("【预读取目标/关联文件") && text.includes("calculateOrderTotal");
+				// 首轮刻意只改 src/pricing.js，漏改 test/legacy.test.js
+				return fauxAssistantMessage([fauxToolCall("write", { path: "src/pricing.js", content: task.reference.files["src/pricing.js"]! })], { stopReason: "toolUse" });
+			},
+			() => fauxAssistantMessage(fauxText("仅更新了 src/pricing.js。")),
+			() => fauxAssistantMessage([fauxToolCall("write", { path: "test/legacy.test.js", content: task.reference.files["test/legacy.test.js"]! })], { stopReason: "toolUse" }),
+			() => fauxAssistantMessage(fauxText("已同步修复 test/legacy.test.js。")),
+		]);
+		const auditor = fauxProvider({ provider: memberProvider("auditor"), models: [{ id: "fixture" }], tokensPerSecond: 100_000 });
+		models.setProvider(auditor.provider);
+		auditor.setResponses([
+			(ctx: any) => {
+				const userMsgs = (ctx.messages ?? []).map((m: any) => typeof m.content === "string" ? m.content : (m.content ?? []).map((b: any) => b.text ?? "").join("")).join("\n");
+				const rid = userMsgs.match(/result_id"\s*:\s*"([^"]+)"/)?.[1] ?? userMsgs.match(/result_id="([^"]+)"/)?.[1] ?? "unknown";
+				return fauxAssistantMessage(fauxText(JSON.stringify({ verdict: "accept", result_id: rid, evidence: "pricing 已修改" })));
+			},
+		]);
+		ctrl.setResponses(
+			Array.from({ length: 8 }, () => (ctx: any) => {
+				const res = (ctx.messages ?? []).filter((m: any) => m.role === "toolResult").map((m: any) => ({ name: m.toolName }));
+				const lastUser = [...(ctx.messages ?? [])].reverse().find((m: any) => m.role === "user");
+				const lastUserText = typeof lastUser?.content === "string" ? lastUser.content : (lastUser?.content ?? []).map((b: any) => b.text ?? "").join("");
+				if (!res.some((r: any) => r.name === "plan_tasks")) {
+					return fauxAssistantMessage([fauxToolCall("plan_tasks", {
+						tasks: [{ title: task.title, role: "编码", acceptance: "升级 pricing 并同步旧测试", automation: { member: "coder", maxReworks: 1 }, reviewer: { member: "auditor", blind: true } }],
+					})], { stopReason: "toolUse" });
+				}
+				if (lastUserText.includes("Pre-Flight Gate") && !res.some((r: any) => r.name === "ask_coder")) {
+					const cid = lastUserText.match(/改动 #([a-f0-9]+)/)?.[1];
+					return fauxAssistantMessage([fauxToolCall("ask_coder", { task: "同步更新 test/legacy.test.js 修复旧断言", ...(cid ? { based_on: cid } : {}) })], { stopReason: "toolUse" });
+				}
+				return fauxAssistantMessage(fauxText("已按门禁要求补齐旧测试自愈。"));
+			}),
+		);
+		return { models, ref: { provider: "bench-ctrl", modelId: "fixture" } };
+	},
+});
+const chaosGateRun = chaosGateRuns.find((r) => r.taskId === "t2-chaos-type-heal");
+check(
+	!!chaosGateRun && chaosGateRun.status === "PASS" && chaosGateRun.selfHealed && chaosGateRun.trajectory.preFlightIntercepts === 1 && chaosCoderSawPreload,
+	`Chaos A 门禁跑通仓库旧测试打回自愈且非快路首次派工预读取生效（intercepts=${chaosGateRun?.trajectory.preFlightIntercepts}）`,
+);
+
+// 6. 验证 P2 Markdown 报告格式（独立主表 + Tier-Edge 独立章节 + 新增 3 列 + 状态码列）
 const report = renderCodingBenchmarkReport({ revision: "test-p2", dirty: false, simulated: true, model: "scripted-fixture", repeats: 1 }, runs);
 check(
 	report.includes("# Lemma P2 分层编码基准与消融实验报告") &&

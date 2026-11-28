@@ -24,7 +24,7 @@ import { JOB_REQUEST_PREFIX, type JobHub } from "./jobs.ts";
 import { integrationStale } from "./integration-git.ts";
 import { checkFilesScope, type TaskScope } from "./scope.ts";
 
-function inlineFastPathFiles(cwd: string, task: string, maxTotalChars = 8000): string | undefined {
+function inlineReferencedFiles(cwd: string, task: string, maxTotalChars = 8000): string | undefined {
 	const matches = [...new Set(task.match(/(?<![A-Za-z0-9_.-])[\w./-]+\.(?:[tj]sx?|mjs|cjs|json|css|html|md|py)(?![A-Za-z0-9_.-])/g) ?? [])].slice(0, 3);
 	if (!matches.length) return undefined;
 	const rootNorm = process.platform === "win32" ? resolve(cwd).toLowerCase() : resolve(cwd);
@@ -458,8 +458,13 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	const fastPath = Boolean(args.fast_path && !args.task_id);
 	let prompt = `${brief}${args.task}`;
 	if (fastPath) {
-		const preloaded = inlineFastPathFiles(cwd, args.task);
+		const preloaded = inlineReferencedFiles(cwd, args.task);
 		prompt = `【单跳快路】直接一步调用 edit 或 write 完成最小精准修改（内置即时语法诊断），改完后不要调 list_files、git_diff 或 bash，直接一句话收尾即可。\n\n${prompt}${preloaded ? `\n\n【快路预读取目标文件（已最新，可直接 edit/write，无需再 read）】\n${preloaded}` : ""}`;
+	} else if (!args.session_id && !readonlyMode && codeWorkspace) {
+		const preloaded = inlineReferencedFiles(cwd, args.task);
+		if (preloaded) {
+			prompt = `${prompt}\n\n【预读取目标/关联文件（已最新，可直接基于下列内容动手修改或编写测试，减少首轮 list_files/read 探索）】\n${preloaded}`;
+		}
 	}
 	if (recoveryEvidence) prompt += `\n\n${recoveryEvidence}`;
 	for (const input of args.inputs ?? []) {
