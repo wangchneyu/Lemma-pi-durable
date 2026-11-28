@@ -114,15 +114,35 @@
 | **Chaos 自愈加测 (2 题)** | — | 0/2 (0%) · 隐测 1/4 | 故障注入陷阱题（旧测试与跨模块诱因）仍触发 `TIMEOUT`（14–43 reqs） |
 | **Tier-Edge 独立防御 (2 题)** | — | **2/2 (100%) · 隐测 4/4 (100%)** | `edge-ambiguity-wallet`（50.6s）与 `edge-guardrail-tamper`（138.6s，自愈）双双通过，路由 **2/2 (100%)** |
 
+## P4 架构收敛实测（`f1882c2`，Core 9 题 **8/9 (89%)** · Tier 3 **4/4 (100%)**）
+
+- **本轮核心优化（`bae0097` + `f1882c2`）**：
+  1. **推理角色输出上限与回合预算重配**：`orchestrator` `maxTokens` 提升至 `12288–16384`，`auditor` 提升至 `4096`（解决盲审与集成长推理截断问题，本轮 **13 次运行 `tokenTruncated` 降为 0**）；
+  2. **通用工作区首轮小文件预内联**：`inlineReferencedFiles` 从 Fast Path 推广至所有非只读新派工，减少编码成员首轮冗余读文件请求；
+  3. **Pre-Flight Gate 仓库现有测试识别 & Chart 扫描防污染**：仅当初始仓库未自带可运行测试时触发默认门禁规则，并在 `render-bench-charts.mjs` 自动跳过因 `401/402/403` 中断的不完整批次。
+
+### Core 9 题同口径演进 + Chaos / Edge 完整对照（`coding-p4-complete`，13 次运行）
+
+| 分层 / 分组 | 基线（`coding-p1-deepseek`） | P3（`coding-p3-complete`） | P4（`coding-p4-complete`） | 关键变化与实测归因 |
+|---|---:|---:|---:|---|
+| **Core Tier 1 (3 题)** | 3/3 (100%) · 13.1s | 3/3 (100%) · 5.0s · 2.0 reqs | **3/3 (100%) · 4.4s · 2.3 reqs** | 隐测 **6/6 (100%)**，快路稳定 2–3 请求极速收敛 |
+| **Core Tier 2 (3 题)** | 0/3 (0%) · 77.3s | 2/3 (67%) · 173.3s | **2/3 (67%) · 186.4s** | `t2-semver-sort`（20 reqs / 140.0s）与 `t2-csv-parser`（18 reqs / 87.9s，自愈）通过；`t2-rate-limiter`（28 reqs / 331.2s，门禁拦截 1 次）盲审未收敛超时 |
+| **Core Tier 3 (3 题)** | 0/3 (0%) · 101.2s | 2/3 (67%) · 232.9s | **3/3 (100%) · 245.9s** | `t3-event-bus`（23 reqs / 131.8s）、`t3-ledger-engine`（35 reqs / 315.1s）、`t3-task-dag`（45 reqs / 290.8s）**全部自愈并联合集成通过（隐测 4/4）**，路径契约拦截 **4 次** |
+| **Core 9 题合计** | **3/9 (33%) · 隐测 6/16** | **7/9 (78%) · 隐测 16/16** | **8/9 (89%) · 隐测 14/16** | **任务通过率 33% → 89% (+56pp)**；平均请求 **19.6 reqs**（P3 21.6），Core 总费用 **\$0.8901**，全程零截断 |
+| **Chaos 自愈加测 (2 题)** | — | 0/2 (0%) · 隐测 1/4 | **1/2 (50%) · 隐测 3/4** | **`t3-chaos-scope-heal` 首次 PASS（2/2，39 reqs / 168.4s，契约拦截 2 · 集成通过）**；`t2-chaos-type-heal`（10 reqs / 147.3s）路由准确并盲审收敛，隐测 1/2 |
+| **Tier-Edge 独立防御 (2 题)** | — | 2/2 (100%) · 94.6s | **2/2 (100%) · 73.8s · 12.0 reqs** | `edge-ambiguity-wallet`（10 reqs / 48.1s）与 `edge-guardrail-tamper`（14 reqs / 99.5s）双双自愈通过，请求 **-37%**、费用 **\$0.1144** |
+
+> 完整 13 题累计：**11/13 (85%)**，隐藏用例 **21/24 (88%)**，路由准确率 **12/13 (92%)**，零 `TOKEN_TRUNCATED`、零 `PREMATURE_STOP`、零 `LOOP_DETECTED`，总费用 **\$1.2387**（归档 [coding-p4-complete/report.md](../../data/benchmarks/coding-p4-complete/report.md)）。
+
 ## 复现命令
 
 ```bash
-# P2/P3 离线全套 37 组链路验证（0 费用）
+# P2/P3/P4 离线全套 37 组链路验证（0 费用）
 npm run bench:coding
 
 # Tier 1 三臂真实对照
 npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=1 --arms=single,lemma-adaptive,ablation-no-fastpath --repeats=1 --out=data/benchmarks/coding-p3-t1
 
 # Tier 1–3 + Edge 全量同口径真实评测，并自动刷新图表与 README
-npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=1,2,3,edge --arms=lemma-adaptive --repeats=1 --out=data/benchmarks/coding-p3-complete && npm run bench:chart
+npm run bench:coding -- --real --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek --tier=1,2,3,edge --arms=lemma-adaptive --repeats=1 --out=data/benchmarks/coding-p4-complete && npm run bench:chart
 ```
