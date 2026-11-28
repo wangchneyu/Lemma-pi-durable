@@ -3,7 +3,7 @@
 //   npm run bench:coding -- --real --repeats=1           # 使用当前配置模型跑真实定量对照与消融实验
 //   npm run bench:coding -- --real --tier=2,3,edge --arms=lemma-adaptive --orchestrator-agent=deepseek --orchestrator-model=deepseek-v4-pro --coder-agent=deepseek
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { createOrchestratorModel } from "../src/models.ts";
@@ -17,6 +17,7 @@ import {
 import type { BenchmarkTier } from "../src/coding-benchmark-fixtures.ts";
 
 const real = process.argv.includes("--real");
+const resume = process.argv.includes("--resume");
 const repeats = Number(process.argv.find((a) => a.startsWith("--repeats="))?.split("=")[1] ?? 1);
 const tierArg = process.argv.find((a) => a.startsWith("--tier="))?.split("=")[1];
 const tiers = tierArg
@@ -62,6 +63,25 @@ let dirty = false;
 try { dirty = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", windowsHide: true }).trim(); } catch {}
 
 const runs: TieredCodingRun[] = [];
+const completedKeys = new Set<string>();
+const existingPath = join(outDir, "results.json");
+if (resume && existsSync(existingPath)) {
+	try {
+		const prev = JSON.parse(readFileSync(existingPath, "utf8")) as { runs?: TieredCodingRun[] };
+		for (const r of prev.runs ?? []) {
+			if (/模型服务商认证或余额异常|insufficient balance|insufficient_balance|\b40[123]\b/i.test(String(r.error ?? ""))) {
+				continue;
+			}
+			runs.push(r);
+			completedKeys.add(`${r.taskId}::${r.arm}::${r.repeat ?? 0}`);
+		}
+		if (runs.length) {
+			console.log(`已加载断点记录 ${runs.length} 条有效运行（--resume 将跳过已完成组合）…`);
+		}
+	} catch {
+		/* 忽略损坏的历史文件并按全新批次重跑 */
+	}
+}
 const meta = { revision, dirty, simulated: !real, model: real ? base.orchestrator.modelId : "scripted-fixture", repeats };
 const save = () => {
 	writeFileSync(join(outDir, "results.json"), JSON.stringify({ ...meta, runs }, null, 2), "utf8");
@@ -79,6 +99,7 @@ try {
 		arms,
 		coderAgent,
 		repeats,
+		skipRun: completedKeys.size ? (t, a, rep) => completedKeys.has(`${t.id}::${a}::${rep}`) : undefined,
 		onRun(run) {
 			runs.push(run);
 			save();

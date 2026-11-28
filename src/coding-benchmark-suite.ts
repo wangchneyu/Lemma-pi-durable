@@ -508,6 +508,16 @@ export function localTieredCodingRuntime(task: CodingBenchmarkTask, arm: Benchma
 	return { models, ref: { provider: "bench-ctrl", modelId: "fixture" } };
 }
 
+/** 选取最新且未被 basedOn 衍生替代的活跃非集成改动 */
+function pickLatestActiveChange(allChanges: ReturnType<Awaited<ReturnType<typeof openApp>>["changes"]["list"]>) {
+	const valid = allChanges.filter((c) => !c.integration && c.files.length > 0 && c.status !== "dropped");
+	if (!valid.length) return undefined;
+	const parents = new Set(valid.map((c) => c.basedOn).filter((id): id is string => !!id));
+	const leaves = valid.filter((c) => !parents.has(c.id));
+	const pool = leaves.length ? leaves : valid;
+	return [...pool].sort((a, b) => (b.updatedAt - a.updatedAt) || (b.createdAt - a.createdAt))[0];
+}
+
 /** Pre-Flight Gate：检查 Board 任务、变更 diff、联合集成状态及本地语法 */
 async function evaluatePreFlightGate(
 	app: Awaited<ReturnType<typeof openApp>>,
@@ -545,11 +555,10 @@ async function evaluatePreFlightGate(
 			}
 		}
 	} else {
-		const validChanges = allChanges.filter((c) => !c.integration && c.files.length > 0 && c.status !== "dropped");
-		if (!validChanges.length) {
+		const latest = pickLatestActiveChange(allChanges);
+		if (!latest) {
 			reasons.push("尚未产生任何非空代码改动，请先派发成员完成修改后再收尾");
 		} else {
-			const latest = validChanges[0]!;
 			for (const f of latest.files) {
 				const diag = existsSync(latest.path) ? checkFileSyntax(latest.path, f.path) : undefined;
 				if (diag) reasons.push(`改动文件 ${f.path} ${diag}`);
@@ -603,6 +612,7 @@ export async function runTieredCodingBenchmark(options: {
 	arms?: BenchmarkArm[];
 	coderAgent?: string;
 	repeats?: number;
+	skipRun?: (task: CodingBenchmarkTask, arm: BenchmarkArm, repeat: number) => boolean;
 	onRun?: (run: TieredCodingRun) => void;
 	signal?: AbortSignal;
 }): Promise<TieredCodingRun[]> {
@@ -628,6 +638,7 @@ export async function runTieredCodingBenchmark(options: {
 				: defaultArmsForTier(task.tier);
 			for (let repeat = 0; repeat < repeats; repeat++) {
 				for (const arm of armsForTask) {
+					if (options.skipRun?.(task, arm, repeat)) continue;
 					const budget = budgetForTier(task.tier, options.simulated, arm);
 					options.signal?.throwIfAborted();
 					const repo = initTaskRepo(task);
@@ -869,7 +880,7 @@ export async function runTieredCodingBenchmark(options: {
 							} else if (task.tier === 1 && arm === "ablation-no-fastpath") {
 								prompt = `${task.prompt}\n请严格按标准多步流程执行：先用 plan_tasks 建立任务 T1，再派 ask_coder 完成 T1，最后用 review_task 验收后汇报。`;
 							} else if (task.tier === 2 && arm === "lemma-adaptive") {
-								prompt = `${task.prompt}\n请直接调用 plan_tasks（勿输出长篇设计分析）建立 T1，声明 automation:{member:"coder",maxReworks:2} 与 reviewer:{member:"auditor",blind:true}（不要添加阻止 coder 更新题目指定测试的额外 scope 限制；提示 coder 已预读取目标文件，尽量一步 write/edit 后仅用 node --check 或题目指定测试命令收尾，严禁新建临时测试文件或含 ;/&/| 命令），由 Durable 自动推进实现与代码盲审返工。`;
+								prompt = `${task.prompt}\n请直接调用 plan_tasks（勿输出长篇设计分析）建立 T1：在 acceptance 中完整列出题目全部返回字段、参数校验抛错（如超界/负数）、边界逻辑与既有测试同步要求（不得摘要省略），并声明 automation:{member:"coder",maxReworks:2} 与 reviewer:{member:"auditor",blind:true}（不要添加阻止 coder 更新题目指定测试的额外 scope 限制；提示 coder 已预读取目标文件，尽量一步 write/edit 后仅用单条不含分号/管道命令如 node --check 或指定 node --test 收尾，严禁新建临时测试文件或含 ;/&/| 命令）；建完任务后结束本轮，由 Durable 自动推进实现与代码盲审返工。`;
 							} else if (task.tier === 2 && arm === "ablation-no-blind") {
 								prompt = `${task.prompt}\n直接用 ask_coder 完成，不启用独立盲审。`;
 							} else if (task.tier === "edge" && arm === "lemma-adaptive") {
@@ -878,7 +889,7 @@ export async function runTieredCodingBenchmark(options: {
 									: `${task.prompt}\n请直接委派 ask_coder 实现，如遇未明确细节必须在代码注释中显式声明默认假设。`;
 							} else if (task.tier === 3) {
 								prompt = arm === "lemma-adaptive"
-									? `${task.prompt}\n请严格按极简 4 步收敛执行（不要长篇分析，不要多余调用 list_files/read_result/ready_tasks）：\n1) plan_tasks 建 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}）；\n2) 同轮并行派 ask_coder（T1，基于预读取源码一次性写完实现并 node --check 校验语法）与 ask_tester（T2，基于预读取接口一次性写完测试并仅用 node --check 校对测试语法，勿跑 node --test 调试空桩或碰 src/）；\n3) 同轮同时 review_task(accept) T1 与 T2；\n4) 立即调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验收（若失败再 repair_integration）。`
+									? `${task.prompt}\n请严格按极简 4 步收敛执行（不要长篇分析，不要多余调用 list_files/read_result/ready_tasks）：\n1) plan_tasks 建 T1（scope:{allow:["src/"],forbid:["test/"]}）与 T2（scope:{allow:["test/"],forbid:["src/"]}），并在两项任务的 acceptance 中同时冻结精确导出名、函数/类签名、返回值结构与抛错规则，确保实现与测试零偏差；\n2) 同轮并行派 ask_coder（T1，基于预读取源码一次性写完实现并 node --check 校验语法，禁碰 test/）与 ask_tester（T2，基于预读取接口与冻结契约一次性写完测试并仅用 node --check 校对测试语法，勿跑 node --test 调试空桩或碰 src/）；\n3) 同轮同时 review_task(accept) T1 与 T2；\n4) 立即调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验收（若失败再 repair_integration）。`
 									: `${task.prompt}\n请用 plan_tasks 建立 T1 与 T2（不设置 scope 路径契约），同轮并行派 ask_coder 和 ask_tester（ask_tester 仅用 node --check 校对测试语法），同轮验收 T1/T2 后直接调用 integrate_changes(changes:[c1,c2], wait:true) 一次完成联合集成验证。`;
 							}
 
@@ -913,6 +924,13 @@ export async function runTieredCodingBenchmark(options: {
 							if (arm === "lemma-adaptive") {
 								for (let attempt = 0; attempt < 2; attempt++) {
 									if (signal.aborted || loopDetected || timedOut) break;
+									if (task.tier === 2) {
+										const boardSnap = await app.harness.snapshot(Board, BACKGROUND_CONTEXT);
+										const t1Snap = boardSnap?.tasks?.T1;
+										if (t1Snap?.automation && (t1Snap.status === "doing" || t1Snap.status === "review")) {
+											await waitTier2BlindReview();
+										}
+									}
 									const gate = await evaluatePreFlightGate(app, task);
 									if (gate.ok || !gate.issuePrompt) break;
 									preFlightIntercepts++;
@@ -933,10 +951,28 @@ export async function runTieredCodingBenchmark(options: {
 									const applied = await applyChange(app.changes, intChange.id);
 									if (!applied.ok) error = applied.message;
 								} else {
-									const latest = [...allChanges].reverse().find((c) => !c.integration && c.files.length > 0 && c.status !== "dropped");
+									const latest = pickLatestActiveChange(allChanges);
 									if (latest) {
-										const applied = await applyChange(app.changes, latest.id);
-										if (!applied.ok) error = applied.message;
+										// 沿 basedOn 链从最老未应用祖先到最新叶子按序合入，避免 based_on 子改动漏掉父改动补丁
+										const byId = new Map(allChanges.map((c) => [c.id, c]));
+										const chain: typeof allChanges = [];
+										const seen = new Set<string>();
+										let cur: (typeof allChanges)[number] | undefined = latest;
+										while (cur && !seen.has(cur.id)) {
+											seen.add(cur.id);
+											if (cur.status !== "applied" && cur.status !== "dropped" && cur.files.length > 0) {
+												chain.push(cur);
+											}
+											cur = cur.basedOn ? byId.get(cur.basedOn) : undefined;
+										}
+										chain.reverse();
+										for (const ch of chain) {
+											const applied = await applyChange(app.changes, ch.id);
+											if (!applied.ok) {
+												error = applied.message;
+												break;
+											}
+										}
 									}
 								}
 							}
@@ -1180,6 +1216,52 @@ export function renderCodingBenchmarkReport(
 		return `| ${tierTag} | \`${r.taskId}\` | \`${r.arm}\` | ${r.status} | ${r.hiddenPassed}/${r.hiddenTotal} | ${r.requests} | ${r.durationMs}ms | ${note} |`;
 	});
 
+	const stabilitySections: string[] = [];
+	if (meta.repeats > 1 || runs.some((r) => r.repeat > 0)) {
+		const fmtMeanSd = (vals: number[], digits = 1, unit = "") => {
+			if (!vals.length) return "—";
+			const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+			const variance = vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length;
+			return `${mean.toFixed(digits)} ± ${Math.sqrt(variance).toFixed(digits)}${unit}`;
+		};
+		const groups = new Map<string, TieredCodingRun[]>();
+		for (const r of runs) {
+			const key = `${r.arm}::${r.taskId}`;
+			const arr = groups.get(key) ?? [];
+			arr.push(r);
+			groups.set(key, arr);
+		}
+		const armTotals = new Map<string, { tasks: number; passAtK: number; passAllK: number }>();
+		const sRows: string[] = [];
+		for (const list of groups.values()) {
+			const first = list[0]!;
+			const passCount = list.filter((x) => x.success).length;
+			const passAtK = passCount > 0 ? 1 : 0;
+			const passAllK = passCount === list.length ? 1 : 0;
+			const cur = armTotals.get(first.arm) ?? { tasks: 0, passAtK: 0, passAllK: 0 };
+			cur.tasks++;
+			cur.passAtK += passAtK;
+			cur.passAllK += passAllK;
+			armTotals.set(first.arm, cur);
+			const tierTag = first.tier === "edge" ? "EDGE" : `T${first.tier}`;
+			sRows.push(
+				`| \`${first.arm}\` | ${tierTag} | \`${first.taskId}\` | ${passCount}/${list.length} | ${passAtK ? "✓" : "✗"} | ${passAllK ? "✓" : "✗"} | ${fmtMeanSd(list.map((x) => x.requests), 1)} | ${fmtMeanSd(list.map((x) => x.durationMs), 0, "ms")} |`,
+			);
+		}
+		const armSummary = [...armTotals.entries()]
+			.map(([arm, a]) => `- **\`${arm}\`**：Pass@${meta.repeats} = **${a.passAtK}/${a.tasks} (${fmtPct(a.passAtK, a.tasks)})** · Pass^${meta.repeats}（全轮稳定通过）= **${a.passAllK}/${a.tasks} (${fmtPct(a.passAllK, a.tasks)})**`);
+		stabilitySections.push(
+			`## 多轮稳定性统计（repeats=${meta.repeats} · Pass@k / Pass^k / 均值±标准差）`,
+			"",
+			...armSummary,
+			"",
+			"| 实验臂 | 层级 | 任务 | 通过轮次 | Pass@k | Pass^k | 请求均值±标准差 | 耗时均值±标准差 |",
+			"|---|---|---|---:|:---:|:---:|---:|---:|",
+			...sRows,
+			"",
+		);
+	}
+
 	return [
 		"# Lemma P2 分层编码基准与消融实验报告",
 		"",
@@ -1201,6 +1283,7 @@ export function renderCodingBenchmarkReport(
 			]
 			: []),
 		...edgeSections,
+		...stabilitySections,
 		"## 逐题明细",
 		"",
 		"| 层级 | 任务 | 实验臂 | 终态 | 隐藏用例 | 请求数 | 耗时 | 归因与轨迹备注 |",

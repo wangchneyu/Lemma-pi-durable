@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { defineDoc, defineTask, type ConversationId, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { createHash } from "node:crypto";
 import { memberToolNames } from "./api-member.ts";
@@ -51,6 +53,34 @@ function inlineDiffForReview(root: string, from: string, to: string, maxChars = 
 		return out.length > maxChars
 			? { text: `${out.slice(0, maxChars)}\n…（diff 共 ${out.length} 字符，已截断；如需查看其余部分请调用 git_diff 或 read）`, truncated: true }
 			: { text: out, truncated: false };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Pure read-only snapshot of repo unit tests inside the reviewed worktree for reviewers without bash. */
+function collectReadOnlyTestSnapshot(worktreePath: string): string | undefined {
+	try {
+		const testDir = join(worktreePath, "test");
+		if (!existsSync(testDir)) return undefined;
+		const files = readdirSync(testDir)
+			.filter((f) => /\.test\.m?[jt]s$/i.test(f))
+			.slice(0, 6)
+			.map((f) => `test/${f}`);
+		if (!files.length) return undefined;
+		try {
+			const out = execFileSync(process.execPath, ["--test", ...files], {
+				cwd: worktreePath,
+				encoding: "utf8",
+				maxBuffer: 256 * 1024,
+				timeout: 5000,
+				windowsHide: true,
+			}).trim();
+			return `已运行 ${files.join("、")}：全部通过。\n${out.split("\n").filter((l) => /^(?:ℹ|#|ok|not ok) /.test(l)).slice(-6).join("\n")}`.trim();
+		} catch (err: any) {
+			const combined = `${String(err?.stdout ?? "")}\n${String(err?.stderr ?? err?.message ?? "")}`.trim();
+			return `已运行 ${files.join("、")}：存在失败（必须判 rework）。\n${combined.slice(-1200)}`;
+		}
 	} catch {
 		return undefined;
 	}
@@ -130,11 +160,13 @@ export function createTaskWorkflow(deps: DispatchDeps, available: Set<string>, e
 				const reviewInputs = blindReview ? [] : Array.from({ length: chunkCount }, (_, index) => ({ result_id: source.id, offset: index * 8000, limit: 8000 }));
 				const scopeNote = item.scope ? `\n路径契约：${formatScopeSummary(item.scope)}` : "";
 				const preDiff = changed?.files.length ? inlineDiffForReview(changed.root, changes.range(changed)[0], changed.head) : undefined;
+				const testOnlyBranch = !!item.scope?.forbid?.some((p) => p === "src/" || p === "src");
+				const testSnapshot = changed?.files.length && !testOnlyBranch ? collectReadOnlyTestSnapshot(changed.path) : undefined;
 				const codeSummary = changed?.files.length
-					? `\n代码改动 #${changed.id}（${changes.range(changed)[0].slice(0, 12)}..${changed.head.slice(0, 12)}，共 ${changed.files.length} 个文件，+${changed.add} -${changed.del}）：\n${changed.files.slice(0, 30).map((f) => `  - ${f.path} (+${f.add} -${f.del})`).join("\n")}${changed.files.length > 30 ? `\n  - …共 ${changed.files.length} 个文件` : ""}${preDiff ? `\n\n【预提取客观 git_diff】\n\`\`\`diff\n${preDiff.text}\n\`\`\`\n${preDiff.truncated ? "diff 已截断，可按需调用 git_diff / read 查看其余文件。" : "以上已是完整改动补丁；请直接对照验收标准做出精炼 JSON 裁决，无需重复调用 git_diff。"}` : "\n请结合工作区只读检查（git_diff / outline_file / find_symbol / search_code / list_files / read）核对真实代码实现与边界情况，不要仅凭执行者自述判断。"}`
+					? `\n代码改动 #${changed.id}（${changes.range(changed)[0].slice(0, 12)}..${changed.head.slice(0, 12)}，共 ${changed.files.length} 个文件，+${changed.add} -${changed.del}）：\n${changed.files.slice(0, 30).map((f) => `  - ${f.path} (+${f.add} -${f.del})`).join("\n")}${changed.files.length > 30 ? `\n  - …共 ${changed.files.length} 个文件` : ""}${preDiff ? `\n\n【预提取客观 git_diff】\n\`\`\`diff\n${preDiff.text}\n\`\`\`\n${preDiff.truncated ? "diff 已截断，可按需调用 git_diff / read 查看其余文件。" : "以上已是完整改动补丁；请直接对照验收标准做出精炼单行 JSON 裁决，无需再调用 read / list_files / git_diff。"}` : "\n请结合工作区只读检查（git_diff / outline_file / find_symbol / search_code / list_files / read）核对真实代码实现与边界情况，不要仅凭执行者自述判断。"}${testSnapshot ? `\n\n【工作区只读测试实跑快照】\n${testSnapshot}` : ""}`
 					: "";
 				const blindNote = blindReview
-					? `\n【代码盲审模式（Blind Review）】为消除迎合偏见（Sycophancy），系统已隐去执行者的主观自述解释。请逐项核对任务涉及的每个目标文件、边界条件与校验逻辑（若要求同步更新已有文件如测试文件而改动中遗漏，必须判 rework）；当前待签名交付版本为 result_id="${source.id}"。`
+					? `\n【代码盲审模式（Blind Review）】为消除迎合偏见（Sycophancy），系统已隐去执行者的主观自述解释。请按验收标准逐条核对清单：① 每项功能与返回结构字段；② 所有参数范围校验、异常抛错条件与边界输入（缺失校验分支必须判 rework）；③ 若存在或要求同步更新既有测试，测试必须实际全部通过（快照失败必须判 rework）。信息充足时直接一步输出单行 JSON 裁决；当前待签名交付版本为 result_id="${source.id}"。`
 					: "\n核对引用中的完整交付和证据；资料不足应 block，发现缺陷应 rework。";
 				const args: DispatchArgs = { task: `独立复核任务 ${item.id}：${item.title}。你不是执行者，不得修改交付或代码，不得降低验收标准。\n验收标准：${item.acceptance ?? "逐项核对结论与证据"}${scopeNote}\n机器规则：${JSON.stringify(item.checks ?? [])}${codeSummary}${blindNote}\n仅输出简明单行 JSON（不要长篇分析）：{"verdict":"accept|rework|block","result_id":"${source.id}","evidence":"一句话依据或具体缺口"}。`, ...(reviewInputs.length ? { inputs: reviewInputs } : {}), ...(changed?.files.length ? { based_on: changed.id, readonly: true } : {}), ...(item.reviewer.model ? { model: item.reviewer.model } : {}) };
 				const job = await enqueue(tx, controller, `checker:${item.id}:${source.id}`, member, args, item.reviewer.model);
@@ -150,7 +182,7 @@ export function createTaskWorkflow(deps: DispatchDeps, available: Set<string>, e
 				const reworks = item.checksByMember?.filter((entry) => entry.status === "rework").length ?? 0;
 				if (!reworks || reworks > item.automation.maxReworks) { item.status = "blocked"; item.notes.push("独立复核返工次数已达上限，保留证据交给人工处理。"); continue; }
 				try {
-					const prepared = await prepareRecovery(tx, controller, config, changes, { id: item.id, action: "resume", note: `独立复核要求返工：${item.review!.evidence}\n请针对上述具体缺口精准修复，并在工作区运行一条最小边界验证（如 node -e 或单元测试）确认覆盖后再交付。` }, `workflow-rework:${item.id}:${item.latestResult}`, at);
+					const prepared = await prepareRecovery(tx, controller, config, changes, { id: item.id, action: "resume", note: `独立复核要求返工：${item.review!.evidence}\n请针对上述具体缺口精准修复，并在工作区运行一条不含分号 ; 与管道符的单条命令（如 node --test <目标测试文件> 或 node --check <文件>）确认后立即交付。` }, `workflow-rework:${item.id}:${item.latestResult}`, at);
 					if (!prepared.dispatch) continue; args = prepared.dispatch;
 				} catch (error) { item.status = "blocked"; item.notes.push(`自动返工未启动：${error instanceof Error ? error.message : String(error)}`); continue; }
 			} else {

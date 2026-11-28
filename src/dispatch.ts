@@ -456,14 +456,17 @@ export async function runDispatch(kind: AgentKind, command: string[], deps: Disp
 	const canReuse = args.context_mode !== "full" && !!priorContext && (!agent.api || priorContext.head === head);
 	if (canReuse && priorContext!.fingerprint === contextState.fingerprint && brief) brief = `【续接上下文】项目目标与任务约束未变化，沿用本会话已有资料${args.task_id ? `；任务 ${args.task_id}` : ""}。只处理本次增量；无法确认已有资料时明确提出缺口。\n\n【本次要做的事】\n`;
 	const fastPath = Boolean(args.fast_path && !args.task_id);
-	let prompt = `${brief}${args.task}`;
+	const scopeBanner = taskScope && !readonlyMode
+		? `【路径契约硬约束（违反将被系统拦截重试）】${taskScope.allow?.length ? `仅允许写/改：${taskScope.allow.join("、")}` : ""}${taskScope.allow?.length && taskScope.forbid?.length ? " | " : ""}${taskScope.forbid?.length ? `严禁触碰：${taskScope.forbid.join("、")}` : ""}\n\n`
+		: "";
+	let prompt = `${scopeBanner}${brief}${args.task}`;
 	if (fastPath) {
 		const preloaded = inlineReferencedFiles(cwd, args.task);
 		prompt = `【单跳快路】直接一步调用 edit 或 write 完成最小精准修改（内置即时语法诊断），改完后不要调 list_files、git_diff 或 bash，直接一句话收尾即可。\n\n${prompt}${preloaded ? `\n\n【快路预读取目标文件（已最新，可直接 edit/write，无需再 read）】\n${preloaded}` : ""}`;
 	} else if (!args.session_id && !readonlyMode && codeWorkspace) {
 		const preloaded = inlineReferencedFiles(cwd, args.task);
 		if (preloaded) {
-			prompt = `${prompt}\n\n【预读取目标/关联文件（已最新，可直接基于下列内容动手修改或编写测试，减少首轮 list_files/read 探索）】\n${preloaded}`;
+			prompt = `${prompt}\n\n【预读取目标/关联文件（已最新，无需再 list_files 或重复 read 下列文件，请直接基于此内容 edit/write 或编写测试）】\n${preloaded}`;
 		}
 	}
 	if (recoveryEvidence) prompt += `\n\n${recoveryEvidence}`;

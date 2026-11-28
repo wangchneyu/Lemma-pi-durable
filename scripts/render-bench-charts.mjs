@@ -136,6 +136,15 @@ function summarizeRuns(runs) {
 			}
 		}
 	}
+	const byTask = new Map();
+	for (const r of runs) {
+		const list = byTask.get(r.taskId) ?? [];
+		list.push(r);
+		byTask.set(r.taskId, list);
+	}
+	const distinctTasks = byTask.size;
+	const maxTaskRepeats = distinctTasks ? Math.max(...[...byTask.values()].map((arr) => arr.length)) : 1;
+	const passAllK = maxTaskRepeats > 1 ? [...byTask.values()].filter((arr) => arr.every((x) => x.success)).length : null;
 	return {
 		total,
 		passed,
@@ -154,6 +163,9 @@ function summarizeRuns(runs) {
 		selfHealed,
 		routingMatched,
 		preFlightIntercepts,
+		distinctTasks,
+		maxTaskRepeats,
+		passAllK,
 		statusCounts: hasStatus ? statusCounts : null,
 	};
 }
@@ -736,6 +748,7 @@ function buildReadmeBenchSection({ baseline, tier1Source, optBatches, latestComp
 		const s = row.s;
 		const routeStr = s.routingMatched !== null ? `${s.routingMatched}/${s.total} (${fmtPct(s.routingMatched, s.total)})` : "—";
 		const extra = [
+			s.passAllK !== null ? `Pass^${s.maxTaskRepeats} ${s.passAllK}/${s.distinctTasks}` : "",
 			s.fastPathHits ? `快路 ${s.fastPathHits}` : "",
 			s.scopeCaught ? `契约拦截 ${s.scopeCaught}` : "",
 			s.selfHealed ? `自愈 ${s.selfHealed}` : "",

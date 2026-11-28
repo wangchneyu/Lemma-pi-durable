@@ -269,4 +269,33 @@ check(
 	"P2 Markdown 报告包含独立主表、Tier-Edge 分节与新增 3 项指标列",
 );
 
+// 7. 验证多轮重复（repeats=3）Pass@k / Pass^k / 均值±标准差统计与 skipRun 断点跳过机制
+const repeatRuns = await runTieredCodingBenchmark({
+	base,
+	simulated: true,
+	tiers: [1],
+	taskIds: ["t1-slugify-fix"],
+	arms: ["lemma-adaptive"],
+	repeats: 3,
+	skipRun: (_task, _arm, rep) => rep === 1,
+});
+check(
+	repeatRuns.length === 2 && repeatRuns.map((r) => r.repeat).join(",") === "0,2",
+	`skipRun 断点跳过机制正确跳过已完成的 repeat=1（实际执行 repeat=${repeatRuns.map((r) => r.repeat).join(",")}）`,
+);
+const repeatReport = renderCodingBenchmarkReport(
+	{ revision: "test-repeat", dirty: false, simulated: true, model: "scripted-fixture", repeats: 3 },
+	[
+		...repeatRuns,
+		{ ...repeatRuns[0]!, repeat: 1, status: "TIMEOUT", success: false, hiddenPassed: 1, requests: 9, durationMs: 9000 },
+	],
+);
+check(
+	repeatReport.includes("多轮稳定性统计") &&
+		repeatReport.includes("Pass@3 = **1/1 (100%)**") &&
+		repeatReport.includes("Pass^3（全轮稳定通过）= **0/1 (0%)**") &&
+		repeatReport.includes("±"),
+	"repeats=3 报告正确计算 Pass@k、Pass^k 与均值±标准差统计",
+);
+
 console.log("\nP2 分层编码基准与消融评测套件测试全部通过 ✅");
